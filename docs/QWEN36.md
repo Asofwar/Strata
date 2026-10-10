@@ -88,6 +88,22 @@ cache happened to hold.
 A 256K context (setup's 256K choice) runs on the 12 GB card too: UD-IQ3_S wrote 78 tokens/s and read the 8K prompt
 at 3,802 tokens/s with it (the engine keeps 393 MiB beside the expert cache for the attention over the whole context).
 
+Long prompts: the prompt path's attention gives each block of the tensor-core kernel 8 neighbouring queries, so each
+chunk of K/V is read once for all 8 (sm_80+, fp16 or 8-bit K/V; `STRATA_PROMPT_ATTN_DENSE=0` goes back to one block
+per query). A 150K-token agentic transcript (KAT i-quality-v2, 262K context, all K/V in VRAM, nothing else on the GPU; the
+prompt chunk `auto` picks is 2,816 tokens with fp16 K/V and 8,192 with 8-bit), read in one request:
+
+| K/V | One block per query | 8 queries per block | llama.cpp (q8_0 K/V, `-ncmoe 18`) |
+|---|---|---|---|
+| fp16 | 771 s (99 tokens/s at 146K) | 133 s (714 tokens/s at 146K) | 417 s |
+| 8-bit | 170 s (500 tokens/s at 140K) | 113 s (781 tokens/s at 140K) | |
+
+The attention's share of the prompt fell from 93% to 61% (fp16) and from 83% to 75% (8-bit). Against llama.cpp on
+the same transcript cut at 88K, 118K and 150K tokens, the teacher-forced KL past the first token stayed at 0.0036 or
+below with 584-585 of 585 top-1 tokens the same (fp16; 8-bit: 0.0028 or below, 583 of 585); before the change
+the fp16 figures were 0.0028 and 583-584. `qsa_prompt_attn_parity` checks it against the old kernel and an FP64
+reference (at 32K: within 4.2e-6 of FP64, as the old kernel; 5.7x faster with fp16 K/V, 1.6x with 8-bit).
+
 The draft layer's drafts are accepted 0.84-0.96 of the time on these prompts (2.4-3.1 tokens per verify window).
 Through the server, chat answers with thinking ran at 104-118 tokens/s (UD-IQ4_XS, 12 GB).
 
