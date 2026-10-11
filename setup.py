@@ -71,6 +71,7 @@ HF_REVISIONS = {
     "unsloth/Qwen3.8-Flash-Next-GGUF": "38bb39ee97821de2c9009abb7e93950eec396e66",                   # 2026-09-30
     "unsloth/Qwen3.6-35B-A3B-MTP-GGUF": "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d",
     "bartowski/Ornith-1.5-35B-A3B-GGUF": "64b0493d34a5ca4c1b4ad67bb99b41d74b4f07d6",
+    "bartowski/Qwen_Qwen3.6-35B-A3B-GGUF": "5c2410d71524f4f72b023ce8daf7a80528226d5f",   # its mmproj (images)
 }
 
 
@@ -349,23 +350,25 @@ FAMILIES = {
                 "sha256": {**UNSLOTH_SHARDS, **UNSLOTH_IQ4_XS_SHARDS}},
     # Qwen3.6-35B-A3B (general.architecture qwen35moe): one GGUF file, no PLE table (no --ple-gguf), its MTP draft
     # layer inside the file (blk.40: --mtp is the model file, nothing else is fetched), the pack built like Unsloth's
-    # (--compat-bf16).  No images yet; one GPU (no layer split yet); its batched prompt path is NVIDIA-only (sm_75+)
-    # and it has not been run on AMD.  Suggested where no Flash-Next size fits the RAM (qwen36_recommended).
+    # (--compat-bf16).  Images: the stock encoder (tools/vision) reads Qwen3.6's mmproj, bartowski's copy for its
+    # distinct name (Unsloth's is "mmproj-BF16.gguf"); one GPU (no layer split yet); its batched prompt path is
+    # NVIDIA-only (sm_75+) and it has not been run on AMD.  Suggested where no Flash-Next size fits the RAM (qwen36_recommended).
     "qwen36": {"title": "Qwen3.6-35B-A3B", "by": "Qwen's smaller MoE; Unsloth's GGUFs with its MTP layer",
-               "about": "a smaller model for 16-32 GB of RAM and 8-12 GB cards (18 GB download); no images yet",
+               "about": "a smaller model for 16-32 GB of RAM and 8-12 GB cards (18 GB download)",
                "hf": hf("unsloth/Qwen3.6-35B-A3B-MTP-GGUF"), "file": "Qwen3.6-35B-A3B-{q}.gguf", "shards": 1,
-               "tag": "qwen36-", "mmproj_hf": hf("unsloth/Qwen3.6-35B-A3B-MTP-GGUF"), "mmproj": None, "name": "qwen3.6-35b-a3b", "vision": False,
+               "tag": "qwen36-", "mmproj_hf": hf("bartowski/Qwen_Qwen3.6-35B-A3B-GGUF"),
+               "mmproj": "mmproj-Qwen_Qwen3.6-35B-A3B-bf16.gguf", "name": "qwen3.6-35b-a3b",
                "pack_args": ["--compat-bf16"], "sha256": QWEN36_FILES, "profile": "expert-profile-qwen36.bin",
                "license": "Apache 2.0: https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
                "own_mtp": True, "ple": False, "one_gpu": True, "nvidia_only": True},
     # Ornith-1.5-35B-A3B: a fine-tune of the same architecture (agentic coding), the same engine path as qwen36 (its
     # draft layer in the file, no PLE, one GPU, NVIDIA's batched prompt path); the Qwen3.6 expert profile and draft
-    # vocabulary apply (the same geometry and tokenizer).
+    # vocabulary apply (the same geometry and tokenizer).  Images: bartowski's mmproj of it.
     "ornith": {"title": "Ornith-1.5-35B-A3B", "by": "ornith-ai's agentic-coding fine-tune of the same 35B-A3B model",
-               "about": "Qwen3.6-35B-A3B's size, tuned for coding agents (19 GB download); no images yet",
+               "about": "Qwen3.6-35B-A3B's size, tuned for coding agents (19 GB download)",
                "hf": hf("bartowski/Ornith-1.5-35B-A3B-GGUF"), "file": "Ornith-1.5-35B-A3B-{q}.gguf", "shards": 1,
-               "tag": "ornith15-", "mmproj_hf": hf("bartowski/Ornith-1.5-35B-A3B-GGUF"), "mmproj": None,
-               "name": "ornith-1.5-35b-a3b", "vision": False,
+               "tag": "ornith15-", "mmproj_hf": hf("bartowski/Ornith-1.5-35B-A3B-GGUF"),
+               "mmproj": "mmproj-Ornith-1.5-35B-A3B-bf16.gguf", "name": "ornith-1.5-35b-a3b",
                "pack_args": ["--compat-bf16"], "sha256": ORNITH_FILES, "profile": "expert-profile-qwen36.bin",
                "license": "MIT: https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B",
                "own_mtp": True, "ple": False, "one_gpu": True, "nvidia_only": True},
@@ -375,6 +378,8 @@ MMPROJ = "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
 ESP_VECTOR = ROOT / "data" / "experimental-speed-projection" / "Qwen3.8-Flash-Next-experimental-speed-projection.gguf"
 # the image encoder on the GPU (~1.2 GB at 1024 image tokens) warms up before the engine starts, so the engine
 # sizes its expert slots around it and the default reserve (700 MiB) is enough; engines before 0.1.2 need more
+# Qwen3.6's image encoder on the GPU (BF16 mmproj, CUDA): 1,254 MiB in nvidia-smi before any picture (4070 Ti)
+VISION_GPU_QWEN36_MIB = 1254
 VISION_GPU_SMALL_RESERVE_MIB = 1000    # the tip for images on a <= 12 GB card (the engine's LOW line asked ~1003)
 VISION = {"gpu": {"max_tokens": 1024, "reserve_mib": 700},
           "cpu": {"max_tokens": 300, "reserve_mib": 700}}
@@ -4741,10 +4746,11 @@ def arg_after(args, flag):
     return args[args.index(flag) + 1] if flag in args[:-1] else None
 
 
-def bench_tips(args, env, ram: float, model_ram_gb: float, vram_gb: float, vision: str, win: bool) -> list[str]:
+def bench_tips(args, env, ram: float, model_ram_gb: float, vram_gb: float, vision: str, win: bool,
+               small: bool = False) -> list[str]:
     """Recommendations from the community bench data (plan 0.1.40 item 14).  Text only: nothing here changes a
     default, the config or the engine's arguments (recommend, never force).  `ram` is this PC's RAM, `model_ram_gb`
-    what the chosen model keeps in it."""
+    what the chosen model keeps in it; `small`: a 35B-A3B model (small_family)."""
     tips = []
     cache = arg_after(args, "--expert-cache")
     if win and cache is not None and cache != "auto":
@@ -4766,7 +4772,8 @@ def bench_tips(args, env, ram: float, model_ram_gb: float, vram_gb: float, visio
         tips.append(f"tip: for several agents or clients at once, --conversation-cache-mib {AGENT_CACHE_MIB} in the "
                     "config's args keeps each one's conversation; without it they were measured re-reading ~90% of "
                     "their prompts (#882 #440; docs/DETAILS.md, Multiple conversations)")
-    if vision == "gpu" and 0 < vram_gb <= SMALL_VISION_VRAM_GB:
+    # Not the 35B-A3B models: Ornith IQ4_XS on a 4070 Ti read a 24K-token prompt at ~4,130 tok/s with or without it
+    if vision == "gpu" and 0 < vram_gb <= SMALL_VISION_VRAM_GB and not small:
         tips.append("tip: the image encoder on the GPU makes a prompt's chunks smaller on a card this size (243 vs 750 "
                     "tok/s measured, #469); run setup again with --vision cpu to read prompts ~3x faster, at about "
                     "2-3 s per picture")
@@ -5585,7 +5592,8 @@ def main() -> int:
     else:
         say()
         say("  Images: the model can also read pictures (screenshots, photos, scanned pages). This adds a 0.9 GB")
-        say("  download and keeps ~1.4 GB of VRAM free for the image encoder, so text is a few % slower.")
+        room = (VISION_GPU_QWEN36_MIB + VISION["gpu"]["reserve_mib"]) / 1024 if small_family(family) else 1.4
+        say(f"  download and keeps ~{room:.1f} GB of VRAM free for the image encoder, so text is a few % slower.")
         vision = "gpu" if ask("Do you want images?", ["y", "n"], "n", a.yes) == "y" else "none"
     ok("images: " + {"none": "off", "gpu": "on", "cpu": "on (encoder on the CPU)"}[vision])
     if vision != "none" and MODELS[model].get("vision_untested"):
@@ -5779,7 +5787,7 @@ def main() -> int:
         if s.name in fam.get("sha256", {}):
             verify_sha256(s, *fam["sha256"][s.name])
     ok("model files present")
-    mmproj = Path(a.models_dir) / (fam["mmproj"] or "none")   # (Qwen3.6-35B-A3B: no image encoder yet)
+    mmproj = Path(a.models_dir) / (fam["mmproj"] or "none")
     if fam["mmproj"] and not mmproj.exists():
         mmproj = find_in(roots, f"models/{fam['mmproj']}") or mmproj
     if vision != "none":
@@ -5909,6 +5917,9 @@ def main() -> int:
     if small_family(family) and ctx >= 65536 and not is_wsl():
         free = gpu_free_gb(gpu["index"]) if gpu.get("vendor", "nvidia") == "nvidia" and "index" in gpu else None
         card = f"the {gpu.get('vram_gb', 0.0):.0f} GB card" + (f" has {free:.1f} GB free now" if free is not None else "")
+        if free is not None and vision == "gpu":   # the encoder starts before the engine and takes its share first
+            free -= (VISION_GPU_QWEN36_MIB + VISION["gpu"]["reserve_mib"]) / 1024
+            card += f", {free:.1f} GB beside the image encoder"
         later = (f"  To change it later: \"--kv-resident\", \"32768\" in strata-{tag.lower()}.json's args, or run",
                  "  setup again with --kv-streaming on|off.")
         required = free is not None and free < 9.0 and ctx >= 131072
@@ -6100,7 +6111,8 @@ def main() -> int:
         cfg["args"] = recommend_pool_workers(cfg["args"])
         for line in two_socket_note(cpu_sockets()):    # bench tips: text only, the config is not touched
             say("  " + line)
-    for line in bench_tips(cfg["args"], cfg.get("env"), ram, MODELS[model]["ram_gb"], gpu.get("vram_gb", 0.0), vision, WIN):
+    for line in bench_tips(cfg["args"], cfg.get("env"), ram, MODELS[model]["ram_gb"], gpu.get("vram_gb", 0.0), vision, WIN,
+                           small_family(family)):
         say("  " + line)
     write_setup_config(cfg_path, cfg, adopted if adopted is not None and adopted.name == cfg_path.name else None)
     script = write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)

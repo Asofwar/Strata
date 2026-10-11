@@ -180,6 +180,14 @@ added (Coder, three short prompts and an 8K prompt, back to back on the same PC)
   (on the 4070 Ti, made to take that path: a 9,800-token prompt in 113 s, ~87 tokens/s, against 3.9 s batched). It
   has not been run on an AMD or a pre-RTX 20 card; setup says so and asks before the download.
 - **One GPU.** The layer split across several cards is not done for this model.
-- **No images** yet (its vision encoder is not wired in).
+- **Images** use the stock encoder (`tools/vision`, built by setup) with the model's mmproj: bartowski's
+  `mmproj-Qwen_Qwen3.6-35B-A3B-bf16.gguf` for Qwen3.6 and its fine-tunes that ship none (KAT-Coder), bartowski's
+  `mmproj-Ornith-1.5-35B-A3B-bf16.gguf` for Ornith. The engine needed no change (moondrop12138 found it working on an
+  RTX 5070 Ti). Measured on the RTX 4070 Ti, 32K context: Ornith IQ4_XS and KAT i-quality-v2 read a test picture
+  (three shapes and a caption) right over both APIs, ~288 prompt tokens each; a 1920x1200 photo took 1,019 tokens
+  and 6.2 s with its answer. The encoder on the GPU holds 1,254 MiB, so setup counts it (and the 700 MiB reserve
+  for it) when it decides on KV streaming; with it Ornith wrote ~5% slower (135 vs 143 tokens/s, the mean of 12
+  replies) and read a 24K-token prompt as fast (~4,130 tokens/s either way). Not run: Qwen3.6's own files with
+  images, the encoder on the CPU beyond one test, AMD.
 - The low-RAM mode (`--resident-experts`) gives the same tokens as the normal mode on this PC (UD-IQ3_S: 9.0 GiB of
   experts held in RAM); it has not been measured on a 16 GB PC.

@@ -56,7 +56,8 @@ class Tables(unittest.TestCase):
         self.assertEqual(fam["hf"], BASE)
         self.assertEqual(fam["pack_args"], ["--compat-bf16"])
         self.assertEqual(fam["profile"], "expert-profile-qwen36.bin")
-        self.assertIs(fam["vision"], False)
+        self.assertNotIn("vision", fam)                                     # images: Qwen3.6's mmproj (bartowski's)
+        self.assertEqual(fam["mmproj"], "mmproj-Qwen_Qwen3.6-35B-A3B-bf16.gguf")
         self.assertTrue(fam["own_mtp"] and fam["one_gpu"] and fam["nvidia_only"])
         self.assertIs(fam["ple"], False)
         self.assertIn("Apache 2.0", fam["license"])
@@ -342,12 +343,18 @@ class Install(Base):
         self.assertEqual(code, 0, out)
         self.assertEqual(self.builds, [])
 
-    def test_no_images(self):
+    def test_images(self):
         code, out, cfg = self.main(["--family", "qwen36", "--model", "UD-IQ4_XS", "--vision", "yes"])
         self.assertEqual(code, 0, out)
-        self.assertIn("images are not available", out)
-        self.assertNotIn("vision", cfg)
-        self.assertEqual(self.downloads, [BASE + F_IQ4])
+        mmproj = self.t / "data" / "models" / "mmproj-Qwen_Qwen3.6-35B-A3B-bf16.gguf"
+        self.assertEqual(self.downloads[0], BASE + F_IQ4)
+        self.assertTrue(self.downloads[1].endswith("/bartowski/Qwen_Qwen3.6-35B-A3B-GGUF/resolve/"
+                                                   "5c2410d71524f4f72b023ce8daf7a80528226d5f/" + "mmproj-Qwen_Qwen3.6-35B-A3B-bf16.gguf"))
+        self.assertEqual(len(self.downloads), 2)
+        self.assertEqual(cfg["vision"]["mmproj"], str(mmproj))
+        self.assertIs(cfg["vision"]["gpu"], True)
+        self.assertEqual(cfg["args"][-3:], ["--vision", "--vram-reserve-mib", "700"])
+        self.assertNotIn("--vision cpu", out)                       # the prompt chunks keep their size (measured)
 
     def test_disk_space_counts_no_mtp(self):
         code, out, cfg = self.main(["--family", "qwen36", "--model", "UD-IQ4_XS"], free=19.0)
@@ -528,6 +535,14 @@ class KvStreaming(Base):
                 self.assertEqual(code, 0, out)
                 self.assertEqual(len(self.asked_q()), 1)
                 self.assertNotIn("is needed here", out)
+
+    def test_the_image_encoder_takes_its_share_first(self):
+        code, out, cfg = self.run_ctx(131072, 11.99, 10.0, answers={}, extra=("--vision", "yes"))  # 10.0 - 1.9
+        self.assertEqual(code, 0, out)
+        self.assertFalse(self.asked_q())
+        self.assertEqual(arg(cfg, "--kv-resident"), "32768")
+        self.assertIn("has 10.0 GB free now, 8.1 GB beside the image encoder", out)
+        self.assertIn("KV streaming is needed here", out)
 
     def test_the_option_answers_it(self):
         code, out, cfg = self.run_ctx(65536, 7.99, 7.9, answers={}, extra=("--kv-streaming", "on"))
