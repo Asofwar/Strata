@@ -742,9 +742,10 @@ function assistantMessages(m) {
   // #1392: a turn with no answer text (only reasoning, a stop before the first content token, or an error) still goes
   // back as an assistant turn, so the history keeps alternating and a reasoning model sees that it already answered.
   // The server leaves such a turn out of the prompt itself (serve/frontend.py, #843); reasoning_content rides along.
+  // The reasoning rides along on every turn too, so a server set to preserve_thinking keeps earlier thinking in the prompt.
   if (!ran.length) {
     const msg = {role: "assistant", content: m.text || ""};
-    if (!m.text && m.reasoning) msg.reasoning_content = m.reasoning;
+    if (m.reasoning) msg.reasoning_content = m.reasoning;
     return [msg];
   }
   const out = [];

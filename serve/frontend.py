@@ -68,9 +68,9 @@ class ChatTemplate:
     def _detect_caps(self) -> dict[str, bool]:
         """llama.cpp's capability names, checked at load time against this template and Strata's tool-call format.
         These are rendering hints, not a guarantee that the model will follow a request."""
-        def render(messages, tools=None):
+        def render(messages, tools=None, **kwargs):
             try:
-                return self.render(messages, tools=tools)
+                return self.render(messages, tools=tools, **kwargs)
             except Exception as exc:                # noqa: BLE001 - a hint only: never stop the server for a probe
                 # A template may reject a role or feature (a custom one may fail in any way): the feature is off,
                 # discovery still answers for the others, and the start-up goes on.
@@ -110,7 +110,7 @@ class ChatTemplate:
                 "supports_system_role": "strata_caps_system" in render(
                     [{"role": "system", "content": "strata_caps_system"}, user]),
                 "supports_parallel_tool_calls": calls_supported(2),
-                "supports_preserve_reasoning": "strata_caps_reasoning" in render(history)}
+                "supports_preserve_reasoning": "strata_caps_reasoning" in render(history, preserve_thinking=True)}
 
 
 # ------------------------------------------------------------------------------------------------ requests
@@ -465,6 +465,8 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
             kwargs = {"enable_thinking": False}
         elif k == "reasoning_effort" and "enable_thinking" not in kwargs:
             kwargs.update(effort_kwargs(v))
+        elif k == "preserve_thinking":
+            kwargs["preserve_thinking"] = bool(v)
     return _late_system_to_user(messages), tools, kwargs
 
 
@@ -561,6 +563,11 @@ def anthropic_to_messages(req: dict, think_unasked: bool = True) -> tuple[list[d
         # A config's reasoning_effort still applies: Service.with_shared sets output_config before this runs.  A
         # request that gives its own reasoning_budget_tokens (#123) asks for thinking, so it thinks as before.
         kwargs["enable_thinking"] = False
+    # Not part of Anthropic's API: llama.cpp's chat_template_kwargs, for preserve_thinking only (the shared Chat
+    # settings or the config fill it, Service.with_shared), so earlier thinking blocks reach the template
+    ctk = req.get("chat_template_kwargs") if isinstance(req.get("chat_template_kwargs"), dict) else {}
+    if "preserve_thinking" in ctk:
+        kwargs["preserve_thinking"] = bool(ctk["preserve_thinking"])
     return _late_system_to_user(messages), tools, kwargs
 
 

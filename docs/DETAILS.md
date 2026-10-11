@@ -725,6 +725,14 @@ print(r.choices[0].message.content)
   `high`) in `strata-<model>.json`, outside `"args"` (#1641): the engine has no such option, and `--reasoning-effort` in
   `"args"` is moved to this key with a note at startup. The web app's shared Chat settings ("Use for other apps too") and a
   request's own level win over it.
+- **Keep the thinking of earlier turns (opt-in).** A chat template decides whether the thinking of turns before the
+  latest user message goes back into the prompt; Qwen3.6's, Ornith's and KAT-Coder's leave it out unless
+  `preserve_thinking` is set (Flash-Next's keep it). `"preserve_thinking": true` in `strata-<model>.json` sets it for
+  every request, on both APIs (llama.cpp's `--reasoning-preserve`); `false` leaves it out on templates that keep it. A
+  request can set its own with `"chat_template_kwargs": {"preserve_thinking": true}` (OpenAI, and on the Anthropic API
+  as a Strata extension), and `"preserve_thinking"` in the shared Chat settings (`POST /settings`) wins over the
+  config. The client has to send the earlier thinking back (`reasoning_content`, or Anthropic `thinking` blocks), as
+  the web app does. Kept thinking makes every prompt longer. Off by default: the template's own choice.
 - **Keep Windows awake while it works (opt-in, #1727).** `"prevent_sleep": true` in `strata-<model>.json` keeps the PC
   from going to sleep while at least one request is running or waiting (Windows' `SetThreadExecutionState` with
   `ES_SYSTEM_REQUIRED`; the screen may still turn off), and gives the normal sleep rules back when the server is idle
