@@ -748,6 +748,14 @@ print(r.choices[0].message.content)
   `high`) in `strata-<model>.json`, outside `"args"` (#1641): the engine has no such option, and `--reasoning-effort` in
   `"args"` is moved to this key with a note at startup. The web app's shared Chat settings ("Use for other apps too") and a
   request's own level win over it.
+- **Keep the thinking of earlier turns (opt-in).** A chat template decides whether the thinking of turns before the
+  latest user message goes back into the prompt; Qwen3.6's, Ornith's and KAT-Coder's leave it out unless
+  `preserve_thinking` is set (Flash-Next's keep it). `"preserve_thinking": true` in `strata-<model>.json` sets it for
+  every request, on both APIs (llama.cpp's `--reasoning-preserve`); `false` leaves it out on templates that keep it. A
+  request can set its own with `"chat_template_kwargs": {"preserve_thinking": true}` (OpenAI, and on the Anthropic API
+  as a Strata extension), and `"preserve_thinking"` in the shared Chat settings (`POST /settings`) wins over the
+  config. The client has to send the earlier thinking back (`reasoning_content`, or Anthropic `thinking` blocks), as
+  the web app does. Kept thinking makes every prompt longer. Off by default: the template's own choice.
 - **Keep Windows awake while it works (opt-in, #1727).** `"prevent_sleep": true` in `strata-<model>.json` keeps the PC
   from going to sleep while at least one request is running or waiting (Windows' `SetThreadExecutionState` with
   `ES_SYSTEM_REQUIRED`; the screen may still turn off), and gives the normal sleep rules back when the server is idle
@@ -1622,7 +1630,8 @@ Since 0.1.43 the same default holds on HIP for gfx1200 / gfx1201 (RDNA4), under 
 
 Where it applies: serve on a CUDA build with one GPU or a layer split (every stage skips by itself). Not applied, and no line printed: when every expert is
 in VRAM (nothing is missed), with `--batch` / `parallel` slots (a window then mixes requests, and one request's skip would depend on another's
-tokens: kept off until measured), with a peer-expert tier or a helper GPU, on HIP and SYCL builds, and (0.1.42.1, #1884) when 90% or more
+tokens: kept off until measured), with a peer-expert tier or a helper GPU, on HIP and SYCL builds, for the qwen35moe models (Qwen3.6-35B-A3B and its fine-tunes: measured
+on Flash-Next's 10-of-512 routing only; `STRATA_ROUTE_TAIL_SKIP=7` turns it on there), and (0.1.42.1, #1884) when 90% or more
 of all the experts are in the GPU cache: the few misses are cheap there and the skip costs more draft acceptance than it saves (a Tesla V100 32 GB
 with Coder IQ1_M, 94.8% of the experts cached, 99.9% decode hits: draft acceptance 70.1% to 68.2%, decode 1-2% slower than 0.1.41). A start-up line
 says so; `STRATA_ROUTE_TAIL_SKIP=7` turns it on anyway, and `STRATA_TAIL_SKIP_MAX_CACHED=<percent>` moves the line (101 = never). On an AMD layer split the line is 60% (2x R9700 at 16 GB-equivalent: Q2_0 with 73% cached lost 6.1% story decode with the skip, IQ3_S with 45% cached gained 7-10%). The request log gets
