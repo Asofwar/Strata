@@ -8047,7 +8047,9 @@ int main(int argc, char** argv) {
             // estimate must stay uncapped: it counts the retained buffers'
             // capacity and directories, and put() charges that same true size -
             // a capped figure would under-evict and overfill the budget.
-            if (!conversations.make_room(estimate, held)) {
+            // #2255: the outgoing chain's pinned prefixes count as held, so a parked copy of one may make room
+            const strata::core::ConversationPins pins{&view.checkpoints, cvec_cached};
+            if (!conversations.make_room(estimate, held, pins)) {
                 std::fprintf(stderr, "strata serve: conversation cache: skip parking (snapshot %zu MiB exceeds available budget)\n",
                              estimate >> 20);
                 return true;
@@ -8075,7 +8077,7 @@ int main(int argc, char** argv) {
                         mem ? std::optional<uint64_t>(mem->available) : std::nullopt, additional, floor);
                 };
                 while (!admit() && conversations.size() > 0 && evicted < conversations.slots() &&
-                       conversations.evict_oldest())
+                       conversations.evict_oldest(pins))
                     ++evicted;
                 if (!admit()) {
                     std::fprintf(stderr, "strata serve: conversation cache: skip parking (physical RAM admission; need %zu MiB plus %lld MiB floor, %s; evicted %zu, %zu still parked)\n",
