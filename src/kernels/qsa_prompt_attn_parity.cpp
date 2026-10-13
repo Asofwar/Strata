@@ -300,9 +300,10 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
 }
 // Dense (Qwen3.6: 16 query heads, 2 KV heads, no selection - query i reads cells 0..pos): the 8-query kernel against the
 // per-query tensor-core kernel it replaces (STRATA_PROMPT_ATTN_DENSE=0) and an FP64 reference. Same two checks as run().
-int run_dense(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16
+// `wide`: the 8-warp kernel (STRATA_PROMPT_ATTN_DENSE=2, int8 K/V) against the 8-query one, which it must match bitwise.
+int run_dense(int fmt, int64_t ctx, int64_t nq, int reps, bool wide = false) {   // fmt 1 int8, 0 fp16
 #if defined(__HIPCC__) || defined(STRATA_USE_HIP)
-    (void) fmt; (void) ctx; (void) nq; (void) reps;
+    (void) fmt; (void) ctx; (void) nq; (void) reps; (void) wide;
     return 0;
 #else
     {
@@ -349,10 +350,11 @@ int run_dense(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 f
     ck(cudaMalloc(&d_old, nq * NH * HD * 4), "malloc");
     ck(cudaMalloc(&d_new, nq * NH * HD * 4), "malloc");
     auto go = [&](bool dense, float* out) {
+        const char* mode = wide ? (dense ? "2" : "1") : (dense ? "1" : "0");
 #if defined(_WIN32)
-        _putenv_s("STRATA_PROMPT_ATTN_DENSE", dense ? "1" : "0");
+        _putenv_s("STRATA_PROMPT_ATTN_DENSE", mode);
 #else
-        setenv("STRATA_PROMPT_ATTN_DENSE", dense ? "1" : "0", 1);
+        setenv("STRATA_PROMPT_ATTN_DENSE", mode, 1);
 #endif
         if (!k::qsa_prompt_attn_batch(d_q, pl, nullptr, d_steps, 0, s, out, nq, nullptr)) {
             std::fprintf(stderr, "qsa_prompt_attn_batch refused the dense call\n");
@@ -427,10 +429,10 @@ int run_dense(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 f
     unsetenv("STRATA_PROMPT_ATTN_DENSE");
 #endif
     const bool ok1 = err_new <= std::max(4.0 * err_old, 1e-6 * ref_scale);
-    const bool ok2 = finite && diff <= 1e-4 * scale;
-    std::printf("%s dense %s ctx %lld, %lld queries: vs FP64 old %.3g new %.3g (output scale %.3g); new vs old %.3g (%.2g of "
+    const bool ok2 = finite && (wide ? std::memcmp(o.data(), nw.data(), o.size() * 4) == 0 : diff <= 1e-4 * scale);
+    std::printf("%s dense%s %s ctx %lld, %lld queries: vs FP64 old %.3g new %.3g (output scale %.3g); new vs old %.3g (%.2g of "
                 "scale); %.3f -> %.3f ms per chunk (%.2fx)\n",
-                ok1 && ok2 ? "PASS" : "FAIL", fmt == 1 ? "int8" : "fp16", (long long) ctx, (long long) nq, err_old, err_new,
+                ok1 && ok2 ? "PASS" : "FAIL", wide ? " 8-warp (bitwise)" : "", fmt == 1 ? "int8" : "fp16", (long long) ctx, (long long) nq, err_old, err_new,
                 ref_scale, diff, diff / scale, ms_old / reps, ms_new / reps, ms_old / ms_new);
     cudaFree((void*) d_steps); cudaFree((void*) d_q); cudaFree(d_old); cudaFree(d_new);
     cudaFree((void*) pl.k_q); cudaFree((void*) pl.v_q); cudaFree((void*) pl.k_scale); cudaFree((void*) pl.v_scale);
@@ -476,6 +478,8 @@ int main(int argc, char** argv) {
     fails += run_dense(0, ctx, nq, reps);
     fails += run_dense(1, 1000, 37, reps);
     fails += run_dense(0, 1000, 37, reps);
+    fails += run_dense(1, ctx, nq, reps, true);
+    fails += run_dense(1, 1000, 37, reps, true);
     std::printf("FAILURES: %d\n", fails);
     return fails;
 }

@@ -1131,6 +1131,319 @@ bool launch_dense(const float* q, const QsaAttnPools& pools, const int32_t* step
 }
 
 
+// ---- the same dense attention with 8 warps per block (opt-in, STRATA_PROMPT_ATTN_DENSE=2; int8 K/V) -----------------
+// The kernel above keeps 64 KB of q (hi + lo) in shared memory, so an SM runs one block: 4 warps, one per scheduler,
+// each with 4 independent MMA chains in q.k. On an RTX 5080 (int8 KV, Ornith 1.5) it reaches ~55 TFLOP/s of MMA issue
+// and is 60% of a 64K prompt; fp16 K/V (no int8 conversion) is only 6% faster, so the wait is MMA latency, not the
+// conversion. Here each group of 16 rows has two warps: in q.k warp `half` takes cells 16*half..16*half+15 of the chunk
+// (n-tiles 2*half, 2*half+1), and the two halves swap their scores through shared memory, so both hold the chunk's 32
+// scores; both then run the same online softmax; in p.v warp `half` takes the V scale groups 2*half and 2*half+1 (dims
+// 128*half..128*half+127). Every float operation has the same inputs in the same order as in the kernel above (an MMA
+// chain, the score scaling, max, exp2, the row sums, the p.v and running-sum updates), so the output is bitwise equal.
+// 8 KB more shared memory (the score swap); the fp16 K/V layout does not fit beside it and keeps the kernel above.
+constexpr int THREADS2 = 256;
+
+struct SmemD2 {
+    SmemD<1> d;
+    float sx[4][DCH / 8][32][4];   // per row group: each n-tile's scores, by lane (the MMA accumulator layout)
+};
+
+__global__ void __launch_bounds__(THREADS2, 1) prompt_attn_dense2_kernel(const float* __restrict__ q, QsaAttnPools p,
+                                                                         const int32_t* __restrict__ steps, int n_q,
+                                                                         int n_kv_heads, int page_size, float scale_log2,
+                                                                         float* __restrict__ attn) {
+    constexpr int GQ = 8, PIECES = SmemD<1>::PIECES, ROWB = PIECES * 16;
+    extern __shared__ __align__(16) unsigned char smem_raw[];
+    SmemD2& S2 = *reinterpret_cast<SmemD2*>(smem_raw);
+    SmemD<1>& S = S2.d;
+    const int q0 = blockIdx.x * DQ, kvh = blockIdx.y, n_head = n_kv_heads * GQ;
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5, gid = lane >> 2, tig = lane & 3;
+    const int rw = warp & 3, half = warp >> 2;   // row group (queries q0 + 2rw, +1) and this warp's half of it
+    const int rbase = rw * 16;
+    auto width = [&](int i) { return q0 + i < n_q ? __ldg(steps + (size_t) (q0 + i) * kStepCount + kStepWidth) : 0; };
+    const int na = width(2 * rw), nb = width(2 * rw + 1);
+    int n_max = 0;
+#pragma unroll
+    for (int i = 0; i < DQ; ++i) n_max = max(n_max, width(i));
+
+    auto row_of = [&](int cell) -> long long {
+        const long long page = (long long) __ldg(p.page_table + cell / page_size);
+        return (page * n_kv_heads + kvh) * page_size + (cell % page_size);
+    };
+    auto issue = [&](int kv, int c0) {
+        const unsigned char* base = reinterpret_cast<const unsigned char*>(kv ? p.v_q : p.k_q);
+        uint4(*dst)[PIECES] = kv ? S.v : S.k;
+#pragma unroll
+        for (int i = t; i < DCH * PIECES; i += THREADS2) {
+            const int c = i / PIECES, pc = i % PIECES, cell = c0 + c;
+            const bool ok = cell < n_max;
+            const size_t off = ok ? (size_t) row_of(cell) * ROWB + pc * 16 : 0;
+            cp_async16(&dst[c][pc ^ (c & 7)], base + off, ok);
+        }
+        if (t < DCH) {
+            const int cell = c0 + t;
+            const bool ok = cell < n_max;
+            const size_t off = ok ? (size_t) row_of(cell) * (HD / KV_Q8_GROUP) : 0;
+            cp_async8(kv ? &S.vsc[t] : &S.ksc[t], (kv ? p.v_scale : p.k_scale) + off, ok);
+        }
+    };
+    if (n_max > 0) {
+        issue(0, 0);
+        cp_async_commit();
+        issue(1, 0);
+        cp_async_commit();
+    }
+
+    // q: as above; the two warps of a row group write 8 rows each
+#pragma unroll 1
+    for (int r = 8 * half; r < 8 * half + 8; ++r) {
+        const int qi = q0 + 2 * rw + (r >> 3), row = rbase + r;
+        float x[8] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+        if (qi < n_q) {
+            const float4* src = reinterpret_cast<const float4*>(q + ((size_t) qi * n_head + kvh * GQ + (r & 7)) * HD) + lane * 2;
+            const float4 a = src[0], b = src[1];
+            x[0] = a.x; x[1] = a.y; x[2] = a.z; x[3] = a.w; x[4] = b.x; x[5] = b.y; x[6] = b.z; x[7] = b.w;
+        }
+        float m = 0.0f;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) m = fmaxf(m, fabsf(x[j]));
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o));
+        int e = 0;
+        if (m > 0.0f) frexpf(m, &e);
+        const float up = ldexpf(1.0f, 14 - e);
+        uint4 hi, lo;
+        split_h2(x[0] * up, x[1] * up, hi.x, lo.x);
+        split_h2(x[2] * up, x[3] * up, hi.y, lo.y);
+        split_h2(x[4] * up, x[5] * up, hi.z, lo.z);
+        split_h2(x[6] * up, x[7] * up, hi.w, lo.w);
+        S.qh[row][lane ^ (row & 7)] = hi;
+        S.ql[row][lane ^ (row & 7)] = lo;
+        if (lane == 0) S.qdn[row] = ldexpf(scale_log2, e - 14);
+    }
+    __syncthreads();   // the partner's 8 rows
+    const float da = S.qdn[rbase + gid], db = S.qdn[rbase + 8 + gid];
+
+    float acc[HD / 16][4];   // this warp's 128 dims: V groups 2*half, 2*half + 1
+#pragma unroll
+    for (int j = 0; j < HD / 16; ++j) acc[j][0] = acc[j][1] = acc[j][2] = acc[j][3] = 0.0f;
+    float m_a = -INFINITY, m_b = -INFINITY, l_a = 0.0f, l_b = 0.0f;
+    int ve[2] = {14, 14};
+
+#pragma unroll 1
+    for (int c0 = 0; c0 < n_max; c0 += DCH) {
+        const bool more = c0 + DCH < n_max;
+        cp_async_wait1();
+        __syncthreads();   // K in
+        float s[DCH / 8][4];
+#pragma unroll
+        for (int nt = 0; nt < DCH / 8; ++nt) s[nt][0] = s[nt][1] = s[nt][2] = s[nt][3] = 0.0f;
+        // q.k for this warp's two n-tiles, the chain of each exactly as above
+#pragma unroll
+        for (int g = 0; g < 4; ++g) {
+            float tg[2][4];
+#pragma unroll
+            for (int u = 0; u < 2; ++u) tg[u][0] = tg[u][1] = tg[u][2] = tg[u][3] = 0.0f;
+#pragma unroll
+            for (int kq = 0; kq < 4; ++kq) {
+                const int kk = g * 4 + kq;
+                uint32_t ah[4], al[4];
+                {
+                    const int mi = lane >> 3, rr = rbase + (mi & 1) * 8 + (lane & 7), pc = kk * 2 + (mi >> 1);
+                    ldsm_x4(ah, &S.qh[rr][pc ^ (rr & 7)]);
+                    ldsm_x4(al, &S.ql[rr][pc ^ (rr & 7)]);
+                }
+                const unsigned char* K = reinterpret_cast<const unsigned char*>(&S.k[0][0]);
+#pragma unroll
+                for (int u = 0; u < 2; ++u) {
+                    const int c = (2 * half + u) * 8 + gid;
+                    const unsigned char* rowp = K + c * ROWB + ((kk ^ (c & 7)) << 4) + 2 * tig;
+                    uint32_t b[2];
+                    b[0] = i8x2_to_h2(*reinterpret_cast<const uint16_t*>(rowp));
+                    b[1] = i8x2_to_h2(*reinterpret_cast<const uint16_t*>(rowp + 8));
+                    mma16816(tg[u], ah, b);
+                    mma16816(tg[u], al, b);
+                }
+            }
+#pragma unroll
+            for (int u = 0; u < 2; ++u) {
+                const int nt = 2 * half + u;
+                const int c = nt * 8 + 2 * tig;
+                const float k0 = __half2float(reinterpret_cast<const __half*>(&S.ksc[c])[g]);
+                const float k1 = __half2float(reinterpret_cast<const __half*>(&S.ksc[c + 1])[g]);
+                s[nt][0] = fmaf(tg[u][0], k0, s[nt][0]);
+                s[nt][1] = fmaf(tg[u][1], k1, s[nt][1]);
+                s[nt][2] = fmaf(tg[u][2], k0, s[nt][2]);
+                s[nt][3] = fmaf(tg[u][3], k1, s[nt][3]);
+            }
+        }
+#pragma unroll
+        for (int u = 0; u < 2; ++u)
+            *reinterpret_cast<float4*>(S2.sx[rw][2 * half + u][lane]) =
+                make_float4(s[2 * half + u][0], s[2 * half + u][1], s[2 * half + u][2], s[2 * half + u][3]);
+        __syncthreads();   // every warp is done with K; the scores are swapped
+        if (more) {
+            issue(0, c0 + DCH);
+            cp_async_commit();
+        }
+#pragma unroll
+        for (int u = 0; u < 2; ++u) {
+            const float4 o = *reinterpret_cast<const float4*>(S2.sx[rw][2 * (1 - half) + u][lane]);
+            s[2 * (1 - half) + u][0] = o.x;
+            s[2 * (1 - half) + u][1] = o.y;
+            s[2 * (1 - half) + u][2] = o.z;
+            s[2 * (1 - half) + u][3] = o.w;
+        }
+        float alpha_a, alpha_b;
+        {
+            float mxa = -INFINITY, mxb = -INFINITY;
+#pragma unroll
+            for (int nt = 0; nt < DCH / 8; ++nt) {
+                const int cell = c0 + nt * 8 + 2 * tig;
+                s[nt][0] = cell < na ? s[nt][0] * da : -INFINITY;
+                s[nt][1] = cell + 1 < na ? s[nt][1] * da : -INFINITY;
+                s[nt][2] = cell < nb ? s[nt][2] * db : -INFINITY;
+                s[nt][3] = cell + 1 < nb ? s[nt][3] * db : -INFINITY;
+                mxa = fmaxf(mxa, fmaxf(s[nt][0], s[nt][1]));
+                mxb = fmaxf(mxb, fmaxf(s[nt][2], s[nt][3]));
+            }
+#pragma unroll
+            for (int o = 1; o < 4; o <<= 1) {
+                mxa = fmaxf(mxa, __shfl_xor_sync(0xffffffffu, mxa, o));
+                mxb = fmaxf(mxb, __shfl_xor_sync(0xffffffffu, mxb, o));
+            }
+            const float ma = fmaxf(m_a, mxa), mb = fmaxf(m_b, mxb);
+            alpha_a = m_a == -INFINITY ? 0.0f : exp2f(m_a - ma);
+            alpha_b = m_b == -INFINITY ? 0.0f : exp2f(m_b - mb);
+            float sa = 0.0f, sb = 0.0f;
+#pragma unroll
+            for (int nt = 0; nt < DCH / 8; ++nt) {
+                s[nt][0] = s[nt][0] == -INFINITY ? 0.0f : exp2f(s[nt][0] - ma);
+                s[nt][1] = s[nt][1] == -INFINITY ? 0.0f : exp2f(s[nt][1] - ma);
+                s[nt][2] = s[nt][2] == -INFINITY ? 0.0f : exp2f(s[nt][2] - mb);
+                s[nt][3] = s[nt][3] == -INFINITY ? 0.0f : exp2f(s[nt][3] - mb);
+                sa += s[nt][0] + s[nt][1];
+                sb += s[nt][2] + s[nt][3];
+            }
+            l_a = fmaf(l_a, alpha_a, sa);
+            l_b = fmaf(l_b, alpha_b, sb);
+            m_a = ma;
+            m_b = mb;
+        }
+        if (more) cp_async_wait1(); else cp_async_wait0();
+        __syncthreads();   // V in (and every warp has read its partner's scores)
+#pragma unroll
+        for (int gg = 0; gg < 2; ++gg) {
+            const int g = 2 * half + gg;
+            float w[2][4];
+            int e_new = 14;
+            {
+                float vm = fabsf(__half2float(reinterpret_cast<const __half*>(&S.vsc[lane])[g]));
+#pragma unroll
+                for (int o = 16; o > 0; o >>= 1) vm = fmaxf(vm, __shfl_xor_sync(0xffffffffu, vm, o));
+                e_new = ve[gg];
+                if (vm > 0.0f) {
+                    int e = 0;
+                    frexpf(vm, &e);
+                    e_new = 14 - e;
+                }
+#pragma unroll
+                for (int ks = 0; ks < 2; ++ks) {
+                    const int c = ks * 16 + 2 * tig;
+                    w[ks][0] = ldexpf(__half2float(reinterpret_cast<const __half*>(&S.vsc[c])[g]), e_new);
+                    w[ks][1] = ldexpf(__half2float(reinterpret_cast<const __half*>(&S.vsc[c + 1])[g]), e_new);
+                    w[ks][2] = ldexpf(__half2float(reinterpret_cast<const __half*>(&S.vsc[c + 8])[g]), e_new);
+                    w[ks][3] = ldexpf(__half2float(reinterpret_cast<const __half*>(&S.vsc[c + 9])[g]), e_new);
+                }
+            }
+            float tmp[8][4];
+#pragma unroll
+            for (int j = 0; j < 8; ++j) tmp[j][0] = tmp[j][1] = tmp[j][2] = tmp[j][3] = 0.0f;
+#pragma unroll
+            for (int ks = 0; ks < 2; ++ks) {
+                uint32_t ah[4], al[4];
+                split_h2(s[2 * ks][0] * w[ks][0], s[2 * ks][1] * w[ks][1], ah[0], al[0]);
+                split_h2(s[2 * ks][2] * w[ks][0], s[2 * ks][3] * w[ks][1], ah[1], al[1]);
+                split_h2(s[2 * ks + 1][0] * w[ks][2], s[2 * ks + 1][1] * w[ks][3], ah[2], al[2]);
+                split_h2(s[2 * ks + 1][2] * w[ks][2], s[2 * ks + 1][3] * w[ks][3], ah[3], al[3]);
+                const unsigned char* V = reinterpret_cast<const unsigned char*>(&S.v[0][0]);
+                const int cA = ks * 16 + 2 * tig, cB = cA + 8;
+#pragma unroll
+                for (int j = 8 * g; j < 8 * g + 8; ++j) {
+                    const int d = j * 8 + gid;
+                    auto at = [&](int c) { return (uint32_t) V[c * ROWB + (((d >> 4) ^ (c & 7)) << 4) + (d & 15)]; };
+                    uint32_t b[2];
+                    b[0] = i8x2_to_h2(at(cA) | (at(cA + 1) << 8));
+                    b[1] = i8x2_to_h2(at(cB) | (at(cB + 1) << 8));
+                    mma16816(tmp[j - 8 * g], ah, b);
+                    mma16816(tmp[j - 8 * g], al, b);
+                }
+            }
+            const float fa = ldexpf(alpha_a, e_new - ve[gg]), fb = ldexpf(alpha_b, e_new - ve[gg]);
+            ve[gg] = e_new;
+#pragma unroll
+            for (int j = 0; j < 8; ++j) {
+                acc[8 * gg + j][0] = fmaf(acc[8 * gg + j][0], fa, tmp[j][0]);
+                acc[8 * gg + j][1] = fmaf(acc[8 * gg + j][1], fa, tmp[j][1]);
+                acc[8 * gg + j][2] = fmaf(acc[8 * gg + j][2], fb, tmp[j][2]);
+                acc[8 * gg + j][3] = fmaf(acc[8 * gg + j][3], fb, tmp[j][3]);
+            }
+        }
+        __syncthreads();   // every warp is done with V
+        if (more) {
+            issue(1, c0 + DCH);
+            cp_async_commit();
+        }
+    }
+#pragma unroll
+    for (int o = 1; o < 4; o <<= 1) {
+        l_a += __shfl_xor_sync(0xffffffffu, l_a, o);
+        l_b += __shfl_xor_sync(0xffffffffu, l_b, o);
+    }
+    const int qa = q0 + 2 * rw, qb = qa + 1;
+    float* oa = attn + ((size_t) qa * n_head + kvh * GQ + gid) * HD;
+    float* ob = attn + ((size_t) qb * n_head + kvh * GQ + gid) * HD;
+#pragma unroll
+    for (int gg = 0; gg < 2; ++gg) {
+        const int g = 2 * half + gg;
+        const float ia = l_a > 0.0f ? ldexpf(1.0f / l_a, -ve[gg]) : 0.0f, ib = l_b > 0.0f ? ldexpf(1.0f / l_b, -ve[gg]) : 0.0f;
+#pragma unroll
+        for (int j = 8 * g; j < 8 * g + 8; ++j) {
+            const int d = j * 8 + 2 * tig;
+            if (qa < n_q) *reinterpret_cast<float2*>(oa + d) = make_float2(acc[j - 8 * g + 8 * gg][0] * ia, acc[j - 8 * g + 8 * gg][1] * ia);
+            if (qb < n_q) *reinterpret_cast<float2*>(ob + d) = make_float2(acc[j - 8 * g + 8 * gg][2] * ib, acc[j - 8 * g + 8 * gg][3] * ib);
+        }
+    }
+}
+
+bool launch_dense2(const float* q, const QsaAttnPools& pools, const int32_t* steps, const QsaShapes& s, float* attn,
+                   int64_t n_q, cudaStream_t st) {
+    static bool attr[64] = {};
+    int dev = 0;
+    cudaGetDevice(&dev);
+    const int bytes = (int) sizeof(SmemD2);
+    if (dev < 0 || dev >= 64 || n_q > (int64_t) 0x7fffffff - DQ) return false;
+    if (!attr[dev]) {
+        int optin = 0;
+        cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+        if (optin < bytes ||
+            cudaFuncSetAttribute(prompt_attn_dense2_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) != cudaSuccess) {
+            cudaGetLastError();
+            return false;
+        }
+        attr[dev] = true;
+    }
+    const float scale_log2 = 1.4426950408889634f / sqrtf((float) HD);
+    prompt_attn_dense2_kernel<<<dim3((unsigned) ((n_q + DQ - 1) / DQ), (unsigned) s.n_head_kv), THREADS2, bytes, st>>>(
+        q, pools, steps, (int) n_q, (int) s.n_head_kv, (int) s.page_size, scale_log2, attn);
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) {
+        std::fprintf(stderr, "qsa_prompt_attn_batch (dense, 8 warps): %s\n", cudaGetErrorString(e));
+        std::exit(1);
+    }
+    return true;
+}
+
 // PR #600: compiled only into the experimental build (-DSTRATA_EXPERIMENTAL_SM60=ON), the one build that runs on a
 // Volta card; the ready-made engine has none of it (no extra kernels to load, the same code as before).
 #if !defined(__HIPCC__) && defined(STRATA_EXPERIMENTAL_SM60)
@@ -1849,8 +2162,11 @@ bool dispatch_g(const float* q, const QsaAttnPools& pools, const int32_t* ids, c
     if constexpr (GQ == 8) {   // dense (Qwen3.6): 8 queries per block on sm_80+, fp16 or int8 K/V (above)
         const char* dn = std::getenv("STRATA_PROMPT_ATTN_DENSE");   // read per call: the parity test switches it
         if (ids == nullptr && !turing && !volta && !(dn && dn[0] == '0') && pools.k_q4 == nullptr && pools.v_q4 == nullptr) {
-            if (pools.k_q && pools.v_q && pools.k_scale && pools.v_scale)
+            if (pools.k_q && pools.v_q && pools.k_scale && pools.v_scale) {
+                // STRATA_PROMPT_ATTN_DENSE=2 (opt-in): the 8-warp kernel, bitwise the same output
+                if (dn && dn[0] == '2' && launch_dense2(q, pools, steps, s, attn, n_q, st)) return true;
                 return launch_dense<1>(q, pools, steps, s, attn, n_q, st);
+            }
             if (!pools.k_q && pools.k_pool && pools.v_pool) return launch_dense<0>(q, pools, steps, s, attn, n_q, st);
         }
     }

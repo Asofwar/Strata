@@ -1749,6 +1749,28 @@ the pairs in which the switched arm won). They are here so you can try them on y
 - **`STRATA_ADAPT_SIGNAL=host`: the overlap's per-layer "landed" signal as a host function** (the 0.1.43 way). From 0.1.43.1 the default is a
   4-byte stream-ordered copy into pinned memory, which needs no driver callback thread: on a 20-core desktop (RTX 3060) the host
   functions still cost ~7 ms per window with the thread started early, because the pool's workers occupy every other CPU.
+- **`STRATA_PROMPT_ATTN_DENSE=2`: the dense prompt attention (qwen35moe, int8 K/V) with 8 warps per block** (WIP, no
+  gain measured). Where a long Ornith prompt's time goes, RTX 5080 16 GB (PCIe 5.0 running at x8), Ornith 1.5 35B-A3B
+  IQ4_XS native pack, `--kv int8`, `--prefill auto` (8,192-token chunks, a 384-slot ring), 5,463 cache slots of which the
+  prompt borrows 2,404: `STRATA_PREFILL_TIMING=1` puts the wait for expert copies at 1.3-1.8% of the GPU timeline at
+  4K, 0.6% at 16K and 0.4% at 64K, and the dense attention at 6%, 27% and 60%. Nsight Systems on a 16K prompt: 28.3 GB
+  copied host to device at 26.7 GB/s while copying (about the link's speed), but the copy engine is busy 1.06 s of the
+  3.2 s prompt and 71% of that time runs under kernels. So on this card the prompt is not waiting for PCIe; the
+  attention is the largest part, at about 55 TFLOP/s of MMA issue (its FP16 hi + lo halves counted) against 110-118
+  TFLOP/s that a bare `mma.sync` m16n8k16 FP16 -> FP32 loop reaches on the same card, even with one accumulator chain
+  per warp and 4 warps per SM. The 8-warp kernel gives the two warps of each 16 rows half the cells in q.k and half the
+  dimensions in p.v; every float operation keeps its inputs and order, so its output is bitwise the 8-query kernel's
+  (`qsa_prompt_attn_parity`: difference 0 at 16K and on a ragged 1K chunk). It did not get faster (kernel 59.5 -> 58.9
+  ms per 8,192-query chunk at 16K), and neither did fp16 K/V (no int8 conversion, 805 -> 757 ms of attention on a 16K
+  prompt): the time goes to the work around the MMAs (fragment loads, the hi / lo splits, the softmax, four block
+  barriers per 32-cell chunk). Prompt time, 3 interleaved rounds of fresh engines (mean, min-max): 4K 0.861 s
+  (0.860-0.863) off, 0.858 s (0.855-0.860) on; 16K 2.869 (2.857-2.876) / 2.875 (2.857-2.892); 64K 20.14
+  (20.11-20.16) / 20.27 (20.25-20.28). Decode after a 200-token prompt 221 / 231 tok/s (run-to-run noise). Greedy
+  answers: with `--adapt-swaps 0 --prompt-cache 0`, 64 tokens after a 16K prompt were the same in 6 of 8 runs with the
+  switch and 7 of 8 without, and an off run diverged the same way as an on run (the engine's own run-to-run noise;
+  the kernel itself is bitwise equal).
+  The next candidates are numeric ones and need a quality check: FP16 accumulation (twice the MMA rate on this card)
+  or dropping the lo halves.
 
 ## Thread placement: `--aux-cpus` (Linux, off by default)
 
