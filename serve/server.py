@@ -4105,7 +4105,9 @@ class Service:
                                   "instruction (reasoning_loop_recovery)", flush=True)
                             continue
                         if (self.reasoning_close_retry and thinking and finish == "stop" and not close_retried
-                                and not answered and not wrap and not opens and parser.state == "reasoning"
+                                # #2297: "rcall" too - a turn that ends inside a <tool_call> the thinking drafted
+                                # (agent histories of long calls invite one) is still a thinking with no answer
+                                and not answered and not wrap and not opens and parser.state in ("reasoning", "rcall")
                                 and parser.buf != THINK_END         # #537: not after a held </think>, the end
                                 and (stops is None or stops.hit is None) and not cancel.is_set()):
                             # #1053: the model wrote its reasoning and stopped before </think>: the client would get
