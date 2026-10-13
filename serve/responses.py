@@ -14,6 +14,7 @@ Codex CLI is the first client.  What it needs, and what this does:
     write them, see docs/DETAILS.md) and, when `include` asks for `reasoning.encrypted_content`, also as an opaque
     `encrypted_content` string (base64, not encrypted: the client already holds the text).  Either form sent back is
     put into the conversation again, so the prompt matches what the model wrote and the cache is reused;
+  * text files sent inline as `input_file` parts go into the prompt as text; binary files are refused;
   * the official event order: response.created, response.in_progress, response.output_item.added, deltas,
     ...done events, response.output_item.done, and response.completed / response.incomplete / response.failed.
 
@@ -32,6 +33,11 @@ from serve.frontend import Event, _late_system_to_user, _parts_of, effort_kwargs
 ENCRYPTED_PREFIX = "strata.r1:"                   # our own reasoning replay strings; others' are ignored
 HOSTED_TOOLS = ("web_search", "web_search_preview", "file_search", "computer_use_preview", "computer_use",
                 "code_interpreter", "image_generation", "local_shell", "mcp", "tool_search")
+# What a hosted tool left in an earlier answer, sent back with the conversation: dropped, as the hosted tools are
+# (mcp_call and local_shell_call carry a call and its result, and are kept: see input_messages)
+HOSTED_RECORDS = ("web_search_call", "file_search_call", "computer_call", "computer_call_output",
+                  "code_interpreter_call", "image_generation_call", "mcp_list_tools", "mcp_approval_request",
+                  "mcp_approval_response")
 
 
 class ResponsesError(ValueError):
@@ -79,10 +85,54 @@ def _content(content, param):
                 raise ResponsesError("only images given as image_url (a data: or http(s) URL) are supported; "
                                      "this server keeps no files", f"{param}[{j}]", "unsupported_parameter")
             parts.append({"type": "input_image", "image_url": part["image_url"]})
+        elif kind == "input_file":
+            parts.append({"type": "text", "text": _file_text(part, f"{param}[{j}]")})
         else:
-            raise ResponsesError(f"content parts of type {kind!r} are not supported (text and images are)",
-                                 f"{param}[{j}].type", "unsupported_parameter")
+            raise ResponsesError(f"content parts of type {kind!r} are not supported (text, images and text files "
+                                 "are)", f"{param}[{j}].type", "unsupported_parameter")
     return _parts_of(parts)
+
+
+# Media types that are never text, whatever their bytes decode to; any other file is judged by its bytes (clients
+# often send a text file as application/octet-stream)
+_BINARY_TYPES = ("image/", "audio/", "video/", "font/", "application/pdf", "application/zip", "application/gzip")
+
+
+def _file_text(part, param) -> str:
+    """An input_file part given inline (`file_data`, a data: URL or bare base64) -> its text, marked with its name.
+    Only text files: this model reads text and images, and a PDF or other binary file has no text to put in the
+    prompt without a converter, so those are refused with an error that says so.  A `file_id` or `file_url` names a
+    file this server does not hold or fetch."""
+    name = part.get("filename") if isinstance(part.get("filename"), str) and part.get("filename") else "file"
+    data = part.get("file_data")
+    if not isinstance(data, str) or not data:
+        which = "file_id" if part.get("file_id") else "file_url" if part.get("file_url") else "file_data"
+        raise ResponsesError("files must be sent inline as file_data (a data: URL or base64): this server keeps no "
+                             "uploaded files and does not fetch file URLs", f"{param}.{which}", "unsupported_parameter")
+    media = ""
+    if data.startswith("data:"):
+        head, sep, data = data[5:].partition(",")
+        if not sep or not head.endswith(";base64"):
+            raise ResponsesError("file_data must be a base64 data: URL (data:<type>;base64,...) or bare base64",
+                                 param + ".file_data")
+        media = head[:-len(";base64")].split(";")[0].strip().lower()
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except ValueError:
+        raise ResponsesError("file_data is not valid base64", param + ".file_data") from None
+
+    def binary():
+        return ResponsesError(f"{name!r} is not a text file: only text files (UTF-8: code, Markdown, CSV, JSON, ...) "
+                              "can be read; convert a PDF or document to text first", param, "unsupported_file_type")
+    if media.startswith(_BINARY_TYPES):
+        raise binary()
+    if raw.startswith(b"%PDF") or b"\x00" in raw:
+        raise binary()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise binary() from None
+    return f"\n\n<file name={json.dumps(name, ensure_ascii=False)}>\n{text}\n</file>\n\n"
 
 
 def _reasoning_text(item, param) -> str:
@@ -191,6 +241,35 @@ def input_messages(req: dict) -> list[dict]:
             messages.append({"role": "tool", "content": _tool_output(item, param), "_call_id": item.get("call_id")})
             open_turn = None
             thinking.clear()
+        elif kind in ("mcp_call", "local_shell_call"):
+            # a conversation begun on a server that runs these tools: the call and its result stay in the prompt as a
+            # tool call and a tool message, so the model still sees what was done and what came back
+            if kind == "mcp_call":
+                name = item.get("name")
+                if not isinstance(name, str) or not name:
+                    raise ResponsesError("an mcp_call needs a name", param + ".name")
+                if item.get("server_label"):
+                    name = f"{item['server_label']}.{name}"
+                args = _arguments(item.get("arguments"), param + ".arguments")
+            else:
+                name, action = "local_shell", item.get("action")
+                args = action if isinstance(action, dict) else {}
+            call_id = item.get("call_id") or item.get("id")
+            target = open_turn if open_turn is not None and not thinking else turn()
+            target.setdefault("tool_calls", []).append({"function": {"name": name, "arguments": args},
+                                                        "_call_id": call_id})
+            if kind == "mcp_call" and (item.get("output") is not None or item.get("error")):
+                result = item.get("output") if item.get("output") is not None else f"Error: {item['error']}"
+                messages.append({"role": "tool", "_call_id": call_id, "content": result if isinstance(result, str)
+                                 else json.dumps(result, ensure_ascii=False)})
+                open_turn = None
+        elif kind == "local_shell_call_output":
+            messages.append({"role": "tool", "content": _tool_output(item, param),
+                             "_call_id": item.get("call_id") or item.get("id")})
+            open_turn = None
+            thinking.clear()
+        elif kind in HOSTED_RECORDS:
+            continue                                 # a hosted tool's record: left out, as the hosted tools are
         elif kind == "additional_tools":
             continue                                 # #782 (Codex): tools the client adds as an input item; see request_tools
         elif kind == "item_reference":
