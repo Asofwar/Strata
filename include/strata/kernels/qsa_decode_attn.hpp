@@ -30,10 +30,29 @@ struct QsaAttnPools {
     const uint8_t* k_q4 = nullptr;      ///< q4_0 block_q4_0 [page][kv_head][page_size][head_dim / 32 * 18]
     const uint8_t* v_q4 = nullptr;
     const int32_t* page_table = nullptr;
+    /// KV streaming (kv_stream.hpp): the layer's host copy, same formats in the identity layout `[block][kv_head]
+    /// [page_size]`. A selected cell whose block is not resident (page -1) is read from it in place - a dense
+    /// selection (qwen35moe: every cell) can name more blocks than the VRAM slots hold. All null when the layer is
+    /// not streamed: such a cell is masked, as before.
+    const uint16_t* host_k_pool = nullptr;
+    const uint16_t* host_v_pool = nullptr;
+    const int8_t* host_k_q = nullptr;
+    const int8_t* host_v_q = nullptr;
+    const uint16_t* host_k_scale = nullptr;
+    const uint16_t* host_v_scale = nullptr;
+    const uint8_t* host_k_q4 = nullptr;
+    const uint8_t* host_v_q4 = nullptr;
 };
 
 /// Scratch floats for `cap` selected cells: partial accumulators, maxima and sums.
 uint64_t qsa_decode_attn_scratch_floats(int64_t cap, const QsaShapes& s);
+
+/// Opt-in split-K (`STRATA_ATTN_SPLITS=P`, 16..65535; 0 = off, the default): past P chunks of 64 cells each KV head
+/// runs P partitions that fold their chunks in turn, so the partials (and the scratch above) stop growing with the
+/// context. Bit-identical to the default while a selection fits P x 64 cells. Set it before any scratch is sized:
+/// the scratch size and the kernels read the same value. The setter exists for the parity test.
+void qsa_decode_attn_set_splits(int parts);
+int qsa_decode_attn_splits();
 
 void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* step,
                           int64_t cap, const QsaShapes& s, float* scratch, float* attn, void* stream);

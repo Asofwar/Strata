@@ -2711,6 +2711,45 @@ class ConfigReasoningEffort(unittest.TestCase):
         self.assertEqual(cfg, {"args": ["--ctx", "4096"]})
 
 
+class PreserveThinking(unittest.TestCase):
+    """The template's preserve_thinking (keep the reasoning of turns before the latest user message): a request's
+    chat_template_kwargs on either API, else the shared Chat settings, else the config's "preserve_thinking"."""
+
+    def svc(self, config=None, shared=None):
+        tok = ByteTokenizer()
+        svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        svc.config_preserve = config
+        svc.shared = shared or {}
+        return svc
+
+    def test_default_changes_nothing(self):
+        req = {"messages": []}
+        self.assertIs(self.svc().with_shared(req, "anthropic"), req)
+
+    def test_config_then_shared_then_request(self):
+        ctk = lambda svc, req, api: svc.with_shared(req, api).get("chat_template_kwargs")
+        for api in ("openai", "anthropic"):
+            self.assertEqual(ctk(self.svc(True), {}, api), {"preserve_thinking": True})
+            self.assertEqual(ctk(self.svc(True, {"preserve_thinking": False}), {}, api), {"preserve_thinking": False})
+            own = {"chat_template_kwargs": {"preserve_thinking": False, "x": 1}}
+            self.assertEqual(ctk(self.svc(True), own, api), {"preserve_thinking": False, "x": 1})
+
+    def test_both_apis_pass_it_to_the_template(self):
+        from serve.frontend import anthropic_to_messages, openai_to_messages
+        reasoning = "strata_earlier_reasoning"
+        oa = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b", "reasoning_content": reasoning},
+              {"role": "user", "content": "c"}]
+        an = [oa[0], {"role": "assistant", "content": [{"type": "thinking", "thinking": reasoning},
+                                                       {"type": "text", "text": "b"}]}, oa[2]]
+        svc = self.svc()
+        for keep in (True, False):
+            for conv, msgs in ((openai_to_messages, oa), (anthropic_to_messages, an)):
+                with self.subTest(keep=keep, api=conv.__name__):
+                    m, tools, kwargs = conv({"messages": msgs, "chat_template_kwargs": {"preserve_thinking": keep}})
+                    self.assertEqual(kwargs.get("preserve_thinking"), keep)
+                    self.assertEqual(reasoning in svc.template.render(m, tools=tools, **kwargs), keep)
+
+
 class SharedSettings(unittest.TestCase):
     """The web app's "Use for other apps too": POST /settings makes its Chat settings every client's defaults."""
 

@@ -87,7 +87,8 @@ __device__ int block_scan(int v, int* warp_sums, int& total) {
 }
 
 __global__ void __launch_bounds__(RT) resolve_kernel(KvStreamMap m, const int32_t* __restrict__ ids,
-                                                     const int32_t* __restrict__ steps, int n_q, int cap, int page_size) {
+                                                     const int32_t* __restrict__ steps, int n_q, int cap, int page_size,
+                                                     int dense) {
     __shared__ int s_nmiss, s_lookups, s_cut;
     __shared__ int warp_sums[32];
     const int epoch = m.ctl[0] + 1;
@@ -98,16 +99,23 @@ __global__ void __launch_bounds__(RT) resolve_kernel(KvStreamMap m, const int32_
     for (int q = 0; q < n_q; ++q) {
         const int width = steps[q * kStepCount + kStepWidth];
         const int32_t* qi = ids + (long long) q * cap;
-        for (int i = threadIdx.x; i < width; i += RT) {
-            const int b = qi[i] / page_size;
-            if (i > 0 && qi[i - 1] / page_size == b) continue;   // ids are ascending: one lookup per block
+        // dense selection (qwen35moe: ids are 0..width-1): its blocks are 0..ceil(width / page_size)-1, so the threads
+        // walk the blocks, not every cell - the same lookups, width / page_size loads instead of width
+        const int span = dense ? (width + page_size - 1) / page_size : width;
+        for (int i = threadIdx.x; i < span; i += RT) {
+            const int b = dense ? i : qi[i] / page_size;
+            if (!dense && i > 0 && qi[i - 1] / page_size == b) continue;   // ids are ascending: one lookup per block
             ++lookups;
             const int sl = m.page_table[b];
             if (sl >= 0) {
                 m.slot_stamp[sl] = epoch;
                 m.slot_ref[sl] = 1;
             } else if (sl == -1 && atomicCAS(&m.page_table[b], -1, -2) == -1) {
-                m.miss_block[atomicAdd(&s_nmiss, 1)] = b;
+                // the miss list holds n_slots: a dense selection (qwen35moe, every cell) can miss more blocks than
+                // that, and the readers take those from the host copy in place (qsa_decode_attn's cell_row)
+                const int k = atomicAdd(&s_nmiss, 1);
+                if (k < (int) m.n_slots) m.miss_block[k] = b;
+                else m.page_table[b] = -1;
             }
         }
     }
@@ -115,7 +123,7 @@ __global__ void __launch_bounds__(RT) resolve_kernel(KvStreamMap m, const int32_
     __syncthreads();
     // 2. one victim per miss: a clock sweep from the hand. A slot this call uses (stamp == epoch) is never taken;
     //    a referenced one loses its bit as the hand passes it and is taken on the next pass.
-    const int need = s_nmiss, n = (int) m.n_slots;
+    const int n = (int) m.n_slots, missed = s_nmiss, need = missed < n ? missed : n;
     int hand = m.ctl[1], got = 0;
     for (int scanned = 0; got < need && scanned < 3 * n; scanned += RT) {
         const int j = (int) (((long long) hand + threadIdx.x) % n);
@@ -143,7 +151,7 @@ __global__ void __launch_bounds__(RT) resolve_kernel(KvStreamMap m, const int32_
     const int placed = got < need ? got : need;
     for (int k = threadIdx.x; k < need; k += RT) {
         const int b = m.miss_block[k];
-        if (k >= placed) { m.page_table[b] = -1; continue; }   // overflow: never happens with a legal n_slots
+        if (k >= placed) { m.page_table[b] = -1; continue; }   // no slot: read from the host copy in place
         const int sl = m.miss_slot[k];
         const int old = m.slot_block[sl];
         if (old >= 0) m.page_table[old] = -1;
@@ -156,9 +164,9 @@ __global__ void __launch_bounds__(RT) resolve_kernel(KvStreamMap m, const int32_
         m.ctl[0] = epoch;
         m.ctl[1] = hand;
         m.ctl[2] = placed;
-        if (placed < need) m.ctl[3] = 1;
+        if (placed < missed) m.ctl[3] = 1;
         unsigned long long* c = reinterpret_cast<unsigned long long*>(m.ctl + 4);
-        c[0] += (unsigned long long) placed;
+        c[0] += (unsigned long long) missed;   // from RAM: copied into a slot, or read in place
         c[1] += (unsigned long long) s_lookups;
         c[2] += 1ull;
     }
@@ -213,7 +221,7 @@ void kv_stream_reset(const KvStreamMap& m, void* stream) {
 
 void kv_stream_resolve(const KvStreamMap& m, const QsaAttnPools& slots, const KvHostPools& host, int fmt,
                        const int32_t* ids, const int32_t* steps, int64_t n_q, int64_t cap, const QsaShapes& s,
-                       void* stream) {
+                       void* stream, bool dense) {
     if (n_q <= 0) return;
     if (s.n_head_kv * s.page_size * (s.head_dim / KV_Q8_GROUP) * 2 % 16 != 0) {
         std::fprintf(stderr, "kv_stream: a block's scale run must be a multiple of 16 bytes\n");
@@ -227,7 +235,8 @@ void kv_stream_resolve(const KvStreamMap& m, const QsaAttnPools& slots, const Kv
                              "slot twice\n", (long long) m.n_slots, RT);
         std::exit(1);
     }
-    resolve_kernel<<<1, RT, 0, (cudaStream_t) stream>>>(m, ids, steps, (int) n_q, (int) cap, (int) s.page_size);
+    resolve_kernel<<<1, RT, 0, (cudaStream_t) stream>>>(m, ids, steps, (int) n_q, (int) cap, (int) s.page_size,
+                                                        dense ? 1 : 0);
     check("resolve");
     copy_kernel<<<96, 128, 0, (cudaStream_t) stream>>>(m, runs_of(slots, host, fmt, s));
     check("copy");

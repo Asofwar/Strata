@@ -298,6 +298,146 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
     cudaFree((void*) pl.k_q4); cudaFree((void*) pl.v_q4);
     return ok1 && ok2 ? 0 : 1;
 }
+// Dense (Qwen3.6: 16 query heads, 2 KV heads, no selection - query i reads cells 0..pos): the 8-query kernel against the
+// per-query tensor-core kernel it replaces (STRATA_PROMPT_ATTN_DENSE=0) and an FP64 reference. Same two checks as run().
+int run_dense(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16
+#if defined(__HIPCC__) || defined(STRATA_USE_HIP)
+    (void) fmt; (void) ctx; (void) nq; (void) reps;
+    return 0;
+#else
+    {
+        int dev = 0, major = 0;
+        ck(cudaGetDevice(&dev), "device");
+        ck(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev), "cc");
+        if (major < 8) { std::printf("SKIP dense: the 8-query kernel runs on sm_80+\n"); return 0; }
+    }
+    k::QsaShapes s = k::qsa_real_shapes();
+    s.n_head = 8 * s.n_head_kv;
+    const int64_t HD = s.head_dim, NKV = s.n_head_kv, NH = s.n_head, PS = s.page_size;
+    const int64_t pages = (ctx + PS - 1) / PS, rows = pages * NKV * PS;
+    std::mt19937 rng(777 + fmt);
+    std::normal_distribution<float> nd(0.f, 1.f);
+    std::uniform_int_distribution<int> code(-127, 127);
+    std::uniform_real_distribution<float> sc(0.005f, 0.03f);
+    std::vector<int8_t> kq, vq;
+    std::vector<uint16_t> ks, vs, kh, vh;
+    if (fmt == 1) {
+        kq.resize(rows * HD); vq.resize(rows * HD); ks.resize(rows * 4); vs.resize(rows * 4);
+        for (auto& x : kq) x = (int8_t) code(rng);
+        for (auto& x : vq) x = (int8_t) code(rng);
+        for (auto& x : ks) x = f2h(sc(rng));
+        for (auto& x : vs) x = f2h(sc(rng));
+    } else {
+        kh.resize(rows * HD); vh.resize(rows * HD);
+        for (auto& x : kh) x = f2h(nd(rng) * 1.5f);
+        for (auto& x : vh) x = f2h(nd(rng));
+    }
+    std::vector<int32_t> table(pages);
+    for (int64_t i = 0; i < pages; ++i) table[i] = (int32_t) i;
+    std::shuffle(table.begin(), table.end(), rng);
+    std::vector<int32_t> steps((size_t) (nq * k::kStepCount), 0);
+    for (int64_t i = 0; i < nq; ++i) steps[i * k::kStepCount + k::kStepWidth] = (int32_t) (ctx - nq + i + 1);
+    std::vector<float> q((size_t) (nq * NH * HD));
+    for (auto& x : q) x = nd(rng) * 2.0f;
+    k::QsaAttnPools pl;
+    if (fmt == 1) { pl.k_q = up(kq); pl.v_q = up(vq); pl.k_scale = up(ks); pl.v_scale = up(vs); }
+    else { pl.k_pool = up(kh); pl.v_pool = up(vh); }
+    pl.page_table = up(table);
+    const int32_t* d_steps = up(steps);
+    const float* d_q = up(q);
+    float *d_old = nullptr, *d_new = nullptr;
+    ck(cudaMalloc(&d_old, nq * NH * HD * 4), "malloc");
+    ck(cudaMalloc(&d_new, nq * NH * HD * 4), "malloc");
+    auto go = [&](bool dense, float* out) {
+#if defined(_WIN32)
+        _putenv_s("STRATA_PROMPT_ATTN_DENSE", dense ? "1" : "0");
+#else
+        setenv("STRATA_PROMPT_ATTN_DENSE", dense ? "1" : "0", 1);
+#endif
+        if (!k::qsa_prompt_attn_batch(d_q, pl, nullptr, d_steps, 0, s, out, nq, nullptr)) {
+            std::fprintf(stderr, "qsa_prompt_attn_batch refused the dense call\n");
+            std::exit(2);
+        }
+    };
+    go(false, d_old);
+    go(true, d_new);
+    ck(cudaDeviceSynchronize(), "run");
+    std::vector<float> o((size_t) (nq * NH * HD)), nw(o.size());
+    ck(cudaMemcpy(o.data(), d_old, o.size() * 4, cudaMemcpyDeviceToHost), "down");
+    ck(cudaMemcpy(nw.data(), d_new, nw.size() * 4, cudaMemcpyDeviceToHost), "down");
+    double err_old = 0, err_new = 0, ref_scale = 0;
+    for (int64_t i = 0; i < nq; i += std::max<int64_t>(1, nq / 6)) {
+        const int64_t w = ctx - nq + i + 1;
+        for (int64_t h = 0; h < NH; h += 3) {
+            const int64_t kvh = h / (NH / NKV);
+            std::vector<double> sco((size_t) w);
+            std::vector<int64_t> rowv((size_t) w);
+            double mx = -1e300;
+            for (int64_t c = 0; c < w; ++c) {
+                const int64_t row = ((int64_t) table[c / PS] * NKV + kvh) * PS + c % PS;
+                rowv[c] = row;
+                double a = 0;
+                for (int64_t d = 0; d < HD; ++d) {
+                    const double kv = fmt == 1 ? (double) kq[row * HD + d] * h2f(ks[row * 4 + d / 64]) : h2f(kh[row * HD + d]);
+                    a += (double) q[(i * NH + h) * HD + d] * kv;
+                }
+                sco[c] = a / 16.0;
+                mx = std::max(mx, sco[c]);
+            }
+            double l = 0;
+            for (auto& x : sco) { x = std::exp(x - mx); l += x; }
+            for (int64_t d = 0; d < HD; ++d) {
+                double a = 0;
+                for (int64_t c = 0; c < w; ++c) {
+                    const int64_t row = rowv[c];
+                    a += sco[c] * (fmt == 1 ? (double) vq[row * HD + d] * h2f(vs[row * 4 + d / 64]) : h2f(vh[row * HD + d]));
+                }
+                const double r = a / l;
+                const size_t at = (size_t) ((i * NH + h) * HD + d);
+                ref_scale = std::max(ref_scale, std::fabs(r));
+                err_old = std::max(err_old, std::fabs(o[at] - r));
+                err_new = std::max(err_new, std::fabs(nw[at] - r));
+            }
+        }
+    }
+    double diff = 0, scale = 0;
+    bool finite = true;
+    for (size_t i = 0; i < o.size(); ++i) {
+        finite = finite && std::isfinite(nw[i]);
+        diff = std::max(diff, (double) std::fabs(o[i] - nw[i]));
+        scale = std::max(scale, (double) std::fabs(o[i]));
+    }
+    cudaEvent_t e0, e1;
+    cudaEventCreate(&e0);
+    cudaEventCreate(&e1);
+    float ms_old = 0, ms_new = 0;
+    cudaEventRecord(e0);
+    for (int r = 0; r < reps; ++r) go(false, d_old);
+    cudaEventRecord(e1);
+    ck(cudaEventSynchronize(e1), "time");
+    cudaEventElapsedTime(&ms_old, e0, e1);
+    cudaEventRecord(e0);
+    for (int r = 0; r < reps; ++r) go(true, d_new);
+    cudaEventRecord(e1);
+    ck(cudaEventSynchronize(e1), "time");
+    cudaEventElapsedTime(&ms_new, e0, e1);
+#if defined(_WIN32)
+    _putenv_s("STRATA_PROMPT_ATTN_DENSE", "");
+#else
+    unsetenv("STRATA_PROMPT_ATTN_DENSE");
+#endif
+    const bool ok1 = err_new <= std::max(4.0 * err_old, 1e-6 * ref_scale);
+    const bool ok2 = finite && diff <= 1e-4 * scale;
+    std::printf("%s dense %s ctx %lld, %lld queries: vs FP64 old %.3g new %.3g (output scale %.3g); new vs old %.3g (%.2g of "
+                "scale); %.3f -> %.3f ms per chunk (%.2fx)\n",
+                ok1 && ok2 ? "PASS" : "FAIL", fmt == 1 ? "int8" : "fp16", (long long) ctx, (long long) nq, err_old, err_new,
+                ref_scale, diff, diff / scale, ms_old / reps, ms_new / reps, ms_old / ms_new);
+    cudaFree((void*) d_steps); cudaFree((void*) d_q); cudaFree(d_old); cudaFree(d_new);
+    cudaFree((void*) pl.k_q); cudaFree((void*) pl.v_q); cudaFree((void*) pl.k_scale); cudaFree((void*) pl.v_scale);
+    cudaFree((void*) pl.k_pool); cudaFree((void*) pl.v_pool); cudaFree((void*) pl.page_table);
+    return ok1 && ok2 ? 0 : 1;
+#endif
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -330,6 +470,12 @@ int main(int argc, char** argv) {
 #endif
     fails += run(1, 1500, std::min<int64_t>(nq, 1500), reps);   // short context: the selection is every cell
     fails += run(1, 2100, std::min<int64_t>(nq, 256), reps);    // the identity-to-sparse edge
+    // Qwen3.6's dense prompt attention: a full chunk at the context given, and a short ragged one (a partial block of
+    // 8 queries, a partial last chunk of cells)
+    fails += run_dense(1, ctx, nq, reps);
+    fails += run_dense(0, ctx, nq, reps);
+    fails += run_dense(1, 1000, 37, reps);
+    fails += run_dense(0, 1000, 37, reps);
     std::printf("FAILURES: %d\n", fails);
     return fails;
 }
