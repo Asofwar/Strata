@@ -179,11 +179,12 @@ void* reserve_large_pieces(SIZE_T lbytes, SIZE_T large, int simulate_gib, std::v
         pieces.push_back(p);
     }
     char b[256];
-    std::snprintf(b, sizeof b, "%.1f of %.1f GiB on large pages in %zu pieces%s, the rest on 4 KB pages (last refusal: "
-                  "error %lu)", (double) large_prefix / (1ull << 30), (double) lbytes / (1ull << 30),
-                  pieces.size() - (large_prefix < lbytes ? 1 : 0),
-                  simulate_gib >= 0 ? " (simulated: STRATA_LARGEPAGES_SIMULATE_1450, 4 KB stand-ins)" : "",
-                  (unsigned long) last);
+    const std::string rest = large_prefix < lbytes
+                                 ? ", the rest on 4 KB pages (last refusal: error " + std::to_string((unsigned long) last) + ")"
+                                 : std::string(", all of it");
+    std::snprintf(b, sizeof b, "%.1f of %.1f GiB on large pages in %zu pieces%s%s", (double) large_prefix / (1ull << 30),
+                  (double) lbytes / (1ull << 30), pieces.size() - (large_prefix < lbytes ? 1 : 0),
+                  simulate_gib >= 0 ? " (simulated: STRATA_LARGEPAGES_SIMULATE_1450, 4 KB stand-ins)" : "", rest.c_str());
     how = b;
     return base;
 }
@@ -447,8 +448,21 @@ void* reserve(uint64_t bytes, PageBacking& got, std::string& note, const std::st
 void release(void* p, uint64_t bytes) {
     if (!p) return;
 #ifdef _WIN32
-    (void) bytes;
-    VirtualFree(p, 0, MEM_RELEASE);
+    // #2295: a stitched arena is several allocations back to back, so free allocation after allocation until
+    // `bytes` are covered; the one-allocation arena is one pass.  Asking the OS for each allocation's extent keeps
+    // this right for every caller, without a list of the pieces.
+    uint8_t* q = (uint8_t*) p;
+    uint8_t* const end = q + bytes;
+    while (q < end) {
+        MEMORY_BASIC_INFORMATION mi{};
+        if (VirtualQuery(q, &mi, sizeof mi) == 0 || mi.State == MEM_FREE || mi.AllocationBase != q) break;
+        uint8_t* next = q;
+        while (next < end && VirtualQuery(next, &mi, sizeof mi) != 0 && mi.AllocationBase == q)
+            next += mi.RegionSize;
+        VirtualFree(q, 0, MEM_RELEASE);
+        if (next == q) break;
+        q = next;
+    }
 #else
     munmap(p, bytes);
 #endif
@@ -803,12 +817,7 @@ PinnedArena::~PinnedArena() {
         } else {
             pin_unregister(base);
         }
-#ifdef _WIN32
-        if (!pieces.empty()) {   // #2295: a stitched arena is one allocation per piece
-            for (void* p : pieces) VirtualFree(p, 0, MEM_RELEASE);
-            pieces.clear();
-        } else
-#endif
+        pieces.clear();   // release() frees a stitched arena piece by piece
         release(mapping_base ? mapping_base : base, mapping_bytes ? mapping_bytes : capacity);
         base = nullptr;
         mapping_base = nullptr;
