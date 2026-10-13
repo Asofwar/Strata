@@ -517,6 +517,9 @@ struct Options {
     /// `VRAM <reserve_mib>` command can give part of it back to other programs and take it again.  Off: one cudaMalloc.
     bool vram_elastic = false;
     int64_t vram_segment_mib = 512;
+    /// `--sysmem-fallback-shrink` (opt-in, Windows NVIDIA): when the startup read probe finds part of the expert cache
+    /// in system RAM (the WDDM sysmem fallback), cut the cache to the part in VRAM.  Off: the probe only warns.
+    bool sysmem_fallback_shrink = false;
     /// `--vram-reserve-later-mib N`: the reserve on a layer split's later cards (default: the same as the first).
     /// A card that drives no display needs less than the one the monitors are on.
     int vram_reserve_later_mib = -1;
@@ -780,6 +783,9 @@ void usage() {
                  "  --vram-elastic       --serve (#533, opt-in, NVIDIA): the expert cache in segments (--vram-segment-mib,\n"
                  "                       default 512), so the command `VRAM <reserve_mib>` (the server's POST /v1/vram) can\n"
                  "                       give VRAM back to other programs between requests and take it back later\n"
+                 "  --sysmem-fallback-shrink  (opt-in, Windows NVIDIA): when the startup probe finds part of the expert\n"
+                 "                       cache in system RAM (the driver's sysmem fallback), cut the cache to the part in VRAM\n"
+                 "                       (without it the probe only warns; STRATA_SYSMEM_PROBE=0 skips it, =verbose prints it)\n"
                  "  --batch N / --slots N  --serve (opt-in): up to N requests decode together in batch slots (2..8\n"
                  "                       normally; --batch-mtp waves more through eight-row windows),\n"
                  "                       each slot with its own session (VRAM like the main one); docs/BATCHING.md\n"
@@ -1273,6 +1279,79 @@ constexpr int64_t kVramSafeMib =
 #else
     512;
 #endif
+
+/// The WDDM sysmem fallback, measured instead of guessed (docs/DETAILS.md): with the NVIDIA driver's default
+/// "CUDA - Sysmem Fallback Policy" an allocation past the card's memory succeeds and lands in system RAM, so the start
+/// looks normal and only decode collapses.  The cache is read in up to kSysmemParts equal parts of at least
+/// kSysmemPartBytes (read-only, kSysmemPartBytes at the start of each); a part in system RAM reads at PCIe speed - tens
+/// of GB/s at most, where every supported card's VRAM reads at well over a hundred - so a part is "slow" below
+/// kSysmemSlowGbps or below a quarter of the fastest part.  Each read is several times the L2 (64 MB on an RTX 5080,
+/// 96 MB on a 5090): 64 MiB reads came back at 3,100 GB/s from the L2 next to 750 GB/s from VRAM on a 5080, which the
+/// quarter rule took for a slow part.
+constexpr int kSysmemParts = 16;
+constexpr int64_t kSysmemPartBytes = 256ll << 20;
+constexpr double kSysmemSlowGbps = 80.0;
+struct SysmemProbe {
+    int parts = 0, slow = 0;
+    int64_t first_slow_at = -1;   ///< the offset of the first slow part (-1: none)
+    double fast_gbps = 0.0, slow_gbps = 0.0;   ///< the fastest part, the slowest one
+};
+/// 0: off (STRATA_SYSMEM_PROBE=0), 1: warn on a find (the default on Windows NVIDIA), 2: also print the numbers when
+/// nothing is found (STRATA_SYSMEM_PROBE=verbose).  Elsewhere 0: Linux has no WDDM, and the policy is NVIDIA's.
+int sysmem_probe_mode() {
+#if defined(_WIN32) && !defined(STRATA_USE_HIP)
+    const char* v = std::getenv("STRATA_SYSMEM_PROBE");
+    if (v == nullptr) return 1;
+    const std::string s(v);
+    return s == "0" ? 0 : s == "verbose" || s == "2" ? 2 : 1;
+#else
+    return 0;
+#endif
+}
+SysmemProbe probe_sysmem(const uint8_t* base, int64_t bytes) {
+    SysmemProbe r;
+    const int parts = (int) std::min<int64_t>(kSysmemParts, base == nullptr ? 0 : bytes / kSysmemPartBytes);
+    if (parts < 2) return r;   // under 512 MiB: no part can be read past the L2
+    const int64_t part = bytes / parts / 16 * 16;
+    std::vector<double> gbps;
+    for (int i = 0; i < parts; ++i) {
+        const double g = strata::core::device_read_gbps(base + (int64_t) i * part, (uint64_t) kSysmemPartBytes);
+        if (g <= 0.0) return SysmemProbe{};   // a CUDA error: no finding rather than a wrong one
+        gbps.push_back(g);
+    }
+    // STRATA_TEST_SYSMEM_SLOW_GIB=X: a part starting X GiB or more into the cache reads as system RAM (tests the
+    // warning and --sysmem-fallback-shrink without over-committing a card)
+    if (const char* v = std::getenv("STRATA_TEST_SYSMEM_SLOW_GIB"); v != nullptr)
+        for (int i = 0; i < parts; ++i)
+            if ((double) i * (double) part >= std::atof(v) * 1073741824.0) gbps[(size_t) i] = 4.0;
+    r.parts = parts;
+    r.fast_gbps = *std::max_element(gbps.begin(), gbps.end());
+    r.slow_gbps = *std::min_element(gbps.begin(), gbps.end());
+    for (int i = 0; i < parts; ++i)
+        if (gbps[(size_t) i] < kSysmemSlowGbps || gbps[(size_t) i] < r.fast_gbps / 4.0) {
+            if (r.first_slow_at < 0) r.first_slow_at = (int64_t) i * part;
+            ++r.slow;
+        }
+    return r;
+}
+/// The one warning, naming the setting; `when` says which check found it.
+void sysmem_warn(const SysmemProbe& p, const char* when, bool shrink_on) {
+    if (p.slow == p.parts)
+        std::fprintf(stderr, "strata generate: WARNING: the expert cache reads at %.0f-%.0f GB/s %s - PCIe speed, not "
+                             "VRAM speed: the NVIDIA driver placed it in system RAM (the WDDM sysmem fallback), and "
+                             "decode is several times slower like this.\n",
+                     p.slow_gbps, p.fast_gbps, when);
+    else
+        std::fprintf(stderr, "strata generate: WARNING: %d of %d parts of the expert cache read at PCIe speed %s (%.0f "
+                             "GB/s, against %.0f GB/s for VRAM): the NVIDIA driver placed them in system RAM (the WDDM "
+                             "sysmem fallback), and decode is several times slower like this.\n",
+                     p.slow, p.parts, when, p.slow_gbps, p.fast_gbps);
+    std::fprintf(stderr, "strata generate: set \"CUDA - Sysmem Fallback Policy\" to \"Prefer No Sysmem Fallback\" for "
+                         "strata.exe (NVIDIA Control Panel > Manage 3D settings > Program settings) so an over-sized "
+                         "allocation fails instead, or leave room: --expert-cache auto, a smaller --expert-cache, a "
+                         "larger --vram-reserve-mib%s (docs/DETAILS.md)\n",
+                 shrink_on ? "" : "; --sysmem-fallback-shrink cuts the cache to the part in VRAM");
+}
 
 void stall_report(std::FILE* f, uint64_t layers_during) {
     strata::core::Progress& p = strata::core::progress();
@@ -2015,6 +2094,7 @@ int main(int argc, char** argv) {
         else if (a == "--no-split-rows") o.no_split_rows = true;
         else if (a == "--no-prefill-borrow") o.no_prefill_borrow = true;
         else if (a == "--vram-elastic") o.vram_elastic = true;
+        else if (a == "--sysmem-fallback-shrink") o.sysmem_fallback_shrink = true;
         else if (a == "--vram-segment-mib") o.vram_segment_mib = std::atoll(next("--vram-segment-mib"));
         else if (a == "--prefill-until") o.prefill_until = std::atoll(next("--prefill-until"));
         else if (a == "--dump-final-r") o.dump_final_r = next("--dump-final-r");
@@ -5254,6 +5334,45 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: expert cache: %d slots (%.2f GiB) after %d smaller tries - a bigger "
                                  "page file lets it use more of the free VRAM\n",
                          o.expert_cache, (double) xcache.bytes() / 1073741824.0, failed);
+        // The WDDM sysmem fallback (sysmem_probe_mode, probe_sysmem): the slots are written by now (open zeroes them),
+        // so each part of the cache is either in VRAM or in system RAM, and a read of it says which.  A warning by
+        // default; --sysmem-fallback-shrink also cuts the cache to the part before the first slow one, less the
+        // reserve (or by a quarter when all of it is slow), up to four times.  Nothing found: nothing is said.
+        if (const int mode = sysmem_probe_mode(); mode > 0 && o.expert_cache > 0) {
+            SysmemProbe sp = probe_sysmem(xcache.device_slot(0), xcache.bytes());
+            if (mode == 2 && sp.parts > 0)
+                std::fprintf(stderr, "strata generate: sysmem probe: %d of %d parts of the expert cache (%.2f GiB) slow; "
+                                     "%.0f-%.0f GB/s\n", sp.slow, sp.parts, (double) xcache.bytes() / 1073741824.0,
+                             sp.slow_gbps, sp.fast_gbps);
+            for (int tries = 0; sp.slow > 0 && tries < 4; ++tries) {
+                if (tries == 0) sysmem_warn(sp, "once the slots are written", o.sysmem_fallback_shrink);
+                if (!o.sysmem_fallback_shrink) break;
+                const int64_t keep = sp.first_slow_at > 0 ? sp.first_slow_at - ((int64_t) o.vram_reserve_mib << 20)
+                                                          : xcache.bytes() / 4 * 3;
+                xcache.close();
+                if (!shrink_to(keep)) {
+                    std::fprintf(stderr, "strata generate: --sysmem-fallback-shrink: no part of the expert cache is left "
+                                         "in VRAM after the %d MiB reserve: running without it\n", o.vram_reserve_mib);
+                    break;
+                }
+                const bool ok = sized_slots.empty()
+                    ? xcache.open(o.expert_cache, g.n_layers, g.n_expert, (int64_t) strata::kernels::cpu::expert_layout().max_blob, err)
+                    : xcache.open_sized(sized_slots, g.n_layers, g.n_expert, err);
+                if (!ok) {
+                    std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+                    return 1;
+                }
+                sp = probe_sysmem(xcache.device_slot(0), xcache.bytes());
+                if (sp.slow > 0)
+                    std::fprintf(stderr, "strata generate: --sysmem-fallback-shrink: %d slots (%.2f GiB), %d of %d parts "
+                                         "still slow (%.0f GB/s against %.0f)\n", o.expert_cache,
+                                 (double) xcache.bytes() / 1073741824.0, sp.slow, sp.parts, sp.slow_gbps, sp.fast_gbps);
+                else
+                    std::fprintf(stderr, "strata generate: --sysmem-fallback-shrink: %d slots (%.2f GiB), all of it in "
+                                         "VRAM now (%.0f-%.0f GB/s)\n", o.expert_cache,
+                                 (double) xcache.bytes() / 1073741824.0, sp.slow_gbps, sp.fast_gbps);
+            }
+        }
     }
     if (o.expert_cache > 0) {
         std::fprintf(stderr, "strata generate: expert cache %lld slots, %.2f GiB of VRAM; policy is\n",
@@ -9136,6 +9255,47 @@ int main(int argc, char** argv) {
                                          "smaller one - or --expert-cache auto, which checks the free VRAM once the "
                                          "slots are written - leaves room; decode can be several times slower with the "
                                          "card this full\n", (long long) xcache.slots());
+            }
+            // the sysmem probe again, now everything is allocated: what came after the cache (the verify windows, the
+            // prompt path, the draft head) can push part of it out to system RAM.  A warning only; the slots are filled.
+            if (const int mode = sysmem_probe_mode(); mode > 0 && xcache.slots() > 0) {
+                const SysmemProbe sp = probe_sysmem(xcache.device_slot(0), xcache.bytes());
+                if (mode == 2 && sp.parts > 0)
+                    std::fprintf(stderr, "strata serve: sysmem probe with everything loaded: %d of %d parts of the expert "
+                                         "cache slow; %.0f-%.0f GB/s\n", sp.slow, sp.parts, sp.slow_gbps, sp.fast_gbps);
+                if (sp.slow > 0) sysmem_warn(sp, "with everything loaded", false);
+                // A full card spills its NEWEST allocations, not the cache: on an RTX 5080 1 GiB blocks read at
+                // ~840 GB/s up to the card's size and at 3-41 GB/s past it, while a cache written first stayed in VRAM
+                // with 0 MiB left.  So below kVramSafeMib one probe-sized buffer is allocated, written, read and freed:
+                // slow, and what the engine allocated last (the verify windows' buffers, the prompt path) is in system
+                // RAM too.
+                if (free_mib < kVramSafeMib) {
+                    void* t = nullptr;
+                    if (cudaMalloc(&t, (size_t) kSysmemPartBytes) == cudaSuccess) {
+                        double gb = -1.0;
+                        if (cudaMemset(t, 0, (size_t) kSysmemPartBytes) == cudaSuccess && cudaDeviceSynchronize() == cudaSuccess)
+                            gb = strata::core::device_read_gbps(t, (uint64_t) kSysmemPartBytes);
+                        cudaFree(t);
+                        const double vram = sp.parts > 0 ? sp.fast_gbps : 0.0;
+                        const bool slow = gb > 0.0 && (gb < kSysmemSlowGbps || (vram > 0.0 && gb < vram / 4.0));
+                        if (mode == 2)
+                            std::fprintf(stderr, "strata serve: sysmem probe: a new %lld MiB buffer reads at %.0f GB/s\n",
+                                         (long long) (kSysmemPartBytes >> 20), gb);
+                        if (slow)
+                            std::fprintf(stderr, "strata serve: WARNING: with %lld MiB of VRAM free, a new buffer reads at "
+                                                 "%.0f GB/s%s - PCIe speed: the card is full and the NVIDIA driver puts "
+                                                 "what is allocated now in system RAM (the WDDM sysmem fallback), so what "
+                                                 "the engine allocated last can be there too and decode several times "
+                                                 "slower. Set \"CUDA - Sysmem Fallback Policy\" to \"Prefer No Sysmem "
+                                                 "Fallback\" for strata.exe (NVIDIA Control Panel > Manage 3D settings > "
+                                                 "Program settings), or add --vram-reserve-mib %lld (docs/DETAILS.md)\n",
+                                         (long long) free_mib, gb,
+                                         vram > 0.0 ? (" (the expert cache: " + std::to_string((int) vram) + " GB/s)").c_str() : "",
+                                         (long long) (o.vram_reserve_mib + kVramSafeMib - free_mib));
+                    } else {
+                        (void) cudaGetLastError();
+                    }
+                }
             }
         }
         // what the server's Monitor tab shows (servers before 0.1.8 skip unknown lines until READY)
