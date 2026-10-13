@@ -4078,8 +4078,10 @@ class ReasoningCloseRetry(unittest.TestCase):
         self.httpd.shutdown()
         self.httpd.server_close()
 
-    def chat(self):
-        body = {"model": "m", "messages": [{"role": "user", "content": "2+2?"}], "max_tokens": 300}
+    def chat(self, tools=None, max_tokens=300):
+        body = {"model": "m", "messages": [{"role": "user", "content": "2+2?"}], "max_tokens": max_tokens}
+        if tools:
+            body["tools"] = tools
         req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=30) as r:
@@ -4114,6 +4116,32 @@ class ReasoningCloseRetry(unittest.TestCase):
         self.assertEqual(len(self.engine.prompts), 1)
         self.assertFalse(c["message"].get("content"))
         self.assertEqual(c["message"]["reasoning_content"], 'two plus two is "4"')
+
+    WRITE = [{"type": "function", "function": {"name": "write", "parameters": {
+        "type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}}}]
+    # #2297: an agent's history of long calls; the thinking drafts one more (a <tool_call> at the start of a line that
+    # never ends) and the turn ends there, still inside <think>
+    DRAFT = ("I already wrote the file with:" + chr(10) + "<tool_call>" + chr(10) + "<function=write>" + chr(10) +
+             "<parameter=content>" + chr(10) + "def add(a, b):" + chr(10) + "    return a + b" + chr(10) +
+             "So two plus two is four.")
+
+    def test_on_it_also_closes_a_thinking_that_ends_inside_a_drafted_call(self):
+        self.svc.reasoning_close_retry = True
+        self.engine.THOUGHT = self.DRAFT
+        c = self.chat(tools=self.WRITE, max_tokens=600)
+        self.assertEqual(len(self.engine.prompts), 2)
+        self.assertTrue(self.tok.decode(self.engine.prompts[1]).endswith("</think>" + chr(10) + chr(10)))
+        self.assertEqual(c["message"]["content"], EndsInsideThinkingEngine.ANSWER)
+        self.assertIn("two plus two is four", c["message"]["reasoning_content"])
+        self.assertNotIn("tool_calls", c["message"])
+        self.assertEqual(c["finish_reason"], "stop")
+
+    def test_off_by_default_a_drafted_call_stays_reasoning(self):
+        self.engine.THOUGHT = self.DRAFT
+        c = self.chat(tools=self.WRITE, max_tokens=600)
+        self.assertEqual(len(self.engine.prompts), 1)
+        self.assertFalse(c["message"].get("content"))
+        self.assertIn("<tool_call>", c["message"]["reasoning_content"])
 
 
 class ThinkingBudget(unittest.TestCase):
