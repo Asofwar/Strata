@@ -337,6 +337,11 @@ busy, and can stop responding for a minute or two, once per restart. When it fin
 so the server is already running when it returns - do not start it a second time.
 NVIDIA cards for now. [What it measures](DETAILS.md#double-click-start-herebat).
 
+`START-HERE.bat --calibrate-switches` (opt-in) also measures two decode switches that are faster on some PCs and
+slower on others (`STRATA_ADAPT_OVERLAP`, `STRATA_ADAPT_LAG`), off against on with 3 engine starts each, and keeps
+one only when it beats the noise between starts and gives the same text. A few minutes on a fast PC; the model is
+loaded up to 13 times. [Details and an RTX 5080 measurement](DETAILS.md#double-click-start-herebat).
+
 ## Options without questions
 
 For the Terminal, `strata launch --help` lists every flag; the most used are in [TERMINAL_LAUNCH.md](TERMINAL_LAUNCH.md). These are the options of the installer from source:
@@ -357,6 +362,7 @@ START-HERE.bat --no-browser                     do not open the chat page when t
 START-HERE.bat --setup --backend hip            the AMD engine on a PC that also has an NVIDIA card
 START-HERE.bat --setup --host 0.0.0.0 --api-key <secret>     reachable from other devices, with a key
 START-HERE.bat --calibrate                      tune the engine for this PC (about 15-30 minutes, longer on a slow card), then start
+START-HERE.bat --calibrate-switches             measure the opt-in decode switches on this PC (opt-in), then start
 START-HERE.bat --check                          only check this PC
 ```
 
