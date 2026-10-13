@@ -65,6 +65,11 @@ DeviceInfo device_info(int ordinal = 0);
 /// otherwise fail at its first kernel launch, with nothing that names the cause.
 std::string device_code_error();
 
+/// How fast the current device reads `bytes` of its memory at `p`, in GB/s: the best of `reps` timed passes of a
+/// read-only kernel (nothing at `p` is written).  Memory the WDDM sysmem fallback placed in system RAM reads at PCIe
+/// speed, several times below VRAM.  < 0 on a CUDA error (cleared).
+double device_read_gbps(const void* p, uint64_t bytes, int reps = 3);
+
 class CudaError : public std::runtime_error {
 public:
     CudaError(const std::string& what, int code) : std::runtime_error(what), code_(code) {}

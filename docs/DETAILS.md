@@ -844,6 +844,49 @@ with the fallback off it still starts and degrades instead of failing - the slac
 worth more than the extra slots, which is the same ordering measured above (enkynakamura, #781; one 256-token sample
 per step, so the upper rows are noisy).
 
+**The engine measures where the memory is (Windows, NVIDIA).** Memory the sysmem fallback put in system RAM is read
+by the GPU over PCIe, so it can be found by reading it. Measured on an RTX 5080 16 GB (driver default, that is with
+the fallback allowed), a test program that allocated, wrote and read 1 GiB blocks one after another: blocks 0-14 read
+at 829-863 GB/s, and blocks 15-18, past the card's 15.9 GiB, were allocated without an error and read at 41, 15, 3 and
+3 GB/s (3-4 GB/s once all were written). The newest allocations are the ones that go: the first blocks stayed at VRAM
+speed throughout. `cudaMemGetInfo` read 0.00 GiB free one block before the first slow one, so a 0 MiB figure alone
+does not prove a spill.
+
+So the engine reads the expert cache once its slots are written: up to 16 equal parts, 256 MiB at the start of each,
+with a read-only kernel (`strata::core::device_read_gbps`). A part is slow below 80 GB/s or below a quarter of the
+fastest part. Each read has to be several times the GPU's L2 (64 MB on the 5080): 64 MiB reads came back at
+3,100 GB/s from the L2 next to 750 GB/s from VRAM, and the quarter rule took that for a slow part. On a find it
+prints one warning that names `CUDA - Sysmem Fallback Policy` = `Prefer No Sysmem Fallback` for `strata.exe` (NVIDIA
+Control Panel > Manage 3D settings > Program settings) and the knobs that leave room. The serve check (`... MiB of
+VRAM free with everything loaded`) reads the cache again, because what is allocated after it can push part of it out.
+Below 1 GiB free it also allocates, writes, reads and frees one 256 MiB buffer: if that reads at PCIe speed, the card
+is full, and what the engine allocated last (the verify windows' buffers, the prompt path) can be in system RAM too.
+The engine only reads; it never changes a driver setting.
+
+`--sysmem-fallback-shrink` (opt-in) also cuts the cache when the startup probe finds a slow part: to the part before
+the first slow one, less `--vram-reserve-mib`, or by a quarter when all of it is slow, then reads it again (up to four
+times). `STRATA_SYSMEM_PROBE=0` skips the probes, and `STRATA_SYSMEM_PROBE=verbose` prints the figures when nothing is
+found. Linux, HIP and SYCL builds do not run them. The probe reads 12 GiB (16 x 256 MiB, 3 times), about 15 ms at
+VRAM speed, and changes no output bit.
+
+Measured on that RTX 5080, Coder IQ1_M, `--serve`, 65,536 context, INT8 KV, one start per row:
+
+| start | expert cache | probe at startup | VRAM free with everything loaded | probe then |
+| --- | --- | --- | --- | --- |
+| `auto` | 4,543 slots, 8.65 GiB | 0 of 16 slow, 805-858 GB/s | 371 MiB | 0 of 16; a new 256 MiB buffer 854 GB/s |
+| `--expert-cache 3813 --vram-reserve-mib 0` | 4,972 slots, 9.45 GiB | 0 of 16 slow, 816-859 GB/s | 0 MiB (`LOW`) | 0 of 16; a new 256 MiB buffer 871 GB/s |
+| `auto`, another process holding 5 GiB | 2,675 slots, 5.12 GiB | 0 of 16 slow, 818-861 GB/s | 4,107 MiB | 0 of 16 |
+| `--expert-cache 3563`, another process holding 5 GiB | 4,641 slots, 8.83 GiB | 0 of 16 slow, 814-858 GB/s | 0 MiB (`LOW`) | 0 of 16 |
+
+No row spilled, and the probe said nothing in any of them. The other process's 5 GiB was not in this process's free
+figure (9.52 GiB read at the sizing with and without it, the per-process figure of PR #1911), but Windows moved the
+idle process's memory out rather than the engine's. `auto`'s write-back check read 0 MiB there and shrank the cache
+three times. The warning and the shrink were run with `STRATA_TEST_SYSMEM_SLOW_GIB=X` (a test switch: parts from X GiB
+into the cache read as system RAM), because this card would not spill the cache itself: with X = 6 and `--expert-cache 3563` (4,641 slots, 8.83 GiB) the startup and the serve check each printed the warning (5 of 16 parts), and with `--sysmem-fallback-shrink` the cache was cut to 2,816 slots (5.39 GiB: the 11 parts before the first slow one, less the 700 MiB reserve), read again at 816-859 GB/s, and the serve check found 3,835 MiB free. Not measured: a
+start where the cache really is in system RAM, and any card but this one. PR #1911 (`STRATA_VRAM_FREE=device`, NVML's
+whole-card free figure for the sizing) prevents part of this; the probe is the check of what actually happened, and
+works with either figure.
+
 **The free figure moves after startup.** The `... MiB of VRAM free with everything loaded` line is read before the
 verify windows are captured (each captured window, and each `--batch` slot layout, takes some tens of MiB: 538 MiB at
 that line was 395 MiB after the last capture in #2065, an RTX 4090 D with `--batch 2` at 262,144 context). Below about

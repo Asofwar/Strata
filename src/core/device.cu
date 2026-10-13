@@ -324,6 +324,46 @@ DeviceInfo device_info(int ordinal) {
     return d;
 }
 
+namespace {
+// Reads every 16-byte word of [p, p + n * 16) and stores into `sink` only for a value no read can produce together
+// with the others, so the loads cannot be optimised away and nothing is written in practice.
+__global__ void read_probe_kernel(const uint4* p, uint64_t n, unsigned* sink) {
+    unsigned acc = 0;
+    for (uint64_t i = (uint64_t) blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (uint64_t) gridDim.x * blockDim.x) {
+        const uint4 v = p[i];
+        acc ^= v.x ^ v.y ^ v.z ^ v.w;
+    }
+    if (acc == 0x9e3779b9u && threadIdx.x == 0x3ff) *sink = acc;
+}
+}  // namespace
+
+double device_read_gbps(const void* p, uint64_t bytes, int reps) {
+    const uint64_t n = bytes / sizeof(uint4);
+    if (p == nullptr || n == 0 || reps <= 0) return -1.0;
+    unsigned* sink = nullptr;
+    cudaEvent_t a = nullptr, b = nullptr;
+    double best_ms = -1.0;
+    bool ok = cudaMalloc((void**) &sink, sizeof(unsigned)) == cudaSuccess && cudaEventCreate(&a) == cudaSuccess &&
+              cudaEventCreate(&b) == cudaSuccess;
+    for (int r = 0; ok && r < reps; ++r) {
+        ok = cudaEventRecord(a) == cudaSuccess;
+        read_probe_kernel<<<1024, 256>>>((const uint4*) p, n, sink);
+        ok = ok && cudaGetLastError() == cudaSuccess && cudaEventRecord(b) == cudaSuccess &&
+             cudaEventSynchronize(b) == cudaSuccess;
+        float ms = 0.0f;
+        if (ok && cudaEventElapsedTime(&ms, a, b) == cudaSuccess && ms > 0.0f && (best_ms < 0.0 || ms < best_ms))
+            best_ms = ms;
+    }
+    if (a != nullptr) cudaEventDestroy(a);
+    if (b != nullptr) cudaEventDestroy(b);
+    if (sink != nullptr) cudaFree(sink);
+    if (!ok || best_ms <= 0.0) {
+        (void) cudaGetLastError();
+        return -1.0;
+    }
+    return (double) (n * sizeof(uint4)) / (best_ms * 1e6);
+}
+
 DeviceArena::DeviceArena(uint64_t bytes, int ordinal, bool poison)
     : capacity_(bytes), ordinal_(ordinal), poison_(poison) {
     if (bytes == 0) throw CudaError("DeviceArena of 0 bytes", -1);
