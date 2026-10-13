@@ -4364,9 +4364,49 @@ def hardware_key(cfg: dict) -> str:
                      cfg.get("model_name", "?"), ctx, "images" if "--vision" in a else "text"])
 
 
-def calibrate_config(cfg_path: Path) -> bool:
+def calibrate_config(cfg_path: Path, settings: bool = True, switches: bool = False) -> bool:
     """Measure the engine's hardware-dependent settings on this PC (tools/calibrate.py), write them into the run
-    config and remember them per PC and model in the settings file, so an update or a reinstall keeps them."""
+    config and remember them per PC and model in the settings file, so an update or a reinstall keeps them.
+    `switches` (--calibrate-switches, opt-in): also the decode switches that win on some PCs and lose on others
+    (STRATA_ADAPT_OVERLAP, STRATA_ADAPT_LAG), after the settings; the winner goes into the config's "env"."""
+    if settings and not calibrate_settings(cfg_path):
+        return False
+    switched = calibrate_switches(cfg_path) if switches else True
+    return switched or settings                        # a failed switch step after tuned settings is said by itself
+
+
+def calibrate_switches(cfg_path: Path) -> bool:
+    """--calibrate-switches: each opt-in decode switch off against on, a restart per sample (tools/calibrate.py
+    run_switches); the one that wins by more than the noise with the same text is written into the config's "env"
+    and remembered with the PC's calibration.  A failure keeps the config as it was."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    import calibrate as CAL
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
+    say()
+    say("  Measuring the opt-in decode switches (" + ", ".join(CAL.SWITCHES) + f") on this PC: {CAL.SWITCH_ROUNDS} "
+        f"engine starts each and {CAL.SWITCH_ROUNDS} with all of them off (roughly 5-15 minutes).")
+    try:
+        res = CAL.run_switches(cfg, say=say)
+    except Exception as e:                             # never stops an install: the config stays as it was
+        warn(f"the switch measurement did not finish ({e}): the config's switches stay as they were")
+        return False
+    env = CAL.apply_env(cfg.get("env"), res["env"])
+    if env:
+        cfg["env"] = env
+    else:
+        cfg.pop("env", None)
+    write_config(cfg_path, cfg)
+    st = load_settings()
+    entry = st.setdefault("calibration", {}).setdefault(hardware_key(cfg), {})   # no "settings": --calibrate's are its own
+    entry.update(env=res["env"], switches_date=time.strftime("%Y-%m-%d"))
+    save_settings(st)
+    ok("decode switches for this PC: " + (", ".join(f"{k}={v}" for k, v in res["env"].items()) if res["env"]
+                                          else "none wins here, all stay off")
+       + (f" ({res['report']['tok_s']} tok/s)" if res["report"].get("tok_s") else ""))
+    return True
+
+
+def calibrate_settings(cfg_path: Path) -> bool:
     sys.path.insert(0, str(ROOT / "tools"))
     import calibrate as CAL
     cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
@@ -4388,8 +4428,10 @@ def calibrate_config(cfg_path: Path) -> bool:
     cfg["args"] = CAL.apply(cfg["args"], res["settings"])
     write_config(cfg_path, cfg)
     st = load_settings()
+    old = (st.get("calibration") or {}).get(hardware_key(cfg)) or {}
     st.setdefault("calibration", {})[hardware_key(cfg)] = {"settings": res["settings"], "tok_s": res["report"].get("tok_s"),
-                                                           "date": time.strftime("%Y-%m-%d")}
+                                                           "date": time.strftime("%Y-%m-%d"),
+                                                           **{k: old[k] for k in ("env", "switches_date") if k in old}}
     save_settings(st)
     if res["settings"]:
         ok("tuned for this PC: " + ", ".join(f"{k} {v}" for k, v in res["settings"].items())
@@ -5122,6 +5164,9 @@ def main() -> int:
     ap.add_argument("--check", action="store_true", help="only check this PC and exit")
     ap.add_argument("--calibrate", action="store_true",
                     help="tune the engine's settings for this PC (about 15-30 minutes, longer on a slow card), then start the model")
+    ap.add_argument("--calibrate-switches", action="store_true",
+                    help="measure the opt-in decode switches (STRATA_ADAPT_OVERLAP, STRATA_ADAPT_LAG) on this PC and keep "
+                         "the one that is faster here with the same text (about 5-15 minutes); with --calibrate, after it")
     ap.add_argument("--draft-vocab", choices=list(DRAFT_VOCABS),
                     help="the draft layer's tokens: cjk = with Chinese, Japanese and Korean (default), en = English "
                          "and code only (~110 MiB less VRAM, English answers 1-2%% faster), cyrillic = English, code "
@@ -5221,16 +5266,18 @@ def main() -> int:
     # choice, and asked once when the PC has cards that could share the model
     run_gpu = start_gpus(a.gpus) or a.gpu
     port = a.port or 8080                              # a new install's port (issue #32: --port for an existing one)
-    if a.calibrate and (a.setup or a.check or not have):    # #2036: said, not dropped
+    calibrating = a.calibrate or a.calibrate_switches
+    flag = "--calibrate" if a.calibrate else "--calibrate-switches"
+    if calibrating and (a.setup or a.check or not have):    # #2036: said, not dropped
         why = ("--setup" if a.setup else "--check" if a.check else "no model is installed yet")
-        warn(f"--calibrate does nothing with {why}: it tunes a model that is already installed. Run setup first, "
-             "then " + ("START-HERE.bat" if WIN else "./setup.sh") + " --calibrate [--model NAME]")
-    if have and a.calibrate and not (a.setup or a.check):
+        warn(f"{flag} does nothing with {why}: it tunes a model that is already installed. Run setup first, "
+             "then " + ("START-HERE.bat" if WIN else "./setup.sh") + f" {flag} [--model NAME]")
+    if have and calibrating and not (a.setup or a.check):
         targets = calibration_targets(have, a.model, a.family)
         if not targets:                                # #2036: --model names a model that is not installed
             names = ", ".join(sorted({choices_from_config(c)["model"] or c.stem for c in have}))
-            fail(f"--calibrate: {a.model or a.family} is not installed (installed: {names})",
-                 "calibrate an installed model, or set this one up first without --calibrate")
+            fail(f"{flag}: {a.model or a.family} is not installed (installed: {names})",
+                 f"calibrate an installed model, or set this one up first without {flag}")
         have = targets
         if not a.build:
             update_installed_engine(a.prebuilt)
@@ -5240,10 +5287,13 @@ def main() -> int:
             for i, c in enumerate(have, 1):
                 say(f"  {i}) {json.loads(c.read_text(encoding='utf-8-sig')).get('model_name', c.stem)}")
             pick_cfg = have[int(ask("Tune which one?", [str(i) for i in range(1, len(have) + 1)], "1", a.yes)) - 1]
-        if not calibrate_config(pick_cfg):             # #447: said again where it is not lost above the start
+        if not calibrate_config(pick_cfg, a.calibrate, a.calibrate_switches):   # #447: said again where it is not lost above the start
             say()
-            warn("this PC is NOT tuned: the tuning failed (the reason is above); the model "
-                 + ("keeps" if a.no_start else "starts with") + " the default settings")
+            if a.calibrate:
+                warn("this PC is NOT tuned: the tuning failed (the reason is above); the model "
+                     + ("keeps" if a.no_start else "starts with") + " the default settings")
+            else:
+                warn("the decode switches were NOT measured (the reason is above); the config keeps the ones it had")
         return 0 if a.no_start else start(pick_cfg, a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,
                      keep={"host": a.host, "api_key": a.api_key, "draft_vocab": a.draft_vocab,
                            "vram_reserve_mib": a.vram_reserve_mib, "open_browser": a.browser})
@@ -6176,7 +6226,13 @@ def main() -> int:
         warn("--vision-tokens: images are off for this model, so it is not used")
     cfg_path = ROOT / f"strata-{tag.lower()}.json"
     cal = setup_calibration(cfg, hip)                  # #566: Linux HIP too; the tuning is offered on NVIDIA only
-    if cal is not None:
+    if cal is not None and "env" in cal:               # --calibrate-switches: the decode switch that won here, if any
+        sys.path.insert(0, str(ROOT / "tools"))
+        import calibrate as CAL
+        cfg["env"] = CAL.apply_env(cfg.get("env"), cal["env"])
+        if not cfg["env"]:
+            del cfg["env"]
+    if cal is not None and "settings" in cal:
         sys.path.insert(0, str(ROOT / "tools"))
         import calibrate as CAL
         cfg["args"] = CAL.apply(cfg["args"], cal.get("settings") or {})
@@ -6191,7 +6247,7 @@ def main() -> int:
     write_setup_config(cfg_path, cfg, adopted if adopted is not None and adopted.name == cfg_path.name else None)
     script = write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
     # offered only when someone answers: --yes installs and adopted earlier installs are not held up by it
-    if cal is None and not hip and not a.no_start and not a.yes and ask(
+    if (cal is None or "settings" not in cal) and not hip and not a.no_start and not a.yes and ask(
             "Tune Strata for this PC now? It measures a few engine settings (about 15-30 minutes, longer on a slow card; the PC is busy "
             "meanwhile; later: START-HERE --calibrate)", ["y", "n"], "y", a.yes) == "y":
         tuned = calibrate_config(cfg_path)

@@ -472,6 +472,7 @@ START-HERE.bat --data-dir E:\Strata-data         keep the model files somewhere 
 START-HERE.bat --port 8081                      another port
 START-HERE.bat --gpu 1                          another GPU (numbered as nvidia-smi; setup picks the one with the most VRAM)
 START-HERE.bat --calibrate                      tune the engine for this PC (about 15-30 minutes, longer on a slow card), then start
+START-HERE.bat --calibrate-switches             measure the opt-in decode switches on this PC (opt-in, see below), then start
 ```
 
 With more than one model installed, it asks which one to start. `run-<model>.bat` starts a model directly.
@@ -493,6 +494,47 @@ speed with each setting and keeps one only when it is more than 3% faster. The r
 
 Measuring the worker count needs a fresh engine, so the model is loaded more than once: the PC is busy, and can
 stop responding for a minute or two, once per restart. It then starts the model, like a plain `START-HERE.bat`.
+
+**The opt-in decode switches (`--calibrate-switches`, opt-in).** `STRATA_ADAPT_OVERLAP=1` and `STRATA_ADAPT_LAG=2`
+win on some PCs and lose on others (the overlap: +8.3% on an RTX A4000, -21% on an RTX 5090 Laptop; the lag: +3.5% on a
+Tesla P100, -1.3% on an RTX 3060; see [More opt-in switches](#more-opt-in-switches-measured-for-0141-all-off-unless-you-set-them)),
+so they stay off by default. `START-HERE.bat --calibrate-switches` (Linux: `./setup.sh --calibrate-switches`; with
+`--calibrate`, after it, measured with what it chose) measures them on your PC with the config as it runs:
+
+- every switch off, and each switch on alone (the two exclude each other: the overlap is off with a lag), 3 engine
+  starts each, interleaved, every other round in reverse order; a start gives one sample, the median decode rate of
+  three fixed prompts with 512-token greedy answers after one warm-up round;
+- a switch counts as faster when its median beats the baseline's by more than the noise margin: the baseline's own
+  spread across its starts ((max - min) / median), at least 3%;
+- a faster switch must then give the same greedy text: the baseline, the switch and the baseline again, with the
+  expert cache fixed at 75% of what `auto` gave (`auto` follows the free VRAM of the moment, and a cache a few experts
+  larger moves experts between the GPU and the CPU, which rounds differently) and the prompt's CPU share off
+  (`STRATA_PREFILL_CPU_SHARE=0`: on short prompts the idle CPU takes some experts depending on timing, and the first
+  answer token could differ between two starts). When the two baseline starts do not give the same text, no switch
+  can be checked and none is kept.
+
+The winner, if any, goes into the config's `"env"` (any other value of these two variables there is removed), and is
+remembered with the PC's calibration, so a reinstall keeps it. Nothing changes without the flag: `--calibrate` alone
+does not measure them. `STRATA_STAGE_PIN` is not measured (not exact yet); `--adapt-async 1` is not either: it is not
+bit-exact from run to run by design, so it could never pass the text check.
+
+Measured on an RTX 5080 16 GB (PCIe 5.0 x8) with an i9-14900K and 48 GB RAM, Windows 11, Ornith 1.5 35B-A3B
+abliterated IQ4_XS at 262K context (`--spec 4`, `--kv int8`, the adaptive tier at every 1 / 160 swaps / 0.97, 7 pool
+workers, `STRATA_ATTN_SPLITS=256`), the GPU shared with other programs (so the rate moves between starts). Decode tok/s, median of 3 starts (slowest-fastest),
+three whole runs; 9 engine starts in about 2 minutes, 3 more for the text check:
+
+| run | every switch off | `STRATA_ADAPT_OVERLAP=1` | `STRATA_ADAPT_LAG=2` | noise margin |
+|---|---|---|---|---|
+| 1 | 237.4 (234.9-262.9) | 261.7 (256.6-261.8), +10.2% | 256.2 (245.6-270.6), +7.9% | 11.8% |
+| 2 | 235.4 (234.6-260.5) | 271.3 (245.1-275.0), +15.3% | 242.1 (241.2-254.8), +2.9% | 11.0% |
+| 3 | 272.0 (258.5-288.5) | 309.9 (259.3-324.0), +13.9% | 312.2 (298.8-313.3), +14.8% | 11.0% |
+
+The overlap was faster than the baseline in all three runs and beat the noise margin in two. In run 3 both switches
+did; the text check (expert cache fixed at 4288, two baseline starts with the same text) gave the same text with the
+overlap and another text with the lag, so the overlap was kept: `"env": {"STRATA_ADAPT_OVERLAP": "1"}`. Runs 1 and 2
+were made while the check was being written and kept nothing. Without `STRATA_PREFILL_CPU_SHARE=0` no two baseline starts
+gave the same text here, with the cache fixed, without the adaptive tier and with one CPU worker alike (the first
+difference at the first token of one prompt and at token 28 and 323 of the others).
 
 **Manual CPU task granularity.** `--pool-tasks N` sets the target total number of row tasks in each batched
 CPU expert Gate/Up and Down phase, not the number of threads or tasks per expert. The default `0` keeps

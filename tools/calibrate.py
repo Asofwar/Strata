@@ -19,11 +19,19 @@ tier need a restart per value.  Decode speed only: the prompt path streams every
 A setting is kept only when it beats the default by more than MIN_GAIN in an interleaved re-measurement - the
 adaptive expert tier and the OS make single measurements noisy by a few percent.
 
+Opt-in (setup.py --calibrate-switches, `run_switches`): the decode switches that win on one PC and lose on another
+(STRATA_ADAPT_OVERLAP: +8.3% on an A4000, -21% on an RTX 5090 Laptop; STRATA_ADAPT_LAG=2: +3.5% on a P100, -1.3% on
+an RTX 3060).  Each is measured off against on, a restart per sample, the starts interleaved; one is kept only when it
+beats the baseline by more than the baseline's own spread across its starts (and MIN_GAIN), and with the same greedy
+text.
+
     python tools/calibrate.py strata-q2_0.json        # measure and print; setup.py --calibrate also saves it
+    python tools/calibrate.py --switches strata-q2_0.json
 """
 from __future__ import annotations
 
 import json
+import os
 import statistics
 import sys
 import threading
@@ -46,6 +54,20 @@ MAX_NEW = 128
 # the expert tier follows a text over some windows: 128-token answers end before it shows (on a Xeon E5-2673 v3 with
 # DDR3, every 1 / 160 / 0.97 measured +0.7% with 128 tokens and +7.9% with 512-token answers), so its step uses these
 TIER_MAX_NEW = 512
+# the opt-in decode switches (`run_switches`): the baseline sets every key to its off value, so an env var the config
+# or the shell carries does not decide it; each candidate turns one on.  The two exclude each other (the overlap is off
+# with a lag other than 1), so at most one is kept.  STRATA_STAGE_PIN is not here: it is not exact yet.
+SWITCH_OFF = {"STRATA_ADAPT_OVERLAP": "0", "STRATA_ADAPT_LAG": "1"}
+SWITCHES = {"STRATA_ADAPT_OVERLAP": "1", "STRATA_ADAPT_LAG": "2"}
+SWITCH_ROUNDS = 3                  # engine starts per candidate; each start gives one sample
+# the text check pins the expert cache below what `auto` found free: `auto` sizes it from the free VRAM of the moment,
+# and a cache a few experts larger or smaller moves experts between the GPU and the CPU, which changes the greedy text
+# between two starts with the same settings (an RTX 5080 shared with other programs: 5337 to 5455 experts, and no two
+# starts with the same text).  A fixed cache below the free VRAM is the same in every start.
+SWITCH_CHECK_CACHE = 0.75
+# and turns the prompt's CPU share off: on prompts below 1024 tokens the idle CPU takes some of the experts the GPU
+# would stream, which ones depending on timing, so the first answer token could differ between two starts too
+SWITCH_CHECK_ENV = {"STRATA_PREFILL_CPU_SHARE": "0"}
 PROMPTS = (
     "Write a Python function that merges two sorted lists into one sorted list, with a docstring and two tests.",
     "Explain in two paragraphs how a refrigerator moves heat from inside to outside.",
@@ -115,14 +137,18 @@ class Session:
         self.engine = engine
         self.ids_list = ids_list
 
-    def rate(self, tune: dict | None = None, max_new: int | None = None) -> float:
+    def rate(self, tune: dict | None = None, max_new: int | None = None, texts: list | None = None) -> float:
+        """`texts`, when given, gets each prompt's generated token ids (greedy: temperature 0)."""
         rates = []
         for ids in self.ids_list:
             sampling = {"temperature": 0}
             if tune:
                 sampling["strata_tune"] = tune
-            n = sum(1 for t in self.engine.generate(ids, max_new or MAX_NEW, sampling, threading.Event())
-                    if t is not None)
+            out = [t for t in self.engine.generate(ids, max_new or MAX_NEW, sampling, threading.Event())
+                   if t is not None]
+            n = len(out)
+            if texts is not None:
+                texts.append(out)
             ms = (self.engine.last or {}).get("decode_ms") or 0.0
             if n > 8 and ms > 0:
                 rates.append(n / (ms / 1000.0))
@@ -141,6 +167,23 @@ def run(cfg: dict, say=print, start_engine=None) -> dict:
 
         def start_engine(args):
             return StrataEngine(cfg["exe"], args, cwd=cfg.get("cwd"), log=cfg.get("log"), env=child_env(cfg))
+    return measure(engine_args(cfg), prompt_ids(cfg), start_engine, say, host_worker_extras())
+
+
+def run_switches(cfg: dict, say=print, start_engine=None) -> dict:
+    """The opt-in decode switches on the engine `cfg` describes (with its args as they are, so after a --calibrate
+    run with what it chose); returns {"env": {the winner, if any}, "report": {...}}.  `start_engine(args, env)`
+    returns a started engine with `env` added to the config's own."""
+    if start_engine is None:
+        from serve.server import StrataEngine, child_env
+
+        def start_engine(args, env):
+            return StrataEngine(cfg["exe"], args, cwd=cfg.get("cwd"), log=cfg.get("log"),
+                                env={**child_env(cfg), **env})
+    return measure_switches(engine_args(cfg), prompt_ids(cfg), start_engine, say, cfg.get("log"))
+
+
+def prompt_ids(cfg: dict) -> list:
     import strata_tokenizer as ST
     tpath = Path(cfg["tokenizer"])
     vocab = json.loads((tpath / "vocab.json").read_text(encoding="utf-8"))
@@ -149,8 +192,7 @@ def run(cfg: dict, say=print, start_engine=None) -> dict:
         toks[i] = t
     tok = ST.Tokenizer(toks, (tpath / "merges.txt").read_text(encoding="utf-8").split("\n"),
                        json.loads((tpath / "token_type.json").read_text()))
-    ids_list = [chat_ids(tok, p) for p in PROMPTS]
-    return measure(engine_args(cfg), ids_list, start_engine, say, host_worker_extras())
+    return [chat_ids(tok, p) for p in PROMPTS]
 
 
 def engine_args(cfg: dict) -> list[str]:
@@ -295,6 +337,142 @@ def measure(base_args: list[str], ids_list, start_engine, say=print, extra_worke
     return {"settings": settings, "report": report}
 
 
+def switch_wins(base: list, cand: list) -> tuple[bool, float, float]:
+    """(faster, gain, margin): a switch is faster when its median beats the baseline's by more than the margin - the
+    baseline's own spread across its starts ((max - min) / median), at least MIN_GAIN."""
+    if not base or not cand:
+        return False, 0.0, MIN_GAIN
+    mb, mc = statistics.median(base), statistics.median(cand)
+    if mb <= 0:
+        return False, 0.0, MIN_GAIN
+    margin = max(MIN_GAIN, (max(base) - min(base)) / mb)
+    gain = mc / mb - 1.0
+    return gain > margin, gain, margin
+
+
+def switch_off_reason(log: str | None, since: int) -> str | None:
+    """The engine's own reason a switch asked for does not run ("STRATA_ADAPT_OVERLAP=1 is off: not on a layer
+    split"), from its log after byte `since`; None when it runs or there is no log."""
+    if not log:
+        return None
+    try:
+        with open(log, "rb") as f:
+            f.seek(since)
+            text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if "STRATA_ADAPT_OVERLAP=1 is off:" in line:
+            return line.split("is off:", 1)[1].strip()
+    return None
+
+
+def measure_switches(base_args: list[str], ids_list, start_engine, say=print, log: str | None = None) -> dict:
+    """Each switch in SWITCHES against all of them off, SWITCH_ROUNDS engine starts each, the starts interleaved
+    (every other round in reverse order) so a drift between starts lands on every candidate alike.  A start gives
+    one sample: the median decode rate of the prompts with TIER_MAX_NEW tokens (the adaptive tier needs some windows
+    to show), after one warm-up round.  A switch that is faster is then checked for the same greedy text
+    (check_text); the fastest that passes is kept."""
+    t0 = time.time()
+    names = ["off", *SWITCHES]
+    rates = {n: [] for n in names}
+    slots: dict = {}                   # the expert cache each candidate's first start got (for check_text)
+    off_why: dict = {}
+    report: dict = {}
+    for r in range(SWITCH_ROUNDS):
+        for n in (names if r % 2 == 0 else names[::-1]):
+            if n in off_why:
+                continue
+            env = dict(SWITCH_OFF) if n == "off" else {**SWITCH_OFF, n: SWITCHES[n]}
+            say(f"  Round {r + 1}/{SWITCH_ROUNDS}: decode with " +
+                ("every switch off" if n == "off" else f"{n}={SWITCHES[n]}") + " (restarts the engine) ...")
+            since = os.path.getsize(log) if log and os.path.isfile(log) else 0
+            e = restart(lambda a, env=env: start_engine(a, env), base_args, n, say, report)
+            if e is None:
+                continue
+            try:
+                s = Session(e, ids_list)
+                s.warm_up(1)
+                why = switch_off_reason(log, since) if n != "off" else None
+                if why:
+                    off_why[n] = why
+                    say(f"    {n} does not run here: {why} - not measured")
+                    continue
+                rates[n].append(s.rate(max_new=TIER_MAX_NEW))
+                slots.setdefault(n, int((getattr(e, "info", None) or {}).get("expert_slots") or 0))
+            finally:
+                close(e)
+            say(f"    {rates[n][-1]:.1f} tok/s")
+    if not rates["off"]:                               # nothing measured: an error, not "none wins" (that would
+        why = next(iter((report.get("failed_starts") or {}).values()), "no sample")   # drop a switch chosen before)
+        raise RuntimeError(f"the engine did not start for the baseline: {why}")
+    report.update(switches={n: [round(x, 2) for x in v] for n, v in rates.items()}, inactive=off_why)
+    faster = {}
+    if rates["off"]:
+        say(f"    every switch off: {statistics.median(rates['off']):.1f} tok/s "
+            f"({min(rates['off']):.1f}-{max(rates['off']):.1f})")
+    for n, on in SWITCHES.items():
+        wins, gain, margin = switch_wins(rates["off"], rates[n])
+        report.setdefault("decision", {})[n] = {"gain": round(gain, 4), "margin": round(margin, 4), "faster": wins}
+        if rates[n]:
+            say(f"    {n}={on}: {statistics.median(rates[n]):.1f} tok/s ({min(rates[n]):.1f}-{max(rates[n]):.1f}), "
+                f"{gain * 100:+.1f}% against the noise margin {margin * 100:.1f}%" + (" -> faster" if wins else ""))
+        if wins:
+            faster[n] = gain
+    chosen, best = None, 0.0
+    if faster:
+        same = check_text(base_args, ids_list, start_engine, list(faster), slots.get("off"), say, report)
+        for n, gain in faster.items():
+            report["decision"][n]["same_text"] = same.get(n)
+            if same.get(n) and gain > best:
+                chosen, best = n, gain
+    report["seconds"] = round(time.time() - t0)
+    rate = statistics.median(rates[chosen or "off"]) if rates[chosen or "off"] else None
+    report["tok_s"] = round(rate, 1) if rate else None
+    return {"env": {chosen: SWITCHES[chosen]} if chosen else {}, "report": report}
+
+
+def check_text(base_args, ids_list, start_engine, names, slots, say, report) -> dict:
+    """{switch: True when its greedy text is the baseline's}, from starts with the expert cache pinned to
+    SWITCH_CHECK_CACHE of the slots `auto` gave (`slots`; unpinned when unknown) and SWITCH_CHECK_ENV: the baseline,
+    each switch, and the baseline again.  When the two baseline starts differ the text cannot tell a switch's effect from the start's,
+    and every switch is False."""
+    args = with_arg(base_args, "--expert-cache", str(int(slots * SWITCH_CHECK_CACHE))) if slots else base_args
+    say("  Checking the text" + (f" with the expert cache fixed at {int(slots * SWITCH_CHECK_CACHE)}" if slots else "")
+        + " (restarts the engine) ...")
+    texts = {}
+    for i, n in enumerate(["off", *names, "off"]):
+        env = {**SWITCH_CHECK_ENV, **SWITCH_OFF, **({} if n == "off" else {n: SWITCHES[n]})}
+        key = "off2" if n == "off" and i else n
+        e = restart(lambda a, env=env: start_engine(a, env), args, "the text check " + key, say, report)
+        if e is None:
+            continue
+        try:
+            out: list = []
+            Session(e, ids_list).rate(max_new=TIER_MAX_NEW, texts=out)
+            texts[key] = out
+        finally:
+            close(e)
+    base_ok = "off" in texts and texts.get("off") == texts.get("off2")
+    same = {n: base_ok and texts.get(n) == texts["off"] for n in names}
+    report["text_check"] = {"expert_cache": int(slots * SWITCH_CHECK_CACHE) if slots else None,
+                            "baseline_repeats": base_ok, **same}
+    if not base_ok:
+        say("    the baseline's text differs between two starts: a switch's text cannot be checked, none is kept")
+    for n in names:
+        if base_ok:
+            say(f"    {n}={SWITCHES[n]}: " + ("the same text" if same[n] else "ANOTHER text - not kept"))
+    return same
+
+
+def apply_env(env: dict | None, chosen: dict) -> dict:
+    """A config's "env" with the switches calibration chose: the chosen ones set, every other switch removed, so an
+    older calibration's choice does not linger.  Other entries stay."""
+    out = {k: v for k, v in (env or {}).items() if k not in SWITCHES}
+    out.update(chosen)
+    return out
+
+
 def restart(start_engine, args, what, say, report):
     """#1337: a later step's engine start that fails is a candidate that loses, not a failed run: what the earlier
     steps measured (and the settings they chose) must survive it.  Returns the engine, or None after saying why and
@@ -337,7 +515,9 @@ def apply(args: list[str], settings: dict) -> list[str]:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit("usage: calibrate.py <strata-*.json>")
-    res = run(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8-sig")))
+    argv = [x for x in sys.argv[1:] if x != "--switches"]
+    if len(argv) != 1:
+        sys.exit("usage: calibrate.py [--switches] <strata-*.json>")
+    cfg = json.loads(Path(argv[0]).read_text(encoding="utf-8-sig"))
+    res = run_switches(cfg) if "--switches" in sys.argv else run(cfg)
     print(json.dumps(res, indent=1))
