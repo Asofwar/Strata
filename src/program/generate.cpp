@@ -591,6 +591,10 @@ struct Options {
     /// Plan v0.3 P6: a draft enters the verify window only while every draft before it (and itself) has at least
     /// this probability under the draft layer; 0 = always --spec-1 drafts.
     double spec_min_p = 0.0;
+    /// --spec-adaptive MIN[:MAX] (opt-in; or STRATA_SPEC_ADAPTIVE=MIN[:MAX]): the MTP's window cap moves per round in
+    /// [MIN, MAX] (MAX: --spec, which it raises) to the cap with the most tokens per ms, from the measured acceptance and
+    /// round times (strata/spec/draft_policy.hpp, SpecDepth).  0 = off: every window up to --spec, as before.
+    int spec_adaptive_min = 0, spec_adaptive_max = 0;
     /// Stop when the model emits an end-of-turn token (<|endoftext|> 248044, <|im_end|> 248046, or --eos-ids).
     bool stop_eos = false;
     std::vector<int64_t> eos_ids = {248044, 248046};
@@ -807,6 +811,9 @@ void usage() {
                  "                       writes 4; --suffix-draft lets it grow by 2, up to 8, where a repeat is likely)\n"
                  "  --spec-min-p P       how sure the draft layer must be to extend a verify window by another guess\n"
                  "                       (setup writes 0.5; --calibrate measures it on this PC, see docs/DETAILS.md)\n"
+                 "  --spec-adaptive MIN[:MAX]  opt-in: the MTP's window cap moves per round between MIN and MAX\n"
+                 "                       (default --spec, which MAX raises) to the one with the most tokens per ms,\n"
+                 "                       learned from the measured acceptance and round times (STRATA_SPEC_ADAPTIVE)\n"
                  "  --lookup-chain K     opt-in: after the MTP's drafts, add up to K prompt-lookup drafts that continue\n"
                  "                       them (the window grows to at most 8; default 0 = off)\n"
                  "  --lookup-chain-min M  the shortest context match --lookup-chain extends on (default 3)\n"
@@ -2041,6 +2048,12 @@ int main(int argc, char** argv) {
         else if (a == "--adapt-min-gain") o.adapt_min_gain = (float) std::atof(next("--adapt-min-gain"));
         else if (a == "--adapt-async") o.adapt_async = std::atoi(next("--adapt-async")) != 0 ? 1 : 0;
         else if (a == "--spec-min-p") o.spec_min_p = std::atof(next("--spec-min-p"));
+        else if (a == "--spec-adaptive") {
+            const char* v = next("--spec-adaptive");
+            o.spec_adaptive_min = std::atoi(v);
+            const char* c = std::strchr(v, ':');
+            o.spec_adaptive_max = c != nullptr ? std::atoi(c + 1) : 0;
+        }
         else if (a == "--stop-eos") o.stop_eos = true;
         else if (a == "--spec-split") o.spec_split = true;
         else if (a == "--layer-split") o.layer_split = next("--layer-split");
@@ -2506,6 +2519,22 @@ int main(int argc, char** argv) {
         return 2;
     }
     strata::core::qsa_set_kv_resident(o.kv_resident);
+    // --spec-adaptive (opt-in): MAX sizes the windows (--spec), before the lookup paths below widen them
+    if (o.spec_adaptive_min == 0)
+        if (const char* e = std::getenv("STRATA_SPEC_ADAPTIVE"); e != nullptr && *e != '\0') {
+            o.spec_adaptive_min = std::atoi(e);
+            const char* c = std::strchr(e, ':');
+            o.spec_adaptive_max = c != nullptr ? std::atoi(c + 1) : 0;
+        }
+    if (o.spec_adaptive_min != 0) {
+        if (o.spec_adaptive_max == 0) o.spec_adaptive_max = o.spec;
+        if (o.spec_adaptive_min < 2 || o.spec_adaptive_max < o.spec_adaptive_min || o.spec_adaptive_max > 8) {
+            std::fprintf(stderr, "strata generate: --spec-adaptive MIN[:MAX] needs 2 <= MIN <= MAX <= 8\n");
+            return 2;
+        }
+        o.spec = std::max(o.spec, o.spec_adaptive_max);
+        if (o.mtp_max_t > 0) o.mtp_max_t = std::max(o.mtp_max_t, o.spec_adaptive_max);
+    }
     // Prompt lookup (the suffix drafter, on by default): the MTP keeps its --spec windows and a lookup window may be
     // up to 2 tokens longer; the draft policy (strata/spec/draft_policy.hpp) takes one only where it pays. Code
     // edits +6-11%, ordinary text unchanged (bench/results/2026-09-27-spec). --suffix-draft 0 turns it off.
@@ -9248,6 +9277,15 @@ int main(int argc, char** argv) {
         else if (use_mtp && mtp.max_t() > S_mtp) mtp.set_max_drafts(S_mtp - 1);
         strata::spec::SuffixDrafter sfx(std::max(1, o.suffix_draft), 64, (size_t) o.max_context + 4096);
         strata::spec::DraftPolicy policy(S);   // MTP or lookup window, learned over the whole process
+        // --spec-adaptive (opt-in): the serial loop's MTP window cap, learned over the whole process (the pipelined
+        // and batched paths keep S_mtp); off: S_mtp every round
+        const bool adaptive = use_mtp && o.spec_adaptive_min > 0;
+        strata::spec::SpecDepth depth(std::min(o.spec_adaptive_min, S_mtp), S_mtp);
+        const int base_drafts = use_mtp ? mtp.max_drafts() : 0;
+        int serve_cap = S_mtp;
+        if (adaptive)
+            std::fprintf(stderr, "strata serve: --spec-adaptive %d:%d: the MTP window cap adapts per round\n",
+                         depth.min_t(), depth.max_t());
         // The vision path (--vision): GENI <max_new> <embeddings file> <id,id,...> carries images.  The file is one
         // or more strata-vision records (int32 'SVE1', n, nx, ny, n_embd, then n x n_embd floats) in prompt order;
         // each image's rows go to its run of <|image_pad|> tokens, whose M-RoPE positions are mtmd's: t = p,
@@ -12040,10 +12078,11 @@ int main(int argc, char** argv) {
                 }
             }
             while (!pl_ran && !cancelled && produced_n < max_new) {
-                int T = use_mtp ? S_mtp : 1;   // no --mtp: one token a round unless a lookup draft fires
+                const int cap_r = adaptive ? serve_cap : S_mtp;
+                int T = use_mtp ? cap_r : 1;   // no --mtp: one token a round unless a lookup draft fires
                 if (use_mtp && req_spec_min_p > 0.0) {
                     T = 1;
-                    while (T < S_mtp && dprob[(size_t) T - 1] >= (float) req_spec_min_p) ++T;
+                    while (T < cap_r && dprob[(size_t) T - 1] >= (float) req_spec_min_p) ++T;
                 }
                 if (first_window) T = 1;
                 // a repeat of earlier context (prompt lookup) where the MTP's own first guess agrees: the policy takes it
@@ -12201,6 +12240,11 @@ int main(int argc, char** argv) {
                 // commit, outv[a] is its row 0) - the drafts extend it on the device as the verify rows will
                 if (use_mtp && hist_n > 0 && mtp.coupled() && !eos && produced_n < max_new)
                     mtp.set_draft_history(consumed.data(), (int64_t) consumed.size(), outv[(size_t) a]);
+                int cap_next = serve_cap;
+                if (adaptive) {   // the next window's cap: its drafts are made now
+                    cap_next = depth.next();
+                    mtp.set_max_drafts(cap_next - 1);
+                }
                 const bool drafted = !use_mtp || eos || produced_n >= max_new ||
                                      mtp.draft(T, outv.data(), p, a, drafts.data(), err, dprob.data(), (float) req_spec_min_p);
                 {
@@ -12250,12 +12294,18 @@ int main(int argc, char** argv) {
                 else if (timed_round && !eos)   // a chained window: its MTP part, its chain, its cost
                     policy.observe_chain(T_mtp, chain_n, a, cm,
                                          std::chrono::duration<double, std::milli>(Clock::now() - round0).count());
+                if (adaptive) {
+                    if (timed_round && !eos && chain_n == 0 && !from_sfx)
+                        depth.observe(cap_r, T, a, std::chrono::duration<double, std::milli>(Clock::now() - round0).count());
+                    serve_cap = cap_next;
+                }
                 if (eos) { finish = "stop"; break; }
                 if (stop_req.load()) { finish = "cancel"; break; }
                 x = outv[(size_t) a];
                 p += a + 1;
             }
             const double decode_ms = std::chrono::duration<double, std::milli>(Clock::now() - d0).count();
+            if (adaptive) mtp.set_max_drafts(base_drafts);   // the other paths keep their own chain length
             // the last commit (set_commit_async): the session is complete before anything reads or copies it
             if (!ver.wait_commit(err)) {
                 std::printf("ERR %s\n", err.c_str());
@@ -13259,6 +13309,10 @@ int main(int argc, char** argv) {
         if (use_mtp && S_mtp < o.spec) mtp.set_max_drafts(S_mtp - 1);
         strata::spec::SuffixDrafter sfx(std::max(1, o.suffix_draft), 64, (size_t) o.max_context + 4096);
         strata::spec::DraftPolicy policy(o.spec);   // MTP or lookup window (see draft_policy.hpp)
+        // --spec-adaptive (opt-in): the MTP window's cap, per round; off: S_mtp every round
+        const bool adaptive = use_mtp && o.spec_adaptive_min > 0;
+        strata::spec::SpecDepth depth(std::min(o.spec_adaptive_min, S_mtp), S_mtp);
+        int cap = S_mtp;
         std::vector<int32_t> sbuf((size_t) o.spec, 0);
         int64_t sfx_windows = 0, sfx_drafts = 0, sfx_ok = 0;
         int64_t chain_windows = 0, chain_drafts = 0, chain_ok = 0;   // --lookup-chain's own counts
@@ -13278,10 +13332,11 @@ int main(int argc, char** argv) {
         const int64_t misses0 = drive.d.multi_misses, entries0 = drive.d.multi_entries;
         while ((int64_t) produced.size() < max_new) {
             const Clock::time_point t0 = Clock::now();
-            int T = S_mtp;
+            const int cap_r = adaptive ? cap : S_mtp;
+            int T = cap_r;
             if (use_mtp && o.spec_min_p > 0.0) {
                 T = 1;
-                while (T < S_mtp && dprob[(size_t) T - 1] >= (float) o.spec_min_p) ++T;
+                while (T < cap_r && dprob[(size_t) T - 1] >= (float) o.spec_min_p) ++T;
             }
             if (first_window) T = 1;
             bool from_sfx = false;
@@ -13413,6 +13468,11 @@ int main(int argc, char** argv) {
                 total_ms += std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
                 break;
             }
+            int cap_next = cap;
+            if (adaptive) {   // the next window's cap: its drafts are made now
+                cap_next = depth.next();
+                mtp.set_max_drafts(cap_next - 1);
+            }
             const bool drafted = !use_mtp || (int64_t) produced.size() >= max_new ||
                                  mtp.draft(T, outv.data(), p, a, drafts.data(), err, dprob.data(), (float) o.spec_min_p);
             if (adapt_thr.joinable()) adapt_thr.join();
@@ -13427,6 +13487,10 @@ int main(int argc, char** argv) {
             total_ms += round_ms;
             if (timed_round && chain_n == 0) policy.observe(from_sfx, T, a, sfx_match, round_ms);
             else if (timed_round) policy.observe_chain(T_mtp, chain_n, a, cm, round_ms);
+            if (adaptive) {
+                if (timed_round && chain_n == 0 && !from_sfx) depth.observe(cap_r, T, a, round_ms);
+                cap = cap_next;
+            }
             if (rounds % 64 == 0)
                 std::fprintf(stderr, "strata generate: position %lld, %lld tokens, %lld rounds\n", (long long) p,
                              (long long) produced.size(), (long long) rounds);
@@ -13448,6 +13512,13 @@ int main(int argc, char** argv) {
             std::printf("%-24s", "window sizes");
             for (size_t i = 1; i < window_hist.size(); ++i) std::printf(" T%zu:%lld", i, (long long) window_hist[i]);
             std::printf("  (min draft probability %.2f)\n", o.spec_min_p);
+        }
+        if (adaptive) {
+            std::printf("%-24s", "spec depth");
+            for (int d = depth.min_t(); d <= depth.max_t(); ++d)
+                std::printf(" cap%d:%lld", d, (long long) depth.rounds_at(d));
+            std::printf("  (--spec-adaptive %d:%d, %d switches, last cap %d)\n", depth.min_t(), depth.max_t(),
+                        depth.switches(), depth.current());
         }
         if (o.suffix_draft > 0)
             std::printf("%-24s %lld windows, drafts accepted %lld of %lld\n", "suffix drafts", (long long) sfx_windows,

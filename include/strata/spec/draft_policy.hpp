@@ -16,6 +16,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 
 namespace strata::spec {
 
@@ -59,6 +60,53 @@ private:
     std::array<double, kBuckets> cok_{}, cbad_{};          // chained lookup drafts, the same (reached rounds only)
     double rounds_ = 0;                                    // rounds observed so far
     std::array<double, kMaxT + 1> last_{};                 // the round at which each size was last measured
+};
+
+// --spec-adaptive MIN[:MAX] (opt-in): the MTP's window cap per round, picked in [MIN, MAX] for the most committed
+// tokens per ms.  A round run under cap c with window t (t <= c; --spec-min-p and the context's end can shorten it)
+// that accepted a drafts also tells what every smaller cap d would have done: its window min(t, d) and min(a + 1, d)
+// tokens (the drafts are a chain, so a shorter one is the same prefix).  So for each cap the policy keeps
+//   tok(d)    EMA of the tokens a round under cap d commits (counterfactual for d below the cap used)
+//   w(d, u)   EMA of how often cap d's window is u tokens
+// (both as sums that fade by `kDecay` every round, so a cap seen only in a few recent rounds is judged by those) and
+// the measured round time per window size (EMA; sizes not measured yet: linear in the measured ones), and moves to
+// the d with the best tok(d) / sum_u w(d, u) cost(u) when it beats the current cap's by `margin`.  A cap above the
+// one in use has no counterfactual: every `probe` rounds one round runs at cap + 1 (and, alternately, cap - 1 to
+// measure the smaller window's cost); next to the best cap that costs little.  Like DraftPolicy it only chooses how
+// many drafts to verify; the verify window decides every token.
+class SpecDepth {
+public:
+    static constexpr int kMaxT = DraftPolicy::kMaxT;
+
+    static constexpr double kDecay = 0.98;   // per round: a sample's weight halves in ~35 rounds
+
+    SpecDepth(int min_t, int max_t, int probe = 8, double margin = 0.02);
+
+    /// The cap for the next round (its drafts: next() - 1).
+    int next();
+    /// After a round: the cap it ran under, its window, the drafts accepted and the round's time.
+    void observe(int cap, int t, int accepted, double round_ms);
+
+    int current() const { return cur_; }
+    int min_t() const { return min_; }
+    int max_t() const { return max_; }
+    double tokens(int d) const;                  // tok(d) (0 = no data yet)
+    double cost_ms(int t) const;
+    double score(int d) const;                   // tok(d) / expected cost under cap d (0 = no data yet)
+    int64_t rounds_at(int d) const { return used_[(size_t) d]; }
+    int switches() const { return switches_; }
+
+private:
+    int min_, max_, probe_;
+    double margin_;
+    int cur_;
+    int64_t since_probe_ = 0;
+    bool probe_up_ = true;
+    int switches_ = 0;
+    std::array<double, kMaxT + 1> tok_s_{}, tok_w_{};      // faded sums: tokens, rounds
+    std::array<std::array<double, kMaxT + 1>, kMaxT + 1> w_{};
+    std::array<double, kMaxT + 1> cost_{}, cost_n_{};
+    std::array<int64_t, kMaxT + 1> used_{};
 };
 
 }  // namespace strata::spec

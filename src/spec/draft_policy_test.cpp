@@ -11,6 +11,7 @@
 #include <cstdio>
 
 using strata::spec::DraftPolicy;
+using strata::spec::SpecDepth;
 
 namespace {
 int g_fail = 0;
@@ -19,6 +20,27 @@ void check(bool ok, const char* what) {
     if (!ok) ++g_fail;
 }
 double cost(int t) { return 19.0 + 10.5 * (t - 1); }   // ms per round, measured shape
+
+// --spec-adaptive: `rounds` simulated rounds, each draft accepted with probability q (a fixed LCG), cost(t) per round
+struct Sim {
+    uint32_t s = 12345;
+    double u() { s = s * 1664525u + 1013904223u; return (s >> 8) / 16777216.0; }
+    int run(SpecDepth& d, int rounds, double q, double (*c)(int), double* tok_ms = nullptr) {
+        double tok = 0, ms = 0;
+        for (int i = 0; i < rounds; ++i) {
+            const int cap = d.next();
+            int a = 0;
+            while (a < cap - 1 && u() < q) ++a;
+            d.observe(cap, cap, a, c(cap));
+            tok += a + 1;
+            ms += c(cap);
+        }
+        if (tok_ms) *tok_ms = tok / ms;
+        return d.current();
+    }
+};
+double flat(int t) { return 50.0 + 3.0 * (t - 1); }
+double steep(int t) { return 50.0 + 10.0 * (t - 1); }
 }  // namespace
 
 int main() {
@@ -113,6 +135,56 @@ int main() {
         check(probes > 0 && probes <= 3 && spaced,
               "chain: stale full size is re-probed despite a profitable shorter chain");
         check(probes > 0 && confident, "chain: stale re-probes retain the MTP confidence gate");
+    }
+    {
+        // SpecDepth: high acceptance and cheap extra rows keep the widest cap; low acceptance and dear rows go short
+        SpecDepth d(2, 6);
+        Sim sim;
+        check(sim.run(d, 400, 0.9, flat) == 6, "spec depth: q 0.9, cheap rows -> cap 6");
+        SpecDepth e(2, 6);
+        check(sim.run(e, 400, 0.4, steep) == 2, "spec depth: q 0.4, dear rows -> cap 2");
+        // a change of text: down when acceptance falls, back up (via the probes) when it recovers
+        SpecDepth f(2, 6);
+        sim.run(f, 300, 0.9, steep);
+        const int hi = f.current();
+        sim.run(f, 300, 0.3, steep);
+        const int lo = f.current();
+        sim.run(f, 400, 0.95, steep);
+        std::printf("    caps: %d -> %d -> %d\n", hi, lo, f.current());
+        check(hi >= 4 && lo <= 3 && f.current() >= 4, "spec depth: follows the acceptance down and back up");
+        bool in_range = true;
+        SpecDepth g(3, 5);
+        for (int i = 0; i < 500; ++i) {
+            const int c = g.next();
+            in_range &= c >= 3 && c <= 5;
+            g.observe(c, c, i % 3 == 0 ? c - 1 : 0, steep(c));
+        }
+        check(in_range, "spec depth: every cap stays within [min, max]");
+        // the adaptive cap's tokens per ms is within 2% of the best fixed cap's
+        auto best_fixed = [&](double q, double (*c)(int)) {
+            double best = 0;
+            for (int k = 2; k <= 6; ++k) {
+                SpecDepth x(k, k);
+                Sim s2;
+                double r = 0;
+                s2.run(x, 2000, q, c, &r);
+                best = r > best ? r : best;
+            }
+            return best;
+        };
+        bool close = true;
+        for (double q : {0.5, 0.7, 0.85, 0.95})
+            for (double (*c)(int) : {flat, steep}) {
+                SpecDepth x(2, 6);
+                Sim s2;
+                double r = 0;
+                s2.run(x, 2000, q, c, &r);
+                const double b = best_fixed(q, c);
+                std::printf("    q %.2f %s: adaptive %.4f tok/ms (cap %d), best fixed %.4f\n", q,
+                            c == flat ? "flat " : "steep", r, x.current(), b);
+                if (r < 0.98 * b) close = false;
+            }
+        check(close, "spec depth: within 2% of the best fixed cap (4 rates x 2 cost shapes)");
     }
     std::printf(g_fail ? "FAIL\n" : "PASS\n");
     return g_fail ? 1 : 0;

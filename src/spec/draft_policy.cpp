@@ -158,4 +158,94 @@ void DraftPolicy::observe_chain(int t_mtp, int k, int accepted, int match, doubl
     cbad_[b] = kDecay * cbad_[b] + (ok < k ? 1.0 : 0.0);
 }
 
+SpecDepth::SpecDepth(int min_t, int max_t, int probe, double margin)
+    : min_(std::clamp(min_t, 1, kMaxT)), max_(std::clamp(max_t, min_, kMaxT)), probe_(std::max(2, probe)),
+      margin_(margin), cur_(max_) {}   // the widest cap first: its rounds tell every smaller cap's tokens
+
+int SpecDepth::next() {
+    if (min_ == max_) return cur_;
+    if (++since_probe_ < probe_) return cur_;
+    since_probe_ = 0;
+    probe_up_ = !probe_up_;
+    const int d = probe_up_ ? cur_ + 1 : cur_ - 1;
+    if (d >= min_ && d <= max_) return d;
+    const int e = probe_up_ ? cur_ - 1 : cur_ + 1;   // at an end of the range: the other side
+    return e >= min_ && e <= max_ ? e : cur_;
+}
+
+double SpecDepth::tokens(int d) const {
+    d = std::clamp(d, 1, kMaxT);
+    return tok_w_[(size_t) d] > 0.0 ? tok_s_[(size_t) d] / tok_w_[(size_t) d] : 0.0;
+}
+
+double SpecDepth::cost_ms(int t) const {
+    t = std::clamp(t, 1, kMaxT);
+    if (cost_n_[(size_t) t] > 0) return cost_[(size_t) t];
+    // not measured: on the line through the nearest measured sizes (one side: the two nearest there), or +10% per
+    // token from the only one measured
+    int lo = 0, hi = 0;
+    for (int u = t - 1; u >= 1 && lo == 0; --u) if (cost_n_[(size_t) u] > 0) lo = u;
+    for (int u = t + 1; u <= kMaxT && hi == 0; ++u) if (cost_n_[(size_t) u] > 0) hi = u;
+    if (lo == 0 && hi == 0) return 1.0 + 0.1 * (t - 1);
+    if (lo == 0 || hi == 0) {   // both on one side: the next one out on that side
+        const int a = lo != 0 ? lo : hi;
+        int b = 0;
+        if (lo != 0) { for (int u = a - 1; u >= 1 && b == 0; --u) if (cost_n_[(size_t) u] > 0) b = u; }
+        else { for (int u = a + 1; u <= kMaxT && b == 0; ++u) if (cost_n_[(size_t) u] > 0) b = u; }
+        if (b == 0) return cost_[(size_t) a] * (1.0 + 0.1 * (t - 1)) / (1.0 + 0.1 * (a - 1));
+        lo = std::min(a, b);
+        hi = std::max(a, b);
+    }
+    const double s = (cost_[(size_t) hi] - cost_[(size_t) lo]) / (double) (hi - lo);
+    return std::max(0.25 * cost_[(size_t) lo], cost_[(size_t) lo] + s * (t - lo));
+}
+
+double SpecDepth::score(int d) const {
+    d = std::clamp(d, 1, kMaxT);
+    if (tok_w_[(size_t) d] <= 0.0) return 0.0;
+    double c = 0.0, w = 0.0;
+    for (int u = 1; u <= d; ++u)
+        if (w_[(size_t) d][(size_t) u] > 0.0) {
+            c += w_[(size_t) d][(size_t) u] * cost_ms(u);
+            w += w_[(size_t) d][(size_t) u];
+        }
+    return w > 0.0 && c > 0.0 ? tokens(d) / (c / w) : 0.0;
+}
+
+void SpecDepth::observe(int cap, int t, int accepted, double round_ms) {
+    cap = std::clamp(cap, 1, kMaxT);
+    t = std::clamp(t, 1, cap);
+    accepted = std::clamp(accepted, 0, t - 1);
+    ++used_[(size_t) cap];
+    if (round_ms > 0) {
+        cost_[(size_t) t] = cost_n_[(size_t) t] > 0 ? (1.0 - kCostAlpha) * cost_[(size_t) t] + kCostAlpha * round_ms
+                                                    : round_ms;
+        cost_n_[(size_t) t] += 1.0;
+    }
+    for (int d = 1; d <= kMaxT; ++d) {
+        tok_s_[(size_t) d] *= kDecay;
+        tok_w_[(size_t) d] *= kDecay;
+        for (double& v : w_[(size_t) d]) v *= kDecay;
+        if (d > cap) continue;
+        // under cap d this round's window would have been min(t, d) and committed min(a + 1, d)
+        tok_s_[(size_t) d] += std::min(accepted + 1, d);
+        tok_w_[(size_t) d] += 1.0;
+        w_[(size_t) d][(size_t) std::min(t, d)] += 1.0;
+    }
+    if (min_ == max_) return;
+    const double here = score(cur_);
+    int best = cur_;
+    double best_s = here;
+    for (int d = min_; d <= max_; ++d) {
+        if (tok_w_[(size_t) d] < 0.5) continue;   // too little left of its samples to judge
+        const double s = score(d);
+        if (s > best_s) { best_s = s; best = d; }
+    }
+    if (best != cur_ && best_s > here * (1.0 + margin_)) {
+        cur_ = best;
+        since_probe_ = 0;
+        ++switches_;
+    }
+}
+
 }  // namespace strata::spec
