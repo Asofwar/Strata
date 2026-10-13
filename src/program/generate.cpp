@@ -1296,15 +1296,17 @@ struct SysmemProbe {
     int64_t first_slow_at = -1;   ///< the offset of the first slow part (-1: none)
     double fast_gbps = 0.0, slow_gbps = 0.0;   ///< the fastest part, the slowest one
 };
-/// 0: off (STRATA_SYSMEM_PROBE=0), 1: warn on a find (the default on Windows NVIDIA), 2: also print the numbers when
-/// nothing is found (STRATA_SYSMEM_PROBE=verbose).  Elsewhere 0: Linux has no WDDM, and the policy is NVIDIA's.
-int sysmem_probe_mode() {
+/// 0: off (the default, and STRATA_SYSMEM_PROBE=0), 1: warn on a find (STRATA_SYSMEM_PROBE=1, or
+/// --sysmem-fallback-shrink), 2: also print the numbers when nothing is found (STRATA_SYSMEM_PROBE=verbose).  Opt-in,
+/// so the default start stays as it was.  Elsewhere 0: Linux has no WDDM, and the policy is NVIDIA's.
+int sysmem_probe_mode(bool shrink) {
 #if defined(_WIN32) && !defined(STRATA_USE_HIP)
     const char* v = std::getenv("STRATA_SYSMEM_PROBE");
-    if (v == nullptr) return 1;
+    if (v == nullptr) return shrink ? 1 : 0;
     const std::string s(v);
     return s == "0" ? 0 : s == "verbose" || s == "2" ? 2 : 1;
 #else
+    (void) shrink;
     return 0;
 #endif
 }
@@ -5335,10 +5337,10 @@ int main(int argc, char** argv) {
                                  "page file lets it use more of the free VRAM\n",
                          o.expert_cache, (double) xcache.bytes() / 1073741824.0, failed);
         // The WDDM sysmem fallback (sysmem_probe_mode, probe_sysmem): the slots are written by now (open zeroes them),
-        // so each part of the cache is either in VRAM or in system RAM, and a read of it says which.  A warning by
-        // default; --sysmem-fallback-shrink also cuts the cache to the part before the first slow one, less the
+        // so each part of the cache is either in VRAM or in system RAM, and a read of it says which.  Opt-in: a
+        // warning with STRATA_SYSMEM_PROBE=1; --sysmem-fallback-shrink also cuts the cache to the part before the first slow one, less the
         // reserve (or by a quarter when all of it is slow), up to four times.  Nothing found: nothing is said.
-        if (const int mode = sysmem_probe_mode(); mode > 0 && o.expert_cache > 0) {
+        if (const int mode = sysmem_probe_mode(o.sysmem_fallback_shrink); mode > 0 && o.expert_cache > 0) {
             SysmemProbe sp = probe_sysmem(xcache.device_slot(0), xcache.bytes());
             if (mode == 2 && sp.parts > 0)
                 std::fprintf(stderr, "strata generate: sysmem probe: %d of %d parts of the expert cache (%.2f GiB) slow; "
@@ -8166,9 +8168,11 @@ int main(int argc, char** argv) {
             // estimate must stay uncapped: it counts the retained buffers'
             // capacity and directories, and put() charges that same true size -
             // a capped figure would under-evict and overfill the budget.
-            // #2255: the outgoing chain's pinned prefixes count as held, so a parked copy of one may make room
+            // #2255: the outgoing chain's pinned prefixes count as held, so a parked copy of one may make room - but
+            // only once this snapshot is captured: here only unpinned entries go, and the rest is a dry run; put()
+            // evicts the pinned holder after the capture, so a capture that fails or is refused below loses nothing.
             const strata::core::ConversationPins pins{&view.checkpoints, cvec_cached};
-            if (!conversations.make_room(estimate, held, pins)) {
+            if (!conversations.make_room(estimate, held) && !conversations.can_make_room(estimate, held, pins)) {
                 std::fprintf(stderr, "strata serve: conversation cache: skip parking (snapshot %zu MiB exceeds available budget)\n",
                              estimate >> 20);
                 return true;
@@ -8196,7 +8200,7 @@ int main(int argc, char** argv) {
                         mem ? std::optional<uint64_t>(mem->available) : std::nullopt, additional, floor);
                 };
                 while (!admit() && conversations.size() > 0 && evicted < conversations.slots() &&
-                       conversations.evict_oldest(pins))
+                       conversations.evict_oldest())
                     ++evicted;
                 if (!admit()) {
                     std::fprintf(stderr, "strata serve: conversation cache: skip parking (physical RAM admission; need %zu MiB plus %lld MiB floor, %s; evicted %zu, %zu still parked)\n",
@@ -9258,7 +9262,7 @@ int main(int argc, char** argv) {
             }
             // the sysmem probe again, now everything is allocated: what came after the cache (the verify windows, the
             // prompt path, the draft head) can push part of it out to system RAM.  A warning only; the slots are filled.
-            if (const int mode = sysmem_probe_mode(); mode > 0 && xcache.slots() > 0) {
+            if (const int mode = sysmem_probe_mode(o.sysmem_fallback_shrink); mode > 0 && xcache.slots() > 0) {
                 const SysmemProbe sp = probe_sysmem(xcache.device_slot(0), xcache.bytes());
                 if (mode == 2 && sp.parts > 0)
                     std::fprintf(stderr, "strata serve: sysmem probe with everything loaded: %d of %d parts of the expert "

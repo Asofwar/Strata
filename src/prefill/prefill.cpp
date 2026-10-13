@@ -301,9 +301,23 @@ inline int ring_slots(size_t T) {
     const int big = r < 16 ? 16 : r > ring_cap() ? ring_cap() : r;
     return (int64_t) T >= stream_all_min() ? big : STAGE;
 }
-// The staging buffers a layout holds: the ring, and at least STAGE_GRP for the staged walk's grouped gather.  Counted
-// and taken through this one place, so the bytes the prompt path borrows cover every buffer it writes.
-inline int stage_slots(size_t T) { return std::max(ring_slots(T), STAGE_GRP); }
+// STRATA_PREFILL_GROUP_GATHER=0: one gather, one wait and one record per expert (no grouped gather, no STAGE_GRP ring).
+bool group_gather_env() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_PREFILL_GROUP_GATHER");
+        return v == nullptr || std::atoi(v) != 0;
+    }();
+    return on;
+}
+bool mmq_group_ok();   // mmq_plan().any and MMQ_GROUP within the gather (defined with them, below)
+// The staging buffers a layout holds: the ring, and at least STAGE_GRP for the staged walk's grouped gather when it
+// can run (MMQ on and the grouped gather not turned off - a superset of the walk's group_resident, which also needs a
+// native layer); otherwise the ring alone, as before.  Counted and taken through this one place, so the bytes the
+// prompt path borrows cover every buffer it writes.
+inline int stage_slots(size_t T) {
+    const bool grouped = group_gather_env() && mmq_group_ok();
+    return grouped ? std::max(ring_slots(T), STAGE_GRP) : ring_slots(T);
+}
 constexpr int DQ = 2;              // dequantized-expert ring (FP16 gate/up + down)
 // The BF16-weight projections (hyper-connection, SSM alpha/beta, indexer, router, shared gate, PLE key/value) take
 // BF16 activations here and FP32 ones in decode. STRATA_PREFILL_BF16X2=1 adds each activation's BF16 remainder as a
@@ -996,6 +1010,8 @@ struct MmqPlan {
                                                // (gfx11: UD-Q4_K_XL's Q4_K / Q5_K and Q5_1 / Q8_0 experts, STRATA_PF_FUSED=1)
     size_t gu_max = 0, d_max = 0;
 };
+const MmqPlan& mmq_plan();
+bool mmq_group_ok() { return mmq_plan().any && MMQ_GROUP <= mmq::kGatherGroupMax; }
 const MmqPlan& mmq_plan() {
     static const MmqPlan plan = [] {
         MmqPlan p;
@@ -3766,10 +3782,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             cudaSetDevice(pd);
                         }
                         // STRATA_PREFILL_GROUP_GATHER=0: one gather, one wait and one record per expert.
-                        static const bool group_env = [] {
-                            const char* v = std::getenv("STRATA_PREFILL_GROUP_GATHER");
-                            return v == nullptr || std::atoi(v) != 0;
-                        }();
+                        const bool group_env = group_gather_env();
                         const bool group_gather = group_env && stream_all && use_mmq && lay.native &&
                                                   MMQ_GROUP <= mmq::kGatherGroupMax;
                         // The staged walk (a short prompt) groups too, resident and staged experts alike: its ring is
