@@ -81,7 +81,12 @@ attention reads in VRAM (`--kv-resident 32768`), so more experts fit on the GPU.
 (1,589 -> 3,872 experts in VRAM); at 128K about +6%. The attention reads exactly the same values (only where the KV lives changes); it
 costs ~13.7 KB of RAM per context token (1.7 GB at 128K). Existing installs: run `START-HERE.bat --setup` once to turn
 it on. Setup turns it on when the RAM has room for it; `--kv-streaming on|off` overrides that (on past the RAM test with a
-note; never under WSL, which cannot stream).
+note; never under WSL, which cannot stream). One exception on auto (#2261): when one card holds every expert and the
+whole KV cache (its VRAM less ~5 GB, the VRAM kept free and the full KV cache of 8 requests at once still holds the
+model's experts), streaming frees VRAM nobody needs, so setup keeps the KV cache in VRAM. Measured on an RTX PRO 6000
+Blackwell 96 GB (IQ3_S, 262K, int8 KV, engine 0.1.43.1, two runs each): decode 179 -> 196 tok/s (+9.5%), agent
+session decode +13%, 16K prompt first token 4.13 -> 3.20 s (-23%). Layer splits, GPUs that share the RAM and the
+Unsloth budget files keep the RAM rule.
 
 Under WSL2 the driver caps what `cudaHostAlloc` may pin at about 1 GiB, so the KV host copy is pinned with `cudaHostRegister` of ordinary memory there (detected through `/dev/dxg`); `STRATA_KV_HOST_REGISTER=1` forces that order on any system and `=0` forces `cudaHostAlloc` first (the other method is the fallback in both cases). On Linux without WSL nothing changes by default; with the switch the engine prints `KV streaming: the host copy is pinned with cudaHostRegister` (#1498 by yjamil8; WSL not tested here, the forced path was run on a Tesla P100: `--kv int8 --kv-resident 32768`, answers and decode speed unchanged).
 

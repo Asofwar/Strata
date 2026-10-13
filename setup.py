@@ -5118,12 +5118,28 @@ def kv_streaming_ram_gb(ctx, kv) -> float:
     return ctx * (13 * KV_CELL_BYTES.get(kv, 1056)) / 1e9
 
 
-def kv_streaming_wanted(model, ctx, kv, ram, choice="auto") -> bool:
+def kv_fits_in_vram(model, vram_gb, ctx, kv, reserve_gb=0.0) -> bool:
+    """#2261: one card's VRAM holds every expert of the model AND the whole KV cache of this context, so KV streaming
+    frees VRAM nobody needs and only costs PCIe reads.  The same ~5 GB as low_ram_gpu_gb for the dense weights and
+    buffers, the VRAM kept free (--vram-reserve-mib, the image encoder's reserve), and the full KV cache of
+    PARALLEL_MAX requests at once (the config's "parallel" can be raised later without running setup again).
+    Not for the Unsloth budget files (their experts are read from the GGUF through a RAM budget)."""
+    if vram_gb <= 0 or MODELS[model].get("budget"):
+        return False
+    kv_gb = PARALLEL_MAX * kv_streaming_ram_gb(ctx, kv)
+    return vram_gb - 5 - reserve_gb - kv_gb >= MODELS[model]["arena_gb"]
+
+
+def kv_streaming_wanted(model, ctx, kv, ram, choice="auto", vram_gb=0.0, reserve_gb=0.0) -> bool:
     """Will setup stream this model's KV cache on this PC: from 64K up, when the RAM holds the cache beside the
     model's experts (+1 GB); `--kv-streaming on|off` overrides the RAM test (the owner's rule), and WSL never
-    streams.  Step 7 writes `--kv-resident` on exactly this answer, and the launcher's preset diff
-    asks it too: a config's `--kv-resident` and a preset's "auto" are the same setting when this says yes."""
+    streams.  #2261: on auto, not when one card holds every expert and the whole KV cache (kv_fits_in_vram; vram_gb:
+    that card, 0 for a layer split or a GPU that shares the RAM).  Step 7 writes `--kv-resident` on exactly this
+    answer, and the launcher's preset diff asks it too: a config's `--kv-resident` and a preset's "auto" are the same
+    setting when this says yes."""
     if is_wsl() or choice == "off":
+        return False
+    if choice == "auto" and kv_fits_in_vram(model, vram_gb, ctx, kv, reserve_gb):
         return False
     return ctx >= 65536 and (ram >= MODELS[model]["ram_gb"] + kv_streaming_ram_gb(ctx, kv) + 1 or choice == "on")
 
@@ -7454,7 +7470,8 @@ def main() -> int:
                          "throughput for a model that fits fewer cards; each replica holds its own copy of the model)")
     ap.add_argument("--kv-streaming", choices=["auto", "on", "off"], default="auto",
                     help="from a 64K context: keep the KV cache in RAM and only the attention's window in VRAM (more "
-                         "experts fit on the GPU); auto: when the RAM has room for it")
+                         "experts fit on the GPU); auto: when the RAM has room for it and one card does not hold every "
+                         "expert and the whole KV cache (#2261)")
     ap.add_argument("--backend", choices=["cuda", "hip", "sycl"],
                     help="cuda = NVIDIA (default), hip = AMD RX 7900 / 7800 / 7700 XT, RX 9060 XT / 9070 / AI PRO R9700 on "
                          "Linux or Windows (chosen by itself when the PC has no NVIDIA card Strata can use), "
@@ -8329,6 +8346,12 @@ def main() -> int:
     kv_ram_gb = kv_streaming_ram_gb(ctx, kv)      # the branches below are kv_streaming_wanted, with its messages
     # --kv-streaming on|off overrides the RAM test (the owner's rule); WSL stays off - it cannot stream.
     stream_fits = ram >= MODELS[model]["ram_gb"] + kv_ram_gb + 1
+    # #2261: one card that holds every expert and the whole KV cache gains nothing from streaming (measured on an RTX
+    # PRO 6000 96 GB, IQ3_S at 262K: decode +9.5%, 16K prompt's first token -23% with the KV cache in VRAM)
+    reserve_mib = a.vram_reserve_mib if a.vram_reserve_mib is not None else (
+        VISION[vision]["reserve_mib"] if vision != "none" else 0)
+    kv_vram_gb = 0.0 if multi or gpu.get("uma") else gpu.get("vram_gb", 0.0)   # what kv_streaming_wanted is given
+    all_in_vram = a.kv_streaming == "auto" and kv_fits_in_vram(model, kv_vram_gb, ctx, kv, reserve_mib / 1024)
     if is_wsl() and ctx >= 65536:
         ok("WSL: KV streaming off (the driver pins only about 1 GB of RAM); the KV cache stays in VRAM")
         if a.kv_streaming == "on":
@@ -8336,6 +8359,9 @@ def main() -> int:
                  "only about 1 GB there): off")
     elif ctx >= 65536 and a.kv_streaming == "off":
         ok("KV streaming off, as you chose (--kv-streaming off): the KV cache stays in VRAM")
+    elif ctx >= 65536 and all_in_vram and stream_fits:
+        ok(f"KV streaming off: this card holds every expert and the whole KV cache ({kv_ram_gb:.1f} GB per request), "
+           "so the KV cache stays in VRAM (#2261). --kv-streaming on streams it anyway")
     elif ctx >= 65536 and (stream_fits or a.kv_streaming == "on"):
         args += ["--kv-resident", "32768"]
         ok(f"KV streaming on: the context's KV cache lives in RAM ({kv_ram_gb:.1f} GB), more experts fit in VRAM")
