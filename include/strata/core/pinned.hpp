@@ -34,6 +34,13 @@ struct PinnedArena {
     PageBacking backing = PageBacking::NormalPages;
     std::string note;              // why the backing is what it is, for the startup print
     uint64_t locked_bytes = 0;     // resident via the working-set lock when CUDA could not pin it
+    uint64_t locked_off = 0;       // where that locked range starts in the arena
+    /// #2295 (Windows): when the whole arena was refused large pages (error 1450), the bytes from the start that
+    /// still got them, piece by piece; the rest is on 4 KB pages.  0 everywhere else, `backing` says the whole.
+    uint64_t large_page_bytes = 0;
+    /// #2295: the separate allocations the arena is stitched from (one placeholder reservation, replaced piece by
+    /// piece); empty for the one-allocation arena, which is the common case.
+    std::vector<void*> pieces;
     /// Plan v0.3 P5: when the whole arena cannot be registered, it is registered in `slice`-byte pieces from the
     /// start; this is the pinned prefix (a copy that stays inside one slice can then DMA straight from the arena).
     uint64_t registered_bytes = 0;
@@ -59,6 +66,8 @@ struct PinnedArena {
     /// Registers the deferred slices in order, publishing how many are done in `ready`, and INT_MAX once it
     /// returns (a slice CUDA refuses ends the registration, and the rest is kept resident by the working-set lock).
     void register_slices(std::atomic<int>& ready);
+    /// Keeps [off, capacity) resident through the working-set lock, minus the large-page prefix (#2295).
+    void lock_from(uint64_t off);
     std::vector<uint64_t> bounds_;
     std::vector<uint64_t> slice_starts;
     void* mapping_base = nullptr;     ///< actual mapping start; differs from base when a shared-file header exists
