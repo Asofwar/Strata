@@ -1,8 +1,9 @@
-// aux_cpus_test: the CPU-set derivation of --aux-cpus (pure functions, no GPU) and, on Linux, the placement of live
-// threads (a thread of the process moved to the aux set by the sweep, one that pins itself at creation, the owned ones
+// aux_cpus_test: the CPU-set derivation of --aux-cpus (pure functions, no GPU) and, on Linux and Windows, the
+// placement of live threads (a thread of the process moved to the aux set by the sweep, one that pins itself at creation, the owned ones
 // left alone, and the original placement put back).
 #include "strata/platform/aux_cpus.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -112,6 +113,26 @@ void test_derive() {
         CHECK(derive(a, 0, V{1}) == V{4});
     }
     CHECK(derive(std::vector<LogicalCpu>{}, 0, V{1}).empty());
+    // a hybrid CPU (i9-14900K on Windows): CPUs 0-15 are the two threads of P-cores 0-7 (efficiency class 1), CPUs
+    // 16-31 one E-core each (class 0).  The host on CPU 0, seven workers on the first threads of P-cores 1-7: the host's
+    // sibling, then the E-cores
+    {
+        std::vector<LogicalCpu> a;
+        for (int c = 0; c < 16; ++c) a.push_back({c, 0, c / 2, 1});
+        for (int c = 16; c < 32; ++c) a.push_back({c, 0, c - 8, 0});
+        V want{1};
+        for (int c = 16; c < 32; ++c) want.push_back(c);
+        CHECK(derive(a, 0, V{2, 4, 6, 8, 10, 12, 14}) == want);
+        // six workers: P-core 7 is free and goes before the E-cores
+        want = V{1, 14, 15};
+        for (int c = 16; c < 32; ++c) want.push_back(c);
+        CHECK(derive(a, 0, V{2, 4, 6, 8, 10, 12}) == want);
+    }
+    // the faster class first even when its CPU numbers are higher
+    {
+        const std::vector<LogicalCpu> a{{0, 0, 0, 0}, {1, 0, 1, 0}, {2, 0, 2, 0}, {3, 0, 3, 1}, {4, 0, 3, 1}, {5, 0, 4, 0}};
+        CHECK(derive(a, 2, V{5}) == (V{3, 4, 0, 1}));
+    }
 }
 
 #if defined(__linux__)
@@ -198,8 +219,89 @@ void test_live() {
     late.join();
     pinned.join();
 }
+#elif defined(_WIN32)
+std::vector<ULONG> sel_of(DWORD tid) {
+    std::vector<ULONG> ids;
+    HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid);
+    if (h == nullptr) return {~0ul};
+    if (!detail::selection(h, ids)) ids = {~0ul};
+    CloseHandle(h);
+    return ids;
+}
+
+void test_live() {
+    const std::vector<detail::WinCpu> allowed = detail::read_cpu_sets();
+    if (allowed.size() < 4) {
+        std::printf("aux_cpus_test: live placement skipped (needs 4 allowed CPUs, have %zu)\n", allowed.size());
+        return;
+    }
+    const int host = allowed[0].cpu.cpu, worker = allowed[1].cpu.cpu, aux_a = allowed[2].cpu.cpu, aux_b = allowed[3].cpu.cpu;
+    std::vector<ULONG> aux{allowed[2].id, allowed[3].id};
+    std::sort(aux.begin(), aux.end());
+    const std::vector<ULONG> none;
+    std::string err;
+    CHECK(configure(std::to_string(aux_a) + "," + std::to_string(aux_b), err));
+    CHECK(sweep() == 0);
+    const std::string line = set_topology(host, V{worker});
+    std::printf("%s\n", line.c_str());
+    CHECK(plan() == (V{aux_a, aux_b}));
+    CHECK(enabled());
+
+    // as on Linux: `floater` exists before the sweep, `owned` is registered, `late` pins itself at creation
+    std::atomic<DWORD> tid_floater{0}, tid_owned{0}, tid_late{0};
+    std::atomic<bool> stop{false};
+    auto body = [&](std::atomic<DWORD>& tid, bool owned, bool pin) {
+        if (owned) note_owned_thread();
+        if (pin) pin_current_thread();
+        tid = GetCurrentThreadId();
+        while (!stop.load()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    };
+    set_enabled(false);
+    CHECK(!enabled());
+    std::thread floater([&] { body(tid_floater, false, false); });
+    std::thread owned([&] { body(tid_owned, true, false); });
+    for (int i = 0; i < 500 && (!tid_floater || !tid_owned); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    CHECK(sel_of(tid_floater) == none);
+
+    set_enabled(true);                                    // the sweep
+    CHECK(sel_of(tid_floater) == aux);
+    CHECK(sel_of(tid_owned) == none);                     // owned threads are left alone
+    CHECK(sel_of(GetCurrentThreadId()) == none);          // so is the main thread (configure registered it)
+
+    std::thread late([&] { body(tid_late, false, true); });
+    for (int i = 0; i < 500 && !tid_late; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    CHECK(sel_of(tid_late) == aux);                       // pinned at creation
+
+    set_enabled(false);                                   // back to the (empty) selections they had
+    CHECK(sel_of(tid_floater) == none);
+    CHECK(sel_of(tid_late) == none);
+    CHECK(sel_of(tid_owned) == none);
+    CHECK(sweep() == 0);
+
+    // a thread with a one-CPU hard affinity (a pool worker's) is not ours even when unregistered
+    std::atomic<DWORD> tid_pinned{0};
+    std::thread pinned([&] {
+        GROUP_AFFINITY ga{};
+        ga.Group = (WORD) (worker / 64);
+        ga.Mask = KAFFINITY(1) << (worker & 63);
+        SetThreadGroupAffinity(GetCurrentThread(), &ga, nullptr);
+        tid_pinned = GetCurrentThreadId();
+        while (!stop.load()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    });
+    for (int i = 0; i < 500 && !tid_pinned; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    set_enabled(true);
+    CHECK(sel_of(tid_pinned) == none);
+    CHECK(sel_of(tid_floater) == aux);
+    set_enabled(false);
+
+    stop = true;
+    floater.join();
+    owned.join();
+    late.join();
+    pinned.join();
+}
 #else
-void test_live() { std::printf("aux_cpus_test: live placement is Linux only\n"); }
+void test_live() { std::printf("aux_cpus_test: live placement is Linux and Windows only\n"); }
 #endif
 
 }  // namespace

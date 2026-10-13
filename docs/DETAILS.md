@@ -1750,12 +1750,14 @@ the pairs in which the switched arm won). They are here so you can try them on y
   4-byte stream-ordered copy into pinned memory, which needs no driver callback thread: on a 20-core desktop (RTX 3060) the host
   functions still cost ~7 ms per window with the thread started early, because the pool's workers occupy every other CPU.
 
-## Thread placement: `--aux-cpus` (Linux, off by default)
+## Thread placement: `--aux-cpus` (Linux and Windows, off by default)
 
 The CPU pool pins its workers (one logical CPU per physical core) and the host thread pins itself to the pool's reserved
 core. A thread the engine starts after that inherits the host's one CPU: the adaptive tier's job thread, the prefill
 helpers, the router look-ahead. CUDA driver threads created before pinning can run on any allowed CPU, the workers'
 included; a lazily created host-callback thread can instead inherit the pinned host's one CPU (see the warm-up above).
+On Windows a new thread inherits neither the host's CPU Set nor its affinity: every thread the engine or the driver starts
+can run on any CPU, the host's and the workers' included.
 `--aux-cpus` puts every thread that is neither a pool worker nor the host thread on spare CPUs. It moves threads only and
 never changes a result.
 
@@ -1763,6 +1765,12 @@ never changes a result.
   physical cores that have no pool worker. A CPU that shares a core with a worker is never taken; when no CPU is spare
   the feature does nothing and the start-up line says so. A list (`--aux-cpus 24,26` or `24-27`) is used as given, minus
   the host's CPU and the workers' CPUs, and only CPUs the process may run on. `--aux-cpus off` is the default.
+- **Windows.** CPU numbers are the pool's: processor group x 64 + the processor's number in its group, so a list can name
+  CPUs of any group. The threads get a CPU Set selection (`SetThreadSelectedCpuSets`, as the host thread does), not a hard
+  affinity; `0` restores the empty selection every thread starts with. The sweep reads the process's threads from a
+  Toolhelp snapshot. The physical core of a CPU is its CPU Set's core index; on a hybrid CPU `auto` takes the free P-cores
+  (the higher `EfficiencyClass`) before the E-cores, and the start-up line says `(hybrid CPU: free P-cores first)`. A
+  thread pinned to one CPU (a pool worker's hard affinity, the adaptive job thread on its SMT spare) is never moved.
 - **How.** Threads the engine starts pin themselves first thing: the adaptive tier's job thread and its per-round
   threads, the prefill copy threads and helpers, the router look-ahead, the PLE reader, the file readers, the stdin reader
   and the watchdog. The threads someone else started (the CUDA driver's) are moved by a sweep over `/proc/self/task`
@@ -1792,6 +1800,27 @@ never changes a result.
   restart noise. The mean and the p99 of the doorbell-to-flag time are not worse without the flag; what appears is rare
   stalls above 100 us, in 7 and 8 of 12 requests off against 0 or 1 with `auto`. That preemption of the host causes the
   loss is an inference; the counters do not prove it. The warm-up requests of each run were discarded.
+- **Measured on Windows: no gain.** One machine: RTX 5080 16 GB (PCIe 5.0 x8, driver 617.42), i9-14900K (8 P-cores with
+  two threads each, CPUs 0-15, and 16 E-cores, CPUs 16-31), Windows 11, Huihui-Ornith-1.5-35B-A3B-abliterated i1-IQ4_XS,
+  `--spec 4 --kv int8 --max-context 262144 --pool-workers 7 --adapt-every 1`, `STRATA_ATTN_SPLITS=256`. The pool put
+  its workers on CPUs 2-14 (even) and the host on 0; `auto` planned CPUs 1 and 16-31 (no P-core was free) and placed 12
+  threads at start. Same binary in every arm; one server start per run of `tools/strata_bench.py --runs 3`, in the order
+  off, `auto`, `16-23`, `auto`, off, `16-23`, off, `auto`. Medians per start:
+
+  | | off (3 starts) | `auto` (3 starts) | `16-23` (2 starts) |
+  | --- | --- | --- | --- |
+  | short chat decode, tok/s | 234.3, 204.9, 226.2 | 216.1, 213.1, 228.5 | 231.6, 237.1 |
+  | 16K prompt, tok/s | 5709.7, 5750.2, 5746.3 | 5552.8, 5686.7, 5679.2 | 5613.7, 5684.2 |
+  | 16K prompt, first token (s) | 2.84, 2.82, 2.82 | 2.92, 2.85, 2.86 | 2.89, 2.85 |
+  | agent session decode, tok/s | 208.6, 225.5, 219.2 | 199.9, 222.8, 199.3 | 166.2, 207.0 |
+
+  Decode moves inside the spread of the off starts alone (204.9 to 234.3). The 16K prompt read is 1-3% slower with the
+  flag in every start, which fits the prefill copy threads leaving the P-cores for E-cores (`STRATA_AUX_STAGER=0` was
+  not tried). The Linux gain came from threads that inherit the pinned host's one CPU; on Windows nothing inherits it,
+  and since 0.1.43.1 the overlap's signal needs no host-callback thread. Greedy answers (two prompts, 160 tokens) differed
+  between starts of the same arm: the three off starts gave three different texts, the first matched both `16-23`
+  starts and the third matched the third `auto` start. So the run cannot show more than that the flag's outputs fall
+  among the off outputs; the adaptive tier's timing moves experts between the CPU and the GPU from start to start. Not tested: other CPUs, processor groups above 64 CPUs, `--batch`.
 
 ---
 
