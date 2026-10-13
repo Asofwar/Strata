@@ -1,0 +1,5 @@
+strata mtp: draft layer loaded from the model file, 704 MiB of VRAM (experts 408, dense 19), files read in 0.61 s (696 MiB/s)
+strata generate: expert cache auto: +393 MiB kept for the dense attention at 262144 tokens of context
+strata generate: expert cache 5362 slots, 8.35 GiB of VRAM; policy is
+strata verify: window up to 6 tokens, 441.8 MiB of device buffers
+strata serve: 0 MiB of VRAM free with everything loaded - LOW: requests may stall; add --vram-reserve-mib 1212 to the config's args (or lower --max-context)
