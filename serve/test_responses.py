@@ -91,15 +91,97 @@ class Parsing(unittest.TestCase):
 
     def test_unsupported_items_are_named(self):
         for items, param in (([{"type": "item_reference", "id": "msg_1"}], "input[0]"),
-                             ([{"type": "web_search_call"}], "input[0].type"),
-                             ([{"role": "user", "content": [{"type": "input_file", "file_id": "f"}]}],
+                             ([{"type": "tool_search_call"}], "input[0].type"),
+                             ([{"type": "compaction", "encrypted_content": "x"}], "input[0].type"),
+                             ([{"role": "user", "content": [{"type": "input_audio", "input_audio": {}}]}],
                               "input[0].content[0].type"),
+                             ([{"role": "user", "content": [{"type": "input_file", "file_id": "f"}]}],
+                              "input[0].content[0].file_id"),
+                             ([{"role": "user", "content": [{"type": "input_file", "file_url": "https://x/a.txt"}]}],
+                              "input[0].content[0].file_url"),
+                             ([{"type": "mcp_call", "server_label": "s"}], "input[0].name"),
                              ([{"role": "robot", "content": "x"}], "input[0].role")):
             with self.assertRaises(ResponsesError) as e:
                 input_messages({"input": items})
             self.assertEqual(e.exception.param, param)
         with self.assertRaises(ResponsesError):
             input_messages({})
+
+    def test_text_files_are_read_inline(self):
+        data = base64.b64encode("x = 1  # π".encode()).decode()
+        texts = []
+        for file_data in (f"data:text/x-python;base64,{data}", data,
+                          "data:application/json;base64," + base64.b64encode(b'{"a": 1}').decode(),
+                          "data:text/plain;base64," + base64.b64encode(b"\xef\xbb\xbfbom").decode(),
+                          f"data:application/octet-stream;base64,{data}"):
+            m = input_messages({"input": [{"role": "user", "content": [
+                {"type": "input_text", "text": "Explain"},
+                {"type": "input_file", "filename": "a.py", "file_data": file_data}]}]})
+            self.assertEqual(len(m), 1)
+            self.assertIsInstance(m[0]["content"], str)
+            self.assertTrue(m[0]["content"].startswith('Explain\n\n<file name="a.py">\n'))
+            self.assertTrue(m[0]["content"].endswith("\n</file>\n\n"))
+            texts.append(m[0]["content"])
+        self.assertIn("\nx = 1  # π\n", texts[0])
+        self.assertEqual(texts[0], texts[1])                           # a data: URL or bare base64
+        self.assertIn('>\n{"a": 1}\n<', texts[2])
+        self.assertIn(">\nbom\n<", texts[3])                           # the UTF-8 byte-order mark is dropped
+        self.assertEqual(texts[0], texts[4])                           # judged by its bytes, not its type
+        # beside an image the content stays the template's list form, the file as a text part
+        m = input_messages({"input": [{"role": "user", "content": [
+            {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+            {"type": "input_file", "file_data": data}]}]})
+        self.assertEqual([p["type"] for p in m[0]["content"]], ["image", "text"])
+        self.assertIn('<file name="file">', m[0]["content"][1]["text"])
+        # a tool's output may carry a file too
+        m = input_messages({"input": [{"type": "function_call_output", "call_id": "c", "output": [
+            {"type": "input_file", "filename": "log.txt", "file_data": data}]}]})
+        self.assertIn('<file name="log.txt">', m[0]["content"])
+
+    def test_binary_files_are_refused_with_a_reason(self):
+        pdf = "data:application/pdf;base64," + base64.b64encode(b"%PDF-1.7 ...").decode()
+        for file_data, code in ((pdf, "unsupported_file_type"),
+                                (base64.b64encode(b"%PDF-1.4").decode(), "unsupported_file_type"),
+                                ("data:image/png;base64,AAAA", "unsupported_file_type"),
+                                ("data:text/plain;base64," + base64.b64encode(b"a\x00b").decode(),
+                                 "unsupported_file_type"),
+                                (base64.b64encode(b"\xff\xfe\x80").decode(), "unsupported_file_type"),
+                                ("not base64!", None), ("data:text/plain,hello", None)):
+            with self.assertRaises(ResponsesError) as e:
+                input_messages({"input": [{"role": "user", "content": [
+                    {"type": "input_file", "filename": "doc.pdf", "file_data": file_data}]}]})
+            self.assertEqual(e.exception.code, code, file_data)
+        with self.assertRaises(ResponsesError) as e:
+            input_messages({"input": [{"role": "user", "content": [{"type": "input_file", "file_data": pdf}]}]})
+        self.assertIn("is not a text file", str(e.exception))
+        self.assertIn("convert a PDF", str(e.exception))
+        self.assertEqual(e.exception.param, "input[0].content[0]")
+
+    def test_hosted_tool_records_are_left_out_and_mcp_and_shell_calls_kept(self):
+        m = input_messages({"input": [
+            {"role": "user", "content": "find it"},
+            {"type": "web_search_call", "id": "ws_1", "status": "completed", "action": {"query": "q"}},
+            {"type": "mcp_list_tools", "id": "ml_1", "server_label": "fs", "tools": []},
+            {"type": "mcp_call", "id": "mcp_1", "server_label": "fs", "name": "read", "arguments": '{"path": "a"}',
+             "output": "hello"},
+            {"type": "local_shell_call", "id": "ls_1", "call_id": "call_1", "status": "completed",
+             "action": {"type": "exec", "command": ["ls"]}},
+            {"type": "local_shell_call_output", "id": "call_1", "output": "a.txt"},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done."}]}]})
+        self.assertEqual([x["role"] for x in m], ["user", "assistant", "tool", "assistant", "tool", "assistant"])
+        self.assertEqual(m[1]["tool_calls"], [{"function": {"name": "fs.read", "arguments": {"path": "a"}}}])
+        self.assertEqual(m[2]["content"], "hello")
+        self.assertEqual(m[3]["tool_calls"], [{"function": {"name": "local_shell",
+                                                             "arguments": {"type": "exec", "command": ["ls"]}}}])
+        self.assertEqual(m[4]["content"], "a.txt")
+        self.assertEqual(m[5]["content"], "Done.")
+        # an mcp_call that failed comes back as its error; one without a result is a call alone
+        m = input_messages({"input": [{"type": "mcp_call", "server_label": "fs", "name": "read", "arguments": "{}",
+                                       "error": "no such file"}]})
+        self.assertEqual(m[1]["content"], "Error: no such file")
+        m = input_messages({"input": [{"type": "mcp_call", "name": "read", "arguments": "{}"}]})
+        self.assertEqual([x["role"] for x in m], ["assistant"])
+        self.assertEqual(m[0]["tool_calls"][0]["function"]["name"], "read")
 
     def test_tools_namespaces_custom_and_hosted(self):
         tools, names, skipped = request_tools({"tools": [
@@ -414,6 +496,22 @@ class OverHttp(Server):
         err = json.loads(r.read())["error"]
         c.close()
         self.assertEqual((r.status, err["type"], err["param"]), (400, "invalid_request_error", None))
+
+    def test_a_text_file_reaches_the_prompt_and_a_pdf_is_refused(self):
+        notes = base64.b64encode(b"remember the milk").decode()
+        code, r = self.post({"model": "m", "input": [{"role": "user", "content": [
+            {"type": "input_text", "text": "Summarize"},
+            {"type": "input_file", "filename": "notes.md", "file_data": f"data:text/markdown;base64,{notes}"}]}]})
+        self.assertEqual((code, r["status"]), (200, "completed"))
+        self.assertIn('Summarize\n\n<file name="notes.md">\nremember the milk\n</file>',
+                      self.tok.decode(self.engine.last_prompt))
+        pdf = "data:application/pdf;base64," + base64.b64encode(b"%PDF-1.7").decode()
+        code, r = self.post({"model": "m", "input": [{"role": "user", "content": [
+            {"type": "input_file", "filename": "a.pdf", "file_data": pdf}]}]})
+        self.assertEqual(code, 400)
+        self.assertEqual((r["error"]["param"], r["error"]["code"]), ("input[0].content[0]", "unsupported_file_type"))
+        code, r = self.post({"model": "m", "input": "x", "background": True})
+        self.assertEqual((code, r["error"]["param"]), (400, "background"))
 
     def test_too_long_for_the_context(self):
         code, r = self.post({"model": "m", "input": "x" * 20000})

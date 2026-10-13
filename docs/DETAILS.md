@@ -1488,12 +1488,16 @@ speaks Chat Completions). It runs on the same path as `/v1/chat/completions`, so
 budget, the conversation cache and the same API key, Host and Origin checks apply.
 
 It is **stateless**: nothing is stored, so the client sends the whole conversation in `input` every time (Codex does,
-with `store: false`). `previous_response_id`, `conversation`, `background` and the retrieve/delete/cancel endpoints
-are refused with an error that says so.
+with `store: false`). `previous_response_id`, `conversation`, `item_reference` items, `background` and the
+retrieve/delete/cancel endpoints all need responses kept on the server, so they are refused with an error that says
+so (`background` returns at once and is polled with GET, which needs the same store). Stored `prompt` templates,
+`input_audio`, an opaque `compaction` item from another server, and `tool_search_call`/`tool_search_output` are
+refused too.
 
 | Request | What Strata does |
 | --- | --- |
-| `input` as a string, or as items | `message` items (`user`, `assistant`, `system`, `developer`; text and images), `reasoning`, `function_call`, `function_call_output`, `custom_tool_call(_output)` |
+| `input` as a string, or as items | `message` items (`user`, `assistant`, `system`, `developer`; text, images and text files), `reasoning`, `function_call`, `function_call_output`, `custom_tool_call(_output)`, `mcp_call` and `local_shell_call(_output)` (a call and its result, as a tool call the model sees). Records of hosted tools from an answer another server gave (`web_search_call`, `file_search_call`, `computer_call(_output)`, `code_interpreter_call`, `image_generation_call`, `mcp_list_tools`, `mcp_approval_request`/`_response`) are left out, as the hosted tools are |
+| `input_file` content parts | Text files given inline in `file_data` (a `data:` URL or bare base64), in a message or a tool output: UTF-8 text (code, Markdown, CSV, JSON, ...) goes into the prompt as `<file name="...">` ... `</file>`. A PDF, image, archive or other binary file is refused (`unsupported_file_type`): convert it to text first. `file_id` and `file_url` are refused: the server keeps no uploaded files and does not fetch URLs |
 | `instructions` | The system message (with leading `developer` messages; later ones become user messages, as on the chat path) |
 | `tools` | `function` tools, `namespace` tools (the model sees `namespace.name`; calls come back with `namespace` and `name`), `custom` tools (one free-form `input` string). Hosted tools (`web_search`, `file_search`, ...) are left out: the model cannot run them |
 | `tool_choice` | `"none"` hides the tools; anything else lets the model choose (it cannot be forced) |
