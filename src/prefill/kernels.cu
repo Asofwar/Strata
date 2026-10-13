@@ -1035,6 +1035,224 @@ __global__ void __launch_bounds__(128 * VPK) gdn_chunk_scan_kernel(float* __rest
         for (int y = 0; y < 4; ++y) state[(size_t) (4 * rq + xx) * rs + (size_t) vh * S + c0 + vv + y] = s[xx][y];
 }
 
+// STRATA_GDN_CHUNKED=1 on a card with 64 to 127 SMs: gdn_chunk_scan_kernel's 128 blocks, one an SM, take two waves
+// there (each block walks every chunk, so the second wave doubles the time).  This scan takes 32 value columns a block
+// (64 blocks: one wave from 64 SMs on), the same 128 threads a value head, each thread 8 columns instead of 4: the
+// same products summed in the same order per column, so the same bits as gdn_chunk_scan_kernel.  Its shared memory is
+// kept under 99 KB (sm_120's opt-in limit) by one k buffer (the next chunk's k is loaded into registers after barrier
+// A and stored after barrier C), Y and D in one buffer (a fourth barrier between the last read of Y and the first
+// write of D) and the decay exp(gamma_last - gamma_t) kept per token instead of the decayed D (multiplied as the update
+// reads D, as gdn_chunk_scan_kernel multiplies it as it stores it: the same products).  Five barriers a chunk.
+constexpr int GDW = 32;            // value columns per wide scan block
+constexpr size_t kChunkScanWideSmem = sizeof(float) * (2 * GCH * GKP + VPK * (S * GDW + GCH * GDW + GCH));
+__global__ void __launch_bounds__(128 * VPK, 1) gdn_chunk_scan_wide_kernel(float* __restrict__ state, const float* __restrict__ h,
+                                                                           const float* __restrict__ beta, const float* __restrict__ tm,
+                                                                           const float* __restrict__ pm, const float* __restrict__ gm,
+                                                                           float* __restrict__ oc_out, int64_t t0, int nch, int64_t T) {
+    extern __shared__ __align__(16) float gsm[];
+    constexpr int NT = 128 * VPK, HEAD = S * GDW + GCH * GDW + GCH;   // threads; a head's shared floats
+    constexpr int KPT = (GCH * (S / 4) + NT - 1) / NT;               // float4 of the next chunk's k a thread holds
+    float* sk = gsm;                       // [GCH][GKP]  k
+    float* sq = sk + GCH * GKP;            // [GCH][GKP]  q
+    const int qh = blockIdx.x, c0 = blockIdx.y * GDW, j = threadIdx.x / 128, tid = threadIdx.x % 128;
+    const int vh = qh + j * HK;
+    float* ss = sq + GCH * GKP + j * HEAD; // [S][GDW]  the state slice at the chunk's start
+    float* syd = ss + S * GDW;             // [GCH][GDW]  Y, then D
+    float* sf = syd + GCH * GDW;           // [GCH]  exp(gamma_last - gamma_t)
+    const int rq = tid >> 2, vq = tid & 3;   // the update's tile: rows 4rq..4rq+3; both tiles: columns 8vq..8vq+7
+    const int tt = tid >> 2, vv = 8 * vq;    // the products' tile: token tt
+    const size_t rs = (size_t) HV * S;
+    auto stage_kq = [&](int64_t c_t0, int n, float* dst, bool isq) {   // k or q rows of a chunk, cp.async
+        for (int p = threadIdx.x; p < GCH * (S / 4); p += NT) {
+            const int t = p / (S / 4), r = (p % (S / 4)) * 4;
+            if (t < n) gdn_cp16(dst + t * GKP + r, h + (c_t0 + t) * C + (isq ? 0 : HK * S) + qh * S + r);
+            else *reinterpret_cast<float4*>(dst + t * GKP + r) = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        }
+    };
+    // this tile's v (8 columns), gamma, beta and the chunk's last gamma (registers)
+    auto load_vgb = [&](int ch, int64_t c_t0, int n, float4& va, float4& vb, float& gam, float& bet, float& glast) {
+        const float4* vp = reinterpret_cast<const float4*>(h + (c_t0 + tt) * C + 2 * HK * S + vh * S + c0 + vv);
+        va = tt < n ? __ldg(vp) : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        vb = tt < n ? __ldg(vp + 1) : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        const float* g = gm + ((int64_t) ch * HV + vh) * GCH;
+        gam = __ldg(g + tt);
+        glast = __ldg(g + GCH - 1);
+        bet = tt < n ? __ldg(beta + (c_t0 + tt) * HV + vh) : 0.0f;
+    };
+    float s[4][8];
+#pragma unroll
+    for (int x = 0; x < 4; ++x) {
+#pragma unroll
+        for (int y = 0; y < 8; ++y) s[x][y] = state[(size_t) (4 * rq + x) * rs + (size_t) vh * S + c0 + vv + y];
+        *reinterpret_cast<float4*>(&ss[(4 * rq + x) * GDW + vv]) = make_float4(s[x][0], s[x][1], s[x][2], s[x][3]);
+        *reinterpret_cast<float4*>(&ss[(4 * rq + x) * GDW + vv + 4]) = make_float4(s[x][4], s[x][5], s[x][6], s[x][7]);
+    }
+    const float out_scale = rsqrtf((float) S);
+    float4 va, vb;
+    float gam, bet, glast;
+    {
+        const int n0 = (int) min((int64_t) GCH, T - t0);
+        stage_kq(t0, n0, sk, false);
+        stage_kq(t0, n0, sq, true);
+        gdn_cp_commit();
+        load_vgb(0, t0, n0, va, vb, gam, bet, glast);
+        gdn_cp_wait_all();
+        __syncthreads();
+    }
+    for (int ch = 0; ch < nch; ++ch) {
+        const int64_t c_t0 = t0 + (int64_t) ch * GCH;
+        const int n = (int) min((int64_t) GCH, T - c_t0);
+        const bool more = ch + 1 < nch;
+        const int64_t n_t0 = c_t0 + GCH;
+        const int nn = more ? (int) min((int64_t) GCH, T - n_t0) : 0;
+        // this token's T row into registers now: it lands while the first product runs
+        float tr[GCH];
+        {
+            const float4* T4 = reinterpret_cast<const float4*>(tm + (((int64_t) ch * HV + vh) * GCH + tt) * GCH);
+#pragma unroll
+            for (int i = 0; i < GCH / 4; ++i) {
+                const float4 a = __ldg(T4 + i);
+                tr[4 * i] = a.x; tr[4 * i + 1] = a.y; tr[4 * i + 2] = a.z; tr[4 * i + 3] = a.w;
+            }
+        }
+        float4 nva = make_float4(0.0f, 0.0f, 0.0f, 0.0f), nvb = nva;
+        float ngam = 0.0f, nbet = 0.0f, nglast = 0.0f;
+        if (more) {   // the next chunk's v, gamma and beta; the one after into L2
+            load_vgb(ch + 1, n_t0, nn, nva, nvb, ngam, nbet, nglast);
+            const int64_t f_t0 = n_t0 + GCH;
+            const int t = threadIdx.x >> 3, l = threadIdx.x & 7;
+            if (t < GCH && f_t0 + t < T) gdn_pf_l2(h + (f_t0 + t) * C + (l < 4 ? HK * S : 0) + qh * S + 32 * (l & 3));
+            if (tid < GCH) {
+                gdn_pf_l2(tm + (((int64_t) (ch + 1) * HV + vh) * GCH + tid) * GCH);
+                gdn_pf_l2(pm + (((int64_t) (ch + 1) * HV + vh) * GCH + tid) * GCH);
+            }
+        }
+        // X = K S0 and Q S0 for token tt, then Y = beta (V - exp(gamma) X)
+        float x[8] = {}, qs[8] = {};
+#pragma unroll 4
+        for (int r = 0; r < S; r += 4) {
+            const float4 k4 = *reinterpret_cast<const float4*>(&sk[tt * GKP + r]);
+            const float4 q4 = *reinterpret_cast<const float4*>(&sq[tt * GKP + r]);
+            const float kk[4] = {k4.x, k4.y, k4.z, k4.w}, qq[4] = {q4.x, q4.y, q4.z, q4.w};
+#pragma unroll
+            for (int jj = 0; jj < 4; ++jj) {
+                const float4 sa = *reinterpret_cast<const float4*>(&ss[(r + jj) * GDW + vv]);
+                const float4 sb = *reinterpret_cast<const float4*>(&ss[(r + jj) * GDW + vv + 4]);
+                const float s8[8] = {sa.x, sa.y, sa.z, sa.w, sb.x, sb.y, sb.z, sb.w};
+#pragma unroll
+                for (int y = 0; y < 8; ++y) {
+                    x[y] = fmaf(kk[jj], s8[y], x[y]);
+                    qs[y] = fmaf(qq[jj], s8[y], qs[y]);
+                }
+            }
+        }
+        const float e = expf(gam);
+        {
+            const float v8[8] = {va.x, va.y, va.z, va.w, vb.x, vb.y, vb.z, vb.w};
+            float y8[8];
+#pragma unroll
+            for (int y = 0; y < 8; ++y) y8[y] = bet * (v8[y] - e * x[y]);
+            *reinterpret_cast<float4*>(&syd[tt * GDW + vv]) = make_float4(y8[0], y8[1], y8[2], y8[3]);
+            *reinterpret_cast<float4*>(&syd[tt * GDW + vv + 4]) = make_float4(y8[4], y8[5], y8[6], y8[7]);
+        }
+        __syncthreads();   // (A) Y complete; every read of q and of ss done
+        float4 kn[KPT];
+        if (more) {        // the next chunk's q into its buffer (cp.async), its k into registers (k is read until (C))
+            stage_kq(n_t0, nn, sq, true);
+            gdn_cp_commit();
+#pragma unroll
+            for (int m = 0; m < KPT; ++m) {
+                const int p = threadIdx.x + NT * m, t = p / (S / 4), r = (p % (S / 4)) * 4;
+                kn[m] = p < GCH * (S / 4) && t < nn ? __ldg(reinterpret_cast<const float4*>(h + (n_t0 + t) * C + HK * S + qh * S + r))
+                                                    : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+            }
+        }
+        // D = T Y (T is zero above its diagonal)
+        float d[8] = {};
+#pragma unroll
+        for (int i = 0; i < GCH; ++i) {
+            const float4 ya = *reinterpret_cast<const float4*>(&syd[i * GDW + vv]);
+            const float4 yb = *reinterpret_cast<const float4*>(&syd[i * GDW + vv + 4]);
+            d[0] = fmaf(tr[i], ya.x, d[0]); d[1] = fmaf(tr[i], ya.y, d[1]);
+            d[2] = fmaf(tr[i], ya.z, d[2]); d[3] = fmaf(tr[i], ya.w, d[3]);
+            d[4] = fmaf(tr[i], yb.x, d[4]); d[5] = fmaf(tr[i], yb.y, d[5]);
+            d[6] = fmaf(tr[i], yb.z, d[6]); d[7] = fmaf(tr[i], yb.w, d[7]);
+        }
+        // this token's P row (after T's last use: the two rows are not held at once)
+        float pr[GCH];
+        {
+            const float4* P4 = reinterpret_cast<const float4*>(pm + (((int64_t) ch * HV + vh) * GCH + tt) * GCH);
+#pragma unroll
+            for (int i = 0; i < GCH / 4; ++i) {
+                const float4 b = __ldg(P4 + i);
+                pr[4 * i] = b.x; pr[4 * i + 1] = b.y; pr[4 * i + 2] = b.z; pr[4 * i + 3] = b.w;
+            }
+        }
+        __syncthreads();   // (A2) every read of Y done
+        *reinterpret_cast<float4*>(&syd[tt * GDW + vv]) = make_float4(d[0], d[1], d[2], d[3]);
+        *reinterpret_cast<float4*>(&syd[tt * GDW + vv + 4]) = make_float4(d[4], d[5], d[6], d[7]);
+        if (vq == 0) sf[tt] = expf(glast - gam);
+        __syncthreads();   // (B) D complete
+        // o = exp(gamma) Q S0 + P D (P is zero above its diagonal), the output
+        float o[8];
+#pragma unroll
+        for (int y = 0; y < 8; ++y) o[y] = e * qs[y];
+#pragma unroll
+        for (int i = 0; i < GCH; ++i) {
+            const float4 da = *reinterpret_cast<const float4*>(&syd[i * GDW + vv]);
+            const float4 db = *reinterpret_cast<const float4*>(&syd[i * GDW + vv + 4]);
+            o[0] = fmaf(pr[i], da.x, o[0]); o[1] = fmaf(pr[i], da.y, o[1]);
+            o[2] = fmaf(pr[i], da.z, o[2]); o[3] = fmaf(pr[i], da.w, o[3]);
+            o[4] = fmaf(pr[i], db.x, o[4]); o[5] = fmaf(pr[i], db.y, o[5]);
+            o[6] = fmaf(pr[i], db.z, o[6]); o[7] = fmaf(pr[i], db.w, o[7]);
+        }
+        if (tt < n) {
+            float4* op = reinterpret_cast<float4*>(oc_out + (c_t0 + tt) * HV * S + vh * S + c0 + vv);
+            op[0] = make_float4(o[0] * out_scale, o[1] * out_scale, o[2] * out_scale, o[3] * out_scale);
+            op[1] = make_float4(o[4] * out_scale, o[5] * out_scale, o[6] * out_scale, o[7] * out_scale);
+        }
+        // S = exp(gamma_last) S0 + K^T (decayed D)
+        const float gL = expf(glast);
+#pragma unroll
+        for (int xx = 0; xx < 4; ++xx)
+#pragma unroll
+            for (int y = 0; y < 8; ++y) s[xx][y] *= gL;
+#pragma unroll 4
+        for (int t = 0; t < GCH; ++t) {
+            const float4 k4 = *reinterpret_cast<const float4*>(&sk[t * GKP + 4 * rq]);
+            const float4 da = *reinterpret_cast<const float4*>(&syd[t * GDW + vv]);
+            const float4 db = *reinterpret_cast<const float4*>(&syd[t * GDW + vv + 4]);
+            const float f = sf[t];
+            const float kx[4] = {k4.x, k4.y, k4.z, k4.w};
+            const float dy[8] = {f * da.x, f * da.y, f * da.z, f * da.w, f * db.x, f * db.y, f * db.z, f * db.w};
+#pragma unroll
+            for (int xx = 0; xx < 4; ++xx)
+#pragma unroll
+                for (int y = 0; y < 8; ++y) s[xx][y] = fmaf(kx[xx], dy[y], s[xx][y]);
+        }
+#pragma unroll
+        for (int xx = 0; xx < 4; ++xx) {
+            *reinterpret_cast<float4*>(&ss[(4 * rq + xx) * GDW + vv]) = make_float4(s[xx][0], s[xx][1], s[xx][2], s[xx][3]);
+            *reinterpret_cast<float4*>(&ss[(4 * rq + xx) * GDW + vv + 4]) = make_float4(s[xx][4], s[xx][5], s[xx][6], s[xx][7]);
+        }
+        va = nva; vb = nvb; gam = ngam; bet = nbet; glast = nglast;
+        __syncthreads();   // (C) every read of k, D and the decays done; the new ss written
+        if (more) {
+#pragma unroll
+            for (int m = 0; m < KPT; ++m) {
+                const int p = threadIdx.x + NT * m, t = p / (S / 4), r = (p % (S / 4)) * 4;
+                if (p < GCH * (S / 4)) *reinterpret_cast<float4*>(&sk[t * GKP + r]) = kn[m];
+            }
+        }
+        gdn_cp_wait_all();
+        __syncthreads();   // (D) the next k and q landed
+    }
+#pragma unroll
+    for (int xx = 0; xx < 4; ++xx)
+#pragma unroll
+        for (int y = 0; y < 8; ++y) state[(size_t) (4 * rq + xx) * rs + (size_t) vh * S + c0 + vv + y] = s[xx][y];
+}
+
 // The scratch, one a device: allocated on first use at its largest (GSB / GCH chunks of T, P and gamma: 25.6 MB) and
 // kept (a device runs its prompt on one stream).  A stream-ordered allocation and free per call, even from a pool that
 // keeps its memory, cost host time the GPU waited for (a 2K prompt's recurrence took 78 ms against 34 ms for
@@ -1053,16 +1271,52 @@ float* gdn_chunk_scratch() {
     return bufs[dev];
 }
 
+// The wide scan's 64 blocks leave the other SMs of a 64-127 SM card idle, and a super-block's prep reads only the
+// inputs (not the state), so the next super-block's prep runs there while this one's scan runs: the preps on a
+// low-priority stream into two scratch buffers in turn, the scans on a high-priority one (an SM a prep block leaves
+// goes to the scan first), both forked from and joined back to the caller's stream.  Created on first use, one set a
+// device; nullptr when any part could not be had (the caller then runs both on its own stream).
+struct GdnChunkSide {
+    cudaStream_t prep = nullptr, scan = nullptr;
+    cudaEvent_t fork = nullptr, join = nullptr, prepped[2] = {}, scanned[2] = {};
+    float* buf2 = nullptr;   // the second scratch buffer (the first: gdn_chunk_scratch)
+};
+GdnChunkSide* gdn_chunk_side() {
+    static GdnChunkSide sides[64];
+    static int state[64] = {};   // 0 not tried, 1 ready, 2 failed
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return nullptr; }
+    if (state[dev] == 0) {
+        GdnChunkSide& d = sides[dev];
+        int least = 0, greatest = 0;
+        const size_t n = (size_t) (GSB / GCH) * HV * (2 * GCH * GCH + GCH);
+        bool ok = cudaDeviceGetStreamPriorityRange(&least, &greatest) == cudaSuccess &&
+                  cudaStreamCreateWithPriority(&d.prep, cudaStreamNonBlocking, least) == cudaSuccess &&
+                  cudaStreamCreateWithPriority(&d.scan, cudaStreamNonBlocking, greatest) == cudaSuccess &&
+                  cudaEventCreateWithFlags(&d.fork, cudaEventDisableTiming) == cudaSuccess &&
+                  cudaEventCreateWithFlags(&d.join, cudaEventDisableTiming) == cudaSuccess &&
+                  cudaMalloc((void**) &d.buf2, n * sizeof(float)) == cudaSuccess;
+        for (int i = 0; ok && i < 2; ++i)
+            ok = cudaEventCreateWithFlags(&d.prepped[i], cudaEventDisableTiming) == cudaSuccess &&
+                 cudaEventCreateWithFlags(&d.scanned[i], cudaEventDisableTiming) == cudaSuccess;
+        if (!ok) cudaGetLastError();
+        state[dev] = ok ? 1 : 2;
+    }
+    return state[dev] == 1 ? &sides[dev] : nullptr;
+}
+
 // The whole recurrence of T tokens in super-blocks of GSB: a prep and a scan launch each, the scratch (T, P and gamma
 // of a super-block's chunks: up to GSB / GCH x 48 heads x (2 x 32 x 32 + 32) floats, 25.6 MB) from gdn_chunk_scratch.
 // y: the [T][HV][S] output.  An error return means nothing was launched (the caller takes another kernel): the scratch
-// could not be had, or the card has fewer than 128 SMs (a second wave of the scan would double it) or too little
-// shared memory for it (Turing).
+// could not be had, or the card has fewer than 64 SMs (a second wave of the scan would double it) or too little
+// shared memory for it (Turing).  From 128 SMs on gdn_chunk_scan_kernel's 128 blocks run; with 64 to 127,
+// gdn_chunk_scan_wide_kernel's 64 (the same bits), the next super-block's prep beside each scan (gdn_chunk_side).
 cudaError_t gdn_rec_chunked(float* state, const float* h, const float* gate, const float* beta, float* y, int64_t T,
                             cudaStream_t s) {
     if (T <= 0) return cudaSuccess;
-    {   // sm_80+ (cp.async), the scan's 128 blocks one an SM in one wave, and its 93.7 KB of shared memory (else:
-        // another kernel)
+    bool wide = false;
+    {   // sm_80+ (cp.async), the scan's 128 (or the wide scan's 64) blocks one an SM in one wave, and its 93.7 KB
+        // (95.6 KB) of shared memory (else: another kernel)
         int dev = 0, major = 0, sms = 0, smem = 0;
         if (cudaGetDevice(&dev) != cudaSuccess ||
             cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess ||
@@ -1074,8 +1328,14 @@ cudaError_t gdn_rec_chunked(float* state, const float* h, const float* gate, con
         // STRATA_GDN_CHUNKED=2 skips the SM-count test (measurement on a card under 128 SMs: the scan then runs in
         // several waves and is expected to be slower than the default kernel; the architecture and shared-memory
         // tests stay)
-        static const bool any_sms = [] { const char* v = std::getenv("STRATA_GDN_CHUNKED"); return v != nullptr && std::atoi(v) >= 2; }();
-        if (strata::cc_major_of(major) < 8 || (!any_sms && sms < HK * (S / GDV)) || (size_t) strata::smem_optin_of(smem) < kChunkScanSmem)
+        // STRATA_GDN_CHUNKED=3 takes gdn_chunk_scan_wide_kernel on any card (a measurement on 128+ SMs)
+        static const int mode = [] { const char* v = std::getenv("STRATA_GDN_CHUNKED"); return v != nullptr ? std::atoi(v) : 0; }();
+        const bool any_sms = mode >= 2 && mode != 3;
+        if (strata::cc_major_of(major) < 8) return cudaErrorNotSupported;
+        // 64 to 127 SMs (or STRATA_GDN_CHUNKED=3): the 64 blocks of 32 columns, one wave
+        wide = mode == 3 || (!any_sms && sms < HK * (S / GDV) && sms >= HK * (S / GDW));
+        if (wide ? (size_t) strata::smem_optin_of(smem) < kChunkScanWideSmem
+                 : ((!any_sms && sms < HK * (S / GDV)) || (size_t) strata::smem_optin_of(smem) < kChunkScanSmem))
             return cudaErrorNotSupported;
     }
     float* scratch = gdn_chunk_scratch();
@@ -1090,13 +1350,40 @@ cudaError_t gdn_rec_chunked(float* state, const float* h, const float* gate, con
         if (dev >= 0 && dev < 64 && !attrs[dev]) {
             cudaFuncSetAttribute(gdn_chunk_prep_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) kChunkPrepSmem);
             cudaFuncSetAttribute(gdn_chunk_scan_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) kChunkScanSmem);
+            cudaFuncSetAttribute(gdn_chunk_scan_wide_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) kChunkScanWideSmem);
             attrs[dev] = true;
         }
+    }
+    // STRATA_GDN_CHUNKED_OVERLAP=0: the wide scan's preps on the caller's stream, in turn with the scans (A/B)
+    static const bool overlap = [] { const char* v = std::getenv("STRATA_GDN_CHUNKED_OVERLAP"); return v == nullptr || std::atoi(v) != 0; }();
+    GdnChunkSide* side = wide && overlap && T > GSB ? gdn_chunk_side() : nullptr;
+    if (side != nullptr) {   // the next super-block's prep beside this one's scan (gdn_chunk_side)
+        cudaEventRecord(side->fork, s);
+        cudaStreamWaitEvent(side->prep, side->fork, 0);
+        cudaStreamWaitEvent(side->scan, side->fork, 0);
+        int k = 0;
+        for (int64_t t0 = 0; t0 < T; t0 += GSB, ++k) {
+            const int nch = (int) ((std::min<int64_t>(GSB, T - t0) + GCH - 1) / GCH), b = k & 1;
+            float* tb = b ? side->buf2 : scratch;
+            float *tk = tb, *pk = tk + tsz, *gk = pk + tsz;
+            if (k >= 2) cudaStreamWaitEvent(side->prep, side->scanned[b], 0);   // the scan two back read this buffer
+            gdn_chunk_prep_kernel<<<dim3((unsigned) nch, HK), 256, kChunkPrepSmem, side->prep>>>(h, gate, beta, tk, pk, gk, t0, T);
+            cudaEventRecord(side->prepped[b], side->prep);
+            cudaStreamWaitEvent(side->scan, side->prepped[b], 0);
+            gdn_chunk_scan_wide_kernel<<<dim3(HK, S / GDW), 128 * VPK, kChunkScanWideSmem, side->scan>>>(state, h, beta, tk, pk, gk, y, t0, nch, T);
+            cudaEventRecord(side->scanned[b], side->scan);
+        }
+        cudaEventRecord(side->join, side->scan);   // the last scan follows every prep
+        cudaStreamWaitEvent(s, side->join, 0);
+        return cudaSuccess;
     }
     for (int64_t t0 = 0; t0 < T; t0 += GSB) {
         const int nch = (int) ((std::min<int64_t>(GSB, T - t0) + GCH - 1) / GCH);
         gdn_chunk_prep_kernel<<<dim3((unsigned) nch, HK), 256, kChunkPrepSmem, s>>>(h, gate, beta, tm, pm, gm, t0, T);
-        gdn_chunk_scan_kernel<<<dim3(HK, S / GDV), 128 * VPK, kChunkScanSmem, s>>>(state, h, beta, tm, pm, gm, y, t0, nch, T);
+        if (wide)
+            gdn_chunk_scan_wide_kernel<<<dim3(HK, S / GDW), 128 * VPK, kChunkScanWideSmem, s>>>(state, h, beta, tm, pm, gm, y, t0, nch, T);
+        else
+            gdn_chunk_scan_kernel<<<dim3(HK, S / GDV), 128 * VPK, kChunkScanSmem, s>>>(state, h, beta, tm, pm, gm, y, t0, nch, T);
     }
     return cudaSuccess;   // launch errors surface at the caller's check; an error above means nothing ran
 }
