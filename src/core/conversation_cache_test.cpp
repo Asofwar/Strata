@@ -176,6 +176,54 @@ int main() {
         check(cache.best(std::vector<int64_t>{1, 2, 3, 4}, {}, true).tokens == 0, "a cleared cache matches nothing");
         check(cache.clear() == 0, "clear() on an empty cache");
     }
+    {   // #2255: every slot holds the pinned prefix: a new one evicts the oldest pinned conversation, the newest
+        // holder keeps the prefix; a pinned prefix with a single holder is never evicted
+        auto pin = [&](std::vector<int32_t> prefix, std::initializer_list<int32_t> ids) {
+            auto c = image(ids);
+            c.checkpoints.push_back(ConversationCheckpoint{});
+            c.checkpoints.back().ids = prefix;
+            c.checkpoints.back().pinned = true;
+            c.checkpoints.back().gdn.resize(64, 1);
+            c.checkpoints.push_back(ConversationCheckpoint{});   // its own deeper checkpoint, like a real turn
+            c.checkpoints.back().ids = ids;
+            c.checkpoints.back().gdn.resize(64, 2);
+            return c;
+        };
+        const size_t pb = pin({1, 2}, {1, 2, 3}).bytes();
+        ConversationCache full(pb * 4, 3);
+        check(full.put(pin({1, 2}, {1, 2, 3})) && full.put(pin({1, 2}, {1, 2, 4})) && full.put(pin({1, 2}, {1, 2, 5})) &&
+              full.size() == 3, "three pinned conversations fill the slots");
+        check(full.put(pin({1, 2}, {1, 2, 6})) && full.size() == 3 && full.evictions() == 1,
+              "a fourth pinned one still parks: the oldest pinned conversation leaves");
+        check(full.best(std::vector<int32_t>{1, 2, 3}, {}, true).tokens == 2, "the oldest is gone, the pinned prefix is still found");
+        check(full.best(std::vector<int32_t>{1, 2, 6, 9}, {}, true).tokens == 3, "the newest pinned conversation is found whole");
+        check(full.put(image({7, 8, 9})) && full.size() == 3 && full.evictions() == 2, "an unpinned one also gets a slot");
+
+        // two clients, each with its own pinned prefix: the single holder of a prefix stays
+        ConversationCache two(pb * 4, 3);
+        check(two.put(pin({5, 6}, {5, 6, 7})) && two.put(pin({1, 2}, {1, 2, 3})) && two.put(pin({1, 2}, {1, 2, 4})),
+              "a lone holder of one prefix and two holders of another");
+        check(two.put(pin({1, 2}, {1, 2, 5})) && two.size() == 3 && two.evictions() == 1,
+              "the oldest holder of the shared prefix leaves, not the lone holder of the other");
+        check(two.best(std::vector<int32_t>{5, 6, 7, 8}, {}, true).tokens == 3, "the lone holder is still parked");
+        check(two.best(std::vector<int32_t>{1, 2, 3}, {}, true).tokens == 2, "the shared prefix is still found");
+        check(two.evict_oldest() && two.size() == 2 && !two.evict_oldest() && two.size() == 2,
+              "each prefix down to one holder: nothing more can go");
+
+        // the incoming conversation is a holder too: two clients each pinning their own prefix fill two slots, and
+        // the next conversation under one prefix takes the slot of that prefix's older holder
+        ConversationCache pair(pb * 4, 2);
+        check(pair.put(pin({1, 2}, {1, 2, 3})) && pair.put(pin({5, 6}, {5, 6, 7})), "one holder of each prefix");
+        auto incoming = pin({1, 2}, {1, 2, 4});
+        check(!pair.evict_oldest() && pair.size() == 2, "without the incoming chain each holder is the last one");
+        check(pair.make_room(incoming.bytes(), 0, ConversationPins{&incoming.checkpoints, incoming.cvec}) &&
+              pair.size() == 1 && pair.best(std::vector<int32_t>{5, 6, 7, 8}, {}, true).tokens == 3,
+              "the incoming holder lets the older holder of its prefix go, not the other client's");
+        check(pair.put(pin({1, 2}, {1, 2, 5})) && pair.put(pin({1, 2}, {1, 2, 6})) && pair.size() == 2 &&
+              pair.best(std::vector<int32_t>{5, 6, 7, 8}, {}, true).tokens == 3 &&
+              pair.best(std::vector<int32_t>{1, 2, 6, 9}, {}, true).tokens == 3,
+              "put() passes its own chain: the shared prefix rotates, the other client's lone holder stays");
+    }
     {
         auto s = image({1, 2, 3});
         ConversationCheckpoint cp;

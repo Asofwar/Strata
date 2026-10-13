@@ -198,6 +198,12 @@ int64_t conversation_prefix(const ConversationCheckpoint& c, const std::vector<T
     return (int64_t) n;
 }
 
+/// #2255: the checkpoint chain of an image about to be parked, so eviction knows which pinned prefixes it holds.
+struct ConversationPins {
+    const std::vector<ConversationCheckpoint>* checkpoints = nullptr;
+    bool cvec = true;
+};
+
 class ConversationCache {
 public:
     struct Match {
@@ -312,7 +318,9 @@ public:
 
     // Reserve before allocating a snapshot. held is an incoming image removed
     // with take() but still alive during the exchange; count it against RAM too.
-    bool make_room(size_t incoming, size_t held = 0) {
+    // pins is the incoming image's own chain (#2255): a pinned prefix it holds keeps a holder once it is parked, so
+    // a parked entry holding the same prefix may go to make room for it.
+    bool make_room(size_t incoming, size_t held = 0, const ConversationPins& pins = {}) {
         if (!enabled() || held > budget_ || incoming > budget_ - held) return false;
         auto stays = [&](size_t i) { return entries_[i].pinned() || (guarded_ != 0 && serials_[i] == guarded_); };
         if (guarded_ != 0 && index_of(guarded_) != SIZE_MAX) {
@@ -325,9 +333,11 @@ public:
         }
         if (bytes() > budget_ - held - incoming) reuse_ = {};
         while (!entries_.empty() && (entries_.size() >= slots_ || bytes_ > budget_ - held - incoming)) {
-            // the oldest entry that does not hold a pinned shared prefix leaves; with only pinned ones left the new
-            // image does not fit (the caller skips parking it - the pinned prefix is what the queries come back to)
-            if (!evict_oldest()) return false;
+            // the oldest entry that does not hold a pinned shared prefix leaves; with only pinned ones left the oldest
+            // whose pinned prefixes another holder keeps leaves (#2255); when a pinned prefix left has a single
+            // holder the new image does not fit (the caller skips parking it - the pinned prefix is what the queries
+            // come back to)
+            if (!evict_oldest(pins)) return false;
         }
         return true;
     }
@@ -337,17 +347,42 @@ public:
     // gate in generate.cpp).  A ConversationBuffer is a list of 16 MiB segments and each segment is its
     // own allocation, far above glibc's mmap threshold, so dropping an entry returns the whole footprint
     // to the kernel at once - the next admission check reads it back from /proc/meminfo.
-    // False when none can go (empty, or only entries that hold a pinned shared prefix are left).
-    bool evict_oldest() {
-        // the oldest entry that holds no pinned shared prefix and is not the guarded (borrowed) donor
-        for (size_t i = 0; i < entries_.size(); ++i) {
-            if (entries_[i].pinned() || (guarded_ != 0 && serials_[i] == guarded_)) continue;
-            bytes_ -= entries_[i].bytes();
-            erase(i);
-            ++evictions_;
-            return true;
+    // #2255: when only entries that hold a pinned shared prefix are left (a client that pins its system prompt on
+    // every request fills every slot with them), the oldest pinned one goes whose every pinned prefix another
+    // holder keeps - a parked entry, or the incoming image's chain (pins) - so each pinned prefix stays findable
+    // and new conversations still park.  The guarded (borrowed) donor never goes.
+    // False when none can go (empty, or each pinned entry left is the only holder of one of its pinned prefixes).
+    bool evict_oldest(const ConversationPins& pins = {}) {
+        auto movable = [&](size_t i) { return !(guarded_ != 0 && serials_[i] == guarded_); };
+        size_t v = entries_.size();
+        // the oldest entry that holds no pinned shared prefix and is not the guarded donor
+        for (size_t i = 0; i < entries_.size() && v == entries_.size(); ++i)
+            if (!entries_[i].pinned() && movable(i)) v = i;
+        if (v == entries_.size()) {
+            auto holds = [](const std::vector<ConversationCheckpoint>& chain, const ConversationCheckpoint& c) {
+                for (const auto& k : chain)
+                    if (k.pinned && k.ids == c.ids && k.imgs == c.imgs) return true;
+                return false;
+            };
+            auto held_elsewhere = [&](size_t i) {
+                const SavedConversation& e = entries_[i];
+                for (const auto& c : e.checkpoints) {
+                    if (!c.pinned) continue;
+                    bool other = pins.checkpoints && pins.cvec == e.cvec && holds(*pins.checkpoints, c);
+                    for (size_t j = 0; j < entries_.size() && !other; ++j)
+                        if (j != i && entries_[j].cvec == e.cvec && holds(entries_[j].checkpoints, c)) other = true;
+                    if (!other) return false;
+                }
+                return true;
+            };
+            for (size_t i = 0; i < entries_.size() && v == entries_.size(); ++i)
+                if (movable(i) && held_elsewhere(i)) v = i;
         }
-        return false;
+        if (v == entries_.size()) return false;
+        bytes_ -= entries_[v].bytes();
+        erase(v);
+        ++evictions_;
+        return true;
     }
 
     // #879: every parked conversation (pinned ones too) and the retained K/V go - after non-finite logits any of them
@@ -423,7 +458,7 @@ public:
         const size_t n = image.bytes();
         if (!enabled() || held > budget_ || n > budget_ - held) return false;   // make_room's refusal, first
         drop_superseded(image.live.ids, image.live.imgs, image.checkpoints, image.cvec);
-        if (!make_room(n, held)) return false;
+        if (!make_room(n, held, ConversationPins{&image.checkpoints, image.cvec})) return false;
         entries_.push_back(std::move(image));
         serials_.push_back(next_serial_++);
         bytes_ += n;
