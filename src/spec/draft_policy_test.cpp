@@ -21,24 +21,30 @@ void check(bool ok, const char* what) {
 }
 double cost(int t) { return 19.0 + 10.5 * (t - 1); }   // ms per round, measured shape
 
-// --spec-adaptive: `rounds` simulated rounds, each draft accepted with probability q (a fixed LCG), cost(t) per round
+// --spec-adaptive: `rounds` simulated rounds, each draft accepted with probability q (a fixed LCG); a round costs
+// c(t) to verify plus `dstep` ms per draft step of the NEXT round's chain, as in the engine
 struct Sim {
     uint32_t s = 12345;
+    double dstep = 0.0;
     double u() { s = s * 1664525u + 1013904223u; return (s >> 8) / 16777216.0; }
     int run(SpecDepth& d, int rounds, double q, double (*c)(int), double* tok_ms = nullptr) {
         double tok = 0, ms = 0;
+        int cap = d.next();
         for (int i = 0; i < rounds; ++i) {
-            const int cap = d.next();
             int a = 0;
             while (a < cap - 1 && u() < q) ++a;
-            d.observe(cap, cap, a, c(cap));
+            const int nxt = d.next();
+            const double dm = dstep * (nxt - 1);
+            d.observe(cap, cap, a, c(cap), nxt, nxt - 1, dm);
             tok += a + 1;
-            ms += c(cap);
+            ms += c(cap) + dm;
+            cap = nxt;
         }
         if (tok_ms) *tok_ms = tok / ms;
         return d.current();
     }
 };
+double ornith(int t) { return 5.0 + 0.4 * (t - 1); }   // RTX 5080 Ornith IQ4_XS: verify rows cheap, draft steps ~0.9 ms
 double flat(int t) { return 50.0 + 3.0 * (t - 1); }
 double steep(int t) { return 50.0 + 10.0 * (t - 1); }
 }  // namespace
@@ -157,7 +163,7 @@ int main() {
         for (int i = 0; i < 500; ++i) {
             const int c = g.next();
             in_range &= c >= 3 && c <= 5;
-            g.observe(c, c, i % 3 == 0 ? c - 1 : 0, steep(c));
+            g.observe(c, c, i % 3 == 0 ? c - 1 : 0, steep(c), c, c - 1, -1.0);
         }
         check(in_range, "spec depth: every cap stays within [min, max]");
         // the adaptive cap's tokens per ms is within 2% of the best fixed cap's
@@ -185,6 +191,27 @@ int main() {
                 if (r < 0.98 * b) close = false;
             }
         check(close, "spec depth: within 2% of the best fixed cap (4 rates x 2 cost shapes)");
+        // the draft steps are billed to the round that drafts them (the next round's chain): a probe round at a
+        // smaller cap must not look as dear as the cap it came from.  Verify rows cheap, draft steps dear, q 0.75:
+        // cap 4 is best (fixed caps: 3 0.304, 4 0.307, 6 0.286 tok/ms)
+        double best = 0;
+        int best_k = 0;
+        for (int k = 2; k <= 6; ++k) {
+            SpecDepth x(k, k);
+            Sim s2;
+            s2.dstep = 0.9;
+            double r = 0;
+            s2.run(x, 3000, 0.75, ornith, &r);
+            if (r > best) { best = r; best_k = k; }
+        }
+        SpecDepth o(2, 6);
+        Sim so;
+        so.dstep = 0.9;
+        double ro = 0;
+        so.run(o, 3000, 0.75, ornith, &ro);
+        std::printf("    draft-dear: adaptive %.4f tok/ms (cap %d), best fixed %.4f (cap %d)\n", ro, o.current(), best, best_k);
+        check(ro >= 0.98 * best && o.current() >= 3 && o.current() <= 4,
+              "spec depth: dear draft steps are billed to the round they draft for");
     }
     std::printf(g_fail ? "FAIL\n" : "PASS\n");
     return g_fail ? 1 : 0;

@@ -68,12 +68,16 @@ private:
 // tokens (the drafts are a chain, so a shorter one is the same prefix).  So for each cap the policy keeps
 //   tok(d)    EMA of the tokens a round under cap d commits (counterfactual for d below the cap used)
 //   w(d, u)   EMA of how often cap d's window is u tokens
-// (both as sums that fade by `kDecay` every round, so a cap seen only in a few recent rounds is judged by those) and
-// the measured round time per window size (EMA; sizes not measured yet: linear in the measured ones), and moves to
-// the d with the best tok(d) / sum_u w(d, u) cost(u) when it beats the current cap's by `margin`.  A cap above the
-// one in use has no counterfactual: every `probe` rounds one round runs at cap + 1 (and, alternately, cap - 1 to
-// measure the smaller window's cost); next to the best cap that costs little.  Like DraftPolicy it only chooses how
-// many drafts to verify; the verify window decides every token.
+//   s(d)      EMA of the draft steps cap d's chain takes (--spec-min-p can end a chain before the cap)
+// (all as sums that fade by `kDecay` every round, so a cap seen only in a few recent rounds is judged by those).  A
+// round's time is split in two, because a round drafts the NEXT window (whose cap can differ, as in a probe): the
+// verify part per window size (EMA; sizes not measured yet: linear in the measured ones) and the draft part as a
+// line in the steps drafted (faded least squares).  The policy moves to the d with the best
+//   tok(d) / (sum_u w(d, u) verify(u) + draft(s(d)))
+// when it beats the current cap's by `margin`.  A cap above the one in use has no counterfactual: every `probe`
+// rounds one round runs at cap + 1 (and, alternately, cap - 1 to measure the smaller window's verify time); next to
+// the best cap that costs little.  Like DraftPolicy it only chooses how many drafts to verify; the verify window
+// decides every token.
 class SpecDepth {
 public:
     static constexpr int kMaxT = DraftPolicy::kMaxT;
@@ -84,14 +88,17 @@ public:
 
     /// The cap for the next round (its drafts: next() - 1).
     int next();
-    /// After a round: the cap it ran under, its window, the drafts accepted and the round's time.
-    void observe(int cap, int t, int accepted, double round_ms);
+    /// After a round: the cap it ran under, its window, the drafts accepted, the round's time without its draft
+    /// (`verify_ms`), and the draft it made for the next round: that round's cap, the steps taken, its time
+    /// (`draft_ms` < 0: no draft, the last round).
+    void observe(int cap, int t, int accepted, double verify_ms, int draft_cap, int draft_steps, double draft_ms);
 
     int current() const { return cur_; }
     int min_t() const { return min_; }
     int max_t() const { return max_; }
     double tokens(int d) const;                  // tok(d) (0 = no data yet)
-    double cost_ms(int t) const;
+    double cost_ms(int t) const;                 // the verify part of a round with a window of t
+    double draft_ms(double steps) const;         // the draft part for a chain of `steps`
     double score(int d) const;                   // tok(d) / expected cost under cap d (0 = no data yet)
     int64_t rounds_at(int d) const { return used_[(size_t) d]; }
     int switches() const { return switches_; }
@@ -106,6 +113,8 @@ private:
     std::array<double, kMaxT + 1> tok_s_{}, tok_w_{};      // faded sums: tokens, rounds
     std::array<std::array<double, kMaxT + 1>, kMaxT + 1> w_{};
     std::array<double, kMaxT + 1> cost_{}, cost_n_{};
+    std::array<double, kMaxT + 1> st_s_{}, st_w_{};        // faded sums: draft steps under cap d, rounds
+    double dw_ = 0, dx_ = 0, dy_ = 0, dxx_ = 0, dxy_ = 0;  // faded least squares of draft ms on steps
     std::array<int64_t, kMaxT + 1> used_{};
 };
 

@@ -200,6 +200,15 @@ double SpecDepth::cost_ms(int t) const {
     return std::max(0.25 * cost_[(size_t) lo], cost_[(size_t) lo] + s * (t - lo));
 }
 
+double SpecDepth::draft_ms(double steps) const {
+    if (dw_ <= 0.0) return 0.0;
+    const double mx = dx_ / dw_, my = dy_ / dw_, vx = dxx_ / dw_ - mx * mx;
+    // one step count seen so far: proportional to it (a chain's steps are what costs)
+    if (vx < 1e-6) return mx > 0.0 ? my * steps / mx : my;
+    const double slope = std::max(0.0, (dxy_ / dw_ - mx * my) / vx);
+    return std::max(0.0, my + slope * (steps - mx));
+}
+
 double SpecDepth::score(int d) const {
     d = std::clamp(d, 1, kMaxT);
     if (tok_w_[(size_t) d] <= 0.0) return 0.0;
@@ -209,18 +218,38 @@ double SpecDepth::score(int d) const {
             c += w_[(size_t) d][(size_t) u] * cost_ms(u);
             w += w_[(size_t) d][(size_t) u];
         }
-    return w > 0.0 && c > 0.0 ? tokens(d) / (c / w) : 0.0;
+    if (!(w > 0.0)) return 0.0;
+    const double steps = st_w_[(size_t) d] > 0.0 ? st_s_[(size_t) d] / st_w_[(size_t) d] : d - 1.0;
+    const double cost = c / w + draft_ms(steps);
+    return cost > 0.0 ? tokens(d) / cost : 0.0;
 }
 
-void SpecDepth::observe(int cap, int t, int accepted, double round_ms) {
+void SpecDepth::observe(int cap, int t, int accepted, double verify_ms, int draft_cap, int draft_steps,
+                        double dms) {
     cap = std::clamp(cap, 1, kMaxT);
     t = std::clamp(t, 1, cap);
     accepted = std::clamp(accepted, 0, t - 1);
+    draft_cap = std::clamp(draft_cap, 1, kMaxT);
+    draft_steps = std::clamp(draft_steps, 0, draft_cap - 1);
     ++used_[(size_t) cap];
-    if (round_ms > 0) {
-        cost_[(size_t) t] = cost_n_[(size_t) t] > 0 ? (1.0 - kCostAlpha) * cost_[(size_t) t] + kCostAlpha * round_ms
-                                                    : round_ms;
+    if (verify_ms > 0) {
+        cost_[(size_t) t] = cost_n_[(size_t) t] > 0 ? (1.0 - kCostAlpha) * cost_[(size_t) t] + kCostAlpha * verify_ms
+                                                    : verify_ms;
         cost_n_[(size_t) t] += 1.0;
+    }
+    if (dms >= 0) {
+        dw_ = kDecay * dw_ + 1.0;
+        dx_ = kDecay * dx_ + draft_steps;
+        dy_ = kDecay * dy_ + dms;
+        dxx_ = kDecay * dxx_ + (double) draft_steps * draft_steps;
+        dxy_ = kDecay * dxy_ + draft_steps * dms;
+        // the steps cap d's chain would take: a chain that stopped before its cap (--spec-min-p) stops at the same
+        // draft under any cap above that; one that reached its cap would take d - 1 (assumed above the cap used)
+        const bool stopped = draft_steps < draft_cap - 1;
+        for (int d = 1; d <= kMaxT; ++d) {
+            st_s_[(size_t) d] = kDecay * st_s_[(size_t) d] + (stopped ? std::min(draft_steps, d - 1) : d - 1);
+            st_w_[(size_t) d] = kDecay * st_w_[(size_t) d] + 1.0;
+        }
     }
     for (int d = 1; d <= kMaxT; ++d) {
         tok_s_[(size_t) d] *= kDecay;

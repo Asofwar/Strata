@@ -12245,8 +12245,13 @@ int main(int argc, char** argv) {
                     cap_next = depth.next();
                     mtp.set_max_drafts(cap_next - 1);
                 }
-                const bool drafted = !use_mtp || eos || produced_n >= max_new ||
-                                     mtp.draft(T, outv.data(), p, a, drafts.data(), err, dprob.data(), (float) req_spec_min_p);
+                const Clock::time_point td0 = Clock::now();
+                int n_drafted = 0;
+                const bool will_draft = use_mtp && !eos && produced_n < max_new;
+                const bool drafted = !will_draft ||
+                                     mtp.draft(T, outv.data(), p, a, drafts.data(), err, dprob.data(), (float) req_spec_min_p,
+                                               adaptive ? &n_drafted : nullptr);
+                const double draft_round_ms = will_draft ? std::chrono::duration<double, std::milli>(Clock::now() - td0).count() : -1.0;
                 {
                     const Clock::time_point tw3 = Clock::now();
                     auto msd = [](Clock::time_point a0, Clock::time_point b0) { return std::chrono::duration<double, std::milli>(b0 - a0).count(); };
@@ -12296,7 +12301,10 @@ int main(int argc, char** argv) {
                                          std::chrono::duration<double, std::milli>(Clock::now() - round0).count());
                 if (adaptive) {
                     if (timed_round && !eos && chain_n == 0 && !from_sfx)
-                        depth.observe(cap_r, T, a, std::chrono::duration<double, std::milli>(Clock::now() - round0).count());
+                        depth.observe(cap_r, T, a,
+                                      std::chrono::duration<double, std::milli>(Clock::now() - round0).count() -
+                                          std::max(0.0, draft_round_ms),
+                                      cap_next, n_drafted, draft_round_ms);
                     serve_cap = cap_next;
                 }
                 if (eos) { finish = "stop"; break; }
@@ -13471,10 +13479,37 @@ int main(int argc, char** argv) {
             int cap_next = cap;
             if (adaptive) {   // the next window's cap: its drafts are made now
                 cap_next = depth.next();
+                // diagnostic: STRATA_SPEC_ADAPTIVE_FORCE="4:40,6:40" runs those caps in blocks of rounds, cycling
+                if (const char* fz = std::getenv("STRATA_SPEC_ADAPTIVE_FORCE")) {
+                    std::vector<std::pair<int, int>> blocks;
+                    for (const char* q = fz; *q;) {
+                        const int c = std::atoi(q);
+                        const char* col = std::strchr(q, ':');
+                        const int n = col ? std::atoi(col + 1) : 1;
+                        if (c >= 2 && c <= S_mtp && n > 0) blocks.emplace_back(c, n);
+                        const char* comma = std::strchr(q, ',');
+                        if (!comma) break;
+                        q = comma + 1;
+                    }
+                    int64_t total = 0;
+                    for (auto& b : blocks) total += b.second;
+                    if (total > 0) {
+                        int64_t r = rounds % total;
+                        for (auto& b : blocks) {
+                            if (r < b.second) { cap_next = b.first; break; }
+                            r -= b.second;
+                        }
+                    }
+                }
                 mtp.set_max_drafts(cap_next - 1);
             }
-            const bool drafted = !use_mtp || (int64_t) produced.size() >= max_new ||
-                                 mtp.draft(T, outv.data(), p, a, drafts.data(), err, dprob.data(), (float) o.spec_min_p);
+            const Clock::time_point td0 = Clock::now();
+            int n_drafted = 0;
+            const bool will_draft = use_mtp && (int64_t) produced.size() < max_new;
+            const bool drafted = !will_draft ||
+                                 mtp.draft(T, outv.data(), p, a, drafts.data(), err, dprob.data(), (float) o.spec_min_p,
+                                           adaptive ? &n_drafted : nullptr);
+            const double draft_round_ms = will_draft ? std::chrono::duration<double, std::milli>(Clock::now() - td0).count() : -1.0;
             if (adapt_thr.joinable()) adapt_thr.join();
             if (!adapt_ok) return 1;
             if (!drafted) {
@@ -13488,7 +13523,11 @@ int main(int argc, char** argv) {
             if (timed_round && chain_n == 0) policy.observe(from_sfx, T, a, sfx_match, round_ms);
             else if (timed_round) policy.observe_chain(T_mtp, chain_n, a, cm, round_ms);
             if (adaptive) {
-                if (timed_round && chain_n == 0 && !from_sfx) depth.observe(cap_r, T, a, round_ms);
+                if (timed_round && chain_n == 0 && !from_sfx)
+                    depth.observe(cap_r, T, a, round_ms - std::max(0.0, draft_round_ms), cap_next, n_drafted, draft_round_ms);
+                if (std::getenv("STRATA_SPEC_ADAPTIVE_TRACE") != nullptr)
+                    std::fprintf(stderr, "strata: SPECDEPTH cap %d T %d a %d ms %.3f draft %d %.3f sfx %d -> next %d cur %d\n",
+                                 cap_r, T, a, round_ms, n_drafted, draft_round_ms, (int) from_sfx, cap_next, depth.current());
                 cap = cap_next;
             }
             if (rounds % 64 == 0)
