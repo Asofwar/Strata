@@ -2081,6 +2081,26 @@ the pairs in which the switched arm won). They are here so you can try them on y
   chunks keep the existing path. It changes rounding too (first-token KL against the default 0.006-0.007 on average, the same top
   token in 12 of 12 prompts); on a Radeon 8060S (gfx1151) the layer's recurrence is 1.6x faster and a 4K-128K prompt after a warm-up prompt 1.4-2.1%; see
   [the HIP conditions and numerical checks](AMD_HIP.md#opt-in-chunked-prompt-gdn-on-gfx11).
+- **`STRATA_GDN_CHUNKED=1` on a card with 64 to 127 SMs: a wide scan in one wave.** The 128-block scan takes two waves
+  there. `gdn_chunk_scan_wide_kernel` takes 32 value columns a block instead of 16, so 64 blocks run in one wave. It does
+  the same products in the same order, so it gives the same bits as the 128-block scan (`gdn_rec_parity` checks this
+  from 1 to 8192 tokens). The 64 blocks leave the other SMs idle, and a super-block's prep reads only the inputs, so
+  the next 2048 tokens' prep runs there while this scan runs (on its own low-priority stream, with a second 25.6 MB
+  scratch; `STRATA_GDN_CHUNKED_OVERLAP=0` runs them in turn). Cards with 128+ SMs keep the 128-block scan, and
+  `STRATA_GDN_CHUNKED=2` still forces it on any card (`=3` forces the wide scan). Measured on an RTX 5080 (84 SMs,
+  Windows), `gdn_rec_parity --wide`, one layer, medians of alternating runs, against the default `gdn_rec_kh_kernel`:
+
+  | tokens | default | 128-block scan | wide scan, prep in turn | wide scan, prep beside |
+  |---|---|---|---|---|
+  | 2048 | 0.95 ms | 1.07-1.25 ms (0.76-0.88x) | 0.90 ms (1.06x) | 0.90 ms (1.05x) |
+  | 8192 | 4.12 ms | 4.75 ms (0.87x) | 4.08 ms (1.03x) | 3.62 ms (1.13x) |
+  | 32768 | 16.6 ms | 19.2 ms (0.86x) | 16.1 ms (1.03x) | 13.6 ms (1.22x) |
+
+  (2048 tokens is one super-block, so nothing runs beside it.) Prompt time, the whole engine (`--serve`, coder-iq1_m,
+  prompt chunk 8192, `--prompt-cache 0`, a fresh engine per arm, medians of 3): 4K 1402 / 1410 / 1391 ms, 16K 4621 /
+  4666 / 4578 ms, 64K 18481 / 18688 / 18325 ms for the default / `STRATA_GDN_CHUNKED=2` / `=1`, so the wide scan
+  takes 0.8-0.9% off and the 128-block scan adds 0.5-1.1%. The first 8 greedy tokens were the same in all three arms.
+  The recurrence is a small part of a prompt here (the experts are most of it), so that is the whole gain.
 - **`STRATA_FS_SLOTS=N`: the Foresight swap space** (q8atnight, #1348): N VRAM slots per layer, refilled on a copy stream
   with the experts that just missed and with the ones the next layer's router predicts (`STRATA_FS_AHEAD=0` for the
   misses only), so that an expert the cache lacks can be computed on the GPU instead of by the CPU. The model's own router
