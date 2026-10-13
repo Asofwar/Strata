@@ -2111,13 +2111,24 @@ the pairs in which the switched arm won). They are here so you can try them on y
   look-ahead; Tesla P100 0.97 (2/6) and 1.00 (4/6); 16 slots on the P100 0.96 (0/6); RTX 5070 0.98 (1/6). The reporter
   measured the same on 2x RTX 3090 (the misses per layer are below one there, so the CPU round trip stays). Left off.
 - **`STRATA_STAGE_PIN`: pinned stage buffers** (Zhong Uncle, #1237; **opt-in, `STRATA_STAGE_PIN=1`**. It was on by default in
-  development, but the 0.1.41 release gate found IQ3_S decode corrupted after a 4096-token prompt with it on, likely a stage
-  buffer recycled before its asynchronous copy finished; it stays off until that is fixed). Where the experts are served from the GGUF in
+  development, but the 0.1.41 release gate found IQ3_S decode corrupted after a 4096-token prompt with it on. The cause: the
+  refill of the cache slots a prompt borrows queues hundreds of copies out of stage buffers, and the pool hands a buffer out
+  again after 256 assemblies, so with a page-locked buffer (read by the DMA after the copy call returned) the 257th refill
+  overwrote a buffer whose copy had not run yet. Since 0.1.42 every queued copy out of a stage buffer records a fence that
+  the pool waits for before it refills the buffer. Checked on an RTX 5080 16 GB (PCIe 5.0), Windows 11, Qwen3.8-Flash-Next
+  IQ1_M (GSQ-RCO) with the GGUF read in place (`--mmap-experts`), a 4,560-token prompt (1,104 lent slots refilled), greedy: with the
+  copy stream held back 3 s before the refill (a test hook, to make the copies lag as on a slow link), 849 of 1,105 refilled
+  slots differed from the GGUF without the fence (1,105 - 256) and the decode was token id 0 only; with the fence 0 of 1,104;
+  pageable 0 of 1,105. Without the hook the copies keep up on this card and the slots match either way. The adaptive tier's
+  swap-ins are not fenced yet, but 4,352-5,009 swapped-in slots per run matched the GGUF without one, also with
+  `STRATA_ADAPT_NOWAIT=1` or `STRATA_ADAPT_LAG=2`). Where the experts are served from the GGUF in
   place (`--mmap-experts`, or too little RAM for the arena) the buffers the cache fill copies from are page-locked, so the
   copy no longer goes through the driver's bounce buffer (about 0.4-0.6 GiB of pinned RAM, one buffer falls back to
   pageable when the driver refuses). Decode, median tok/s on, off, 6 pairs of whole runs: Tesla P100 with the RAM capped at
   24 GB (cgroup) 13.9 -> 15.0 (+8%, 6/6 pairs faster); RTX 5070 `--mmap-experts` +1.2% (5/6); RTX 3060 `--mmap-experts`
-  -0.1% (5/6). Boxes that hold all experts in RAM never use the stage buffers.
+  -0.1% (5/6); RTX 5080 16 GB, the setup above, 3 pairs of 200-token runs on a shared machine: decode 16.7 -> 17.0
+  tok/s (+1.9%, 2/3 pairs faster, the runs spread 15.0-21.0), the lent-slot refill 323 -> 233 ms (3/3). Boxes that hold all
+  experts in RAM never use the stage buffers.
 - **`STRATA_ADAPT_LAG=2`: the adaptive tier's copies are waited for one window later** (#764). Decode, 6 pairs: Tesla P100
   (PCIe 3.0 x16) +3.5% (6/6 pairs faster), RTX 5070 +0.2% (4/6), RTX 3060 -1.3% (0/6), so it stays opt-in.
   Where the tier does not wait for its copies (`STRATA_ADAPT_NOWAIT=1`, `STRATA_ADAPT_LAG` above 1) the device's residency table now follows each eviction before the next window (a small patch kernel before every verifier launch; #1517 by sergiywith): before, the pool could compute an evicted expert on the CPU from a stale activation (`STRATA_ADAPT_CHECKRES=1` counts such layers; `STRATA_ADAPT_EVICT_SYNC=0` turns the fix off). The default (the tier waits) is untouched.
