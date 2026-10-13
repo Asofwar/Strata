@@ -223,6 +223,20 @@ int main() {
               pair.best(std::vector<int32_t>{5, 6, 7, 8}, {}, true).tokens == 3 &&
               pair.best(std::vector<int32_t>{1, 2, 6, 9}, {}, true).tokens == 3,
               "put() passes its own chain: the shared prefix rotates, the other client's lone holder stays");
+
+        // the parking path's dry run: room is there with the incoming chain, yet nothing is evicted before put()
+        ConversationCache dry(pb * 4, 2);
+        check(dry.put(pin({1, 2}, {1, 2, 3})) && dry.put(pin({5, 6}, {5, 6, 7})), "dry: one holder of each prefix");
+        auto next = pin({1, 2}, {1, 2, 4});
+        const ConversationPins np{&next.checkpoints, next.cvec};
+        check(!dry.make_room(next.bytes()) && dry.size() == 2, "dry: without the chain nothing can go");
+        check(dry.can_make_room(next.bytes(), 0, np) && dry.size() == 2 && dry.evictions() == 0,
+              "dry: can_make_room answers yes with the chain and evicts nothing");
+        auto lone = pin({8, 9}, {8, 9, 1});
+        check(!dry.can_make_room(lone.bytes(), 0, ConversationPins{&lone.checkpoints, lone.cvec}),
+              "dry: a chain that shares no prefix finds no room");
+        check(dry.put(std::move(next)) && dry.size() == 2 && dry.best(std::vector<int32_t>{5, 6, 7, 8}, {}, true).tokens == 3,
+              "dry: put() then evicts the older holder, the other client's lone holder stays");
     }
     {
         auto s = image({1, 2, 3});

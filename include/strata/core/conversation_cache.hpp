@@ -353,35 +353,34 @@ public:
     // and new conversations still park.  The guarded (borrowed) donor never goes.
     // False when none can go (empty, or each pinned entry left is the only holder of one of its pinned prefixes).
     bool evict_oldest(const ConversationPins& pins = {}) {
-        auto movable = [&](size_t i) { return !(guarded_ != 0 && serials_[i] == guarded_); };
-        size_t v = entries_.size();
-        // the oldest entry that holds no pinned shared prefix and is not the guarded donor
-        for (size_t i = 0; i < entries_.size() && v == entries_.size(); ++i)
-            if (!entries_[i].pinned() && movable(i)) v = i;
-        if (v == entries_.size()) {
-            auto holds = [](const std::vector<ConversationCheckpoint>& chain, const ConversationCheckpoint& c) {
-                for (const auto& k : chain)
-                    if (k.pinned && k.ids == c.ids && k.imgs == c.imgs) return true;
-                return false;
-            };
-            auto held_elsewhere = [&](size_t i) {
-                const SavedConversation& e = entries_[i];
-                for (const auto& c : e.checkpoints) {
-                    if (!c.pinned) continue;
-                    bool other = pins.checkpoints && pins.cvec == e.cvec && holds(*pins.checkpoints, c);
-                    for (size_t j = 0; j < entries_.size() && !other; ++j)
-                        if (j != i && entries_[j].cvec == e.cvec && holds(entries_[j].checkpoints, c)) other = true;
-                    if (!other) return false;
-                }
-                return true;
-            };
-            for (size_t i = 0; i < entries_.size() && v == entries_.size(); ++i)
-                if (movable(i) && held_elsewhere(i)) v = i;
-        }
-        if (v == entries_.size()) return false;
+        const size_t v = pick_victim(pins, {});
+        if (v == kNone) return false;
         bytes_ -= entries_[v].bytes();
         erase(v);
         ++evictions_;
+        return true;
+    }
+
+    // make_room()'s answer without evicting anything: whether the entries it would evict, in the same order, leave
+    // room.  The parking path asks it before capturing a snapshot, so a parked holder of a pinned prefix is only
+    // evicted by put() once the new image (the other holder) has actually been captured (#2255).
+    bool can_make_room(size_t incoming, size_t held = 0, const ConversationPins& pins = {}) const {
+        if (!enabled() || held > budget_ || incoming > budget_ - held) return false;
+        if (guarded_ != 0 && index_of(guarded_) != SIZE_MAX) {   // make_room's own check: the guarded donor stays
+            size_t kept = 0, kept_bytes = 0;
+            for (size_t i = 0; i < entries_.size(); ++i)
+                if (entries_[i].pinned() || serials_[i] == guarded_) { ++kept; kept_bytes += entries_[i].bytes(); }
+            if (kept >= slots_ || kept_bytes > budget_ - held - incoming) return false;
+        }
+        std::vector<char> gone(entries_.size(), 0);
+        size_t n = entries_.size(), b = bytes_;
+        while (n > 0 && (n >= slots_ || b > budget_ - held - incoming)) {
+            const size_t v = pick_victim(pins, gone);
+            if (v == kNone) return false;
+            gone[v] = 1;
+            --n;
+            b -= entries_[v].bytes();
+        }
         return true;
     }
 
@@ -469,6 +468,34 @@ private:
     void erase(size_t index) {
         entries_.erase(entries_.begin() + (std::ptrdiff_t) index);
         serials_.erase(serials_.begin() + (std::ptrdiff_t) index);
+    }
+    static constexpr size_t kNone = (size_t) -1;
+    // evict_oldest()'s choice among the entries not marked gone: the oldest without a pinned checkpoint, else the
+    // oldest pinned one whose every pinned prefix another remaining entry or the incoming chain (pins) also holds.
+    size_t pick_victim(const ConversationPins& pins, const std::vector<char>& gone) const {
+        // the guarded (borrowed) donor never goes
+        auto out = [&](size_t i) { return (i < gone.size() && gone[i]) || (guarded_ != 0 && serials_[i] == guarded_); };
+        for (size_t i = 0; i < entries_.size(); ++i)
+            if (!out(i) && !entries_[i].pinned()) return i;
+        auto holds = [](const std::vector<ConversationCheckpoint>& chain, const ConversationCheckpoint& c) {
+            for (const auto& k : chain)
+                if (k.pinned && k.ids == c.ids && k.imgs == c.imgs) return true;
+            return false;
+        };
+        for (size_t i = 0; i < entries_.size(); ++i) {
+            if (out(i)) continue;
+            const SavedConversation& e = entries_[i];
+            bool ok = true;
+            for (const auto& c : e.checkpoints) {
+                if (!c.pinned) continue;
+                bool other = pins.checkpoints && pins.cvec == e.cvec && holds(*pins.checkpoints, c);
+                for (size_t j = 0; j < entries_.size() && !other; ++j)
+                    if (j != i && !out(j) && entries_[j].cvec == e.cvec && holds(entries_[j].checkpoints, c)) other = true;
+                if (!other) { ok = false; break; }
+            }
+            if (ok) return i;
+        }
+        return kNone;
     }
     size_t budget_ = 0, slots_ = 0, bytes_ = 0, evictions_ = 0, superseded_ = 0, borrowed_ = 0;
     int64_t min_tokens_ = 0;   // --conversation-cache-min-tokens: 0 parks every conversation, whatever its size

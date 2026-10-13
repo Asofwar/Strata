@@ -856,7 +856,8 @@ at 829-863 GB/s, and blocks 15-18, past the card's 15.9 GiB, were allocated with
 speed throughout. `cudaMemGetInfo` read 0.00 GiB free one block before the first slow one, so a 0 MiB figure alone
 does not prove a spill.
 
-So the engine reads the expert cache once its slots are written: up to 16 equal parts, 256 MiB at the start of each,
+So the engine can read the expert cache once its slots are written (opt-in: `STRATA_SYSMEM_PROBE=1`, or
+`--sysmem-fallback-shrink`; off by default, so a default start is unchanged): up to 16 equal parts, 256 MiB at the start of each,
 with a read-only kernel (`strata::core::device_read_gbps`). A part is slow below 80 GB/s or below a quarter of the
 fastest part. Each read has to be several times the GPU's L2 (64 MB on the 5080): 64 MiB reads came back at
 3,100 GB/s from the L2 next to 750 GB/s from VRAM, and the quarter rule took that for a slow part. On a find it
@@ -869,8 +870,8 @@ The engine only reads; it never changes a driver setting.
 
 `--sysmem-fallback-shrink` (opt-in) also cuts the cache when the startup probe finds a slow part: to the part before
 the first slow one, less `--vram-reserve-mib`, or by a quarter when all of it is slow, then reads it again (up to four
-times). `STRATA_SYSMEM_PROBE=0` skips the probes, and `STRATA_SYSMEM_PROBE=verbose` prints the figures when nothing is
-found. Linux, HIP and SYCL builds do not run them. The probe reads 12 GiB (16 x 256 MiB, 3 times), about 15 ms at
+times). `STRATA_SYSMEM_PROBE=0` skips the probes even with the shrink switch, and `STRATA_SYSMEM_PROBE=verbose` prints
+the figures when nothing is found. Linux, HIP and SYCL builds do not run them. The probe reads 12 GiB (16 x 256 MiB, 3 times), about 15 ms at
 VRAM speed, and changes no output bit.
 
 Measured on that RTX 5080, Coder IQ1_M, `--serve`, 65,536 context, INT8 KV, one start per row:
