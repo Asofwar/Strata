@@ -824,6 +824,132 @@ __global__ void __launch_bounds__(HD) attn_merge_v2_kernel(const float* __restri
     attn[(size_t) h * HD + d] = L > 0.0f ? acc / L : 0.0f;
 }
 
+// STRATA_ATTN_SPLITS=P (opt-in): split-K over a fixed P partitions per KV head instead of one partial per 64-cell
+// chunk. Partition b reads chunks b, b + P, b + 2P, ... with attn_chunk_kernel's exact per-chunk math and folds each
+// into a running (max, sum, acc) per head; the merge then walks P partials. The partials no longer grow with the
+// context: at 262144 cells and 16 query heads one query's scratch is 4096 -> P chunk slots (67.6 -> 4.2 MB at P=256).
+// While a selection fits P chunks (P x 64 cells) every partition holds at most one chunk, its partial is the chunk
+// kernel's bit for bit and the output is the default's; past that the fold's rescale rounds differently (same math).
+template <int KV_MODE>
+__global__ void __launch_bounds__(THREADS) attn_split_kernel(const float* __restrict__ q, QsaAttnPools p,
+                                                             const int32_t* __restrict__ ids,
+                                                             const int32_t* __restrict__ step, int n_kv_heads,
+                                                             int page_size, float scale, float* __restrict__ part_acc,
+                                                             float* __restrict__ part_m, float* __restrict__ part_l,
+                                                             int n_parts, int cap = 0, long long scratch_stride = 0) {
+    q += (size_t) blockIdx.z * (size_t) (n_kv_heads * G) * HD;
+    ids += (size_t) blockIdx.z * (size_t) cap;
+    step += (size_t) blockIdx.z * kStepCount;
+    part_acc += (size_t) blockIdx.z * (size_t) scratch_stride;
+    part_m += (size_t) blockIdx.z * (size_t) scratch_stride;
+    part_l += (size_t) blockIdx.z * (size_t) scratch_stride;
+    __shared__ __align__(16) float sq[G][HD];
+    __shared__ float sp[G][CHUNK];
+    __shared__ long long srow[CHUNK];
+    __shared__ float run_m[G], run_l[G];        // the running max and exp-sum per head
+    __shared__ float w_run[G], w_new[G];        // this fold's rescale of the running sum and of the new chunk
+    const int n_ids = __ldg(step + kStepWidth);
+    const int part = blockIdx.x, kvh = blockIdx.y;
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
+    const int slot = kvh * n_parts + part;
+    if (part * CHUNK >= n_ids) {
+        if (t < G) { part_m[slot * G + t] = -FLT_MAX; part_l[slot * G + t] = 0.0f; }
+        return;
+    }
+    for (int i = t; i < G * HD; i += THREADS) sq[i / HD][i % HD] = q[(size_t) (kvh * G) * HD + i];
+    float acc[G];
+#pragma unroll
+    for (int h = 0; h < G; ++h) acc[h] = 0.0f;
+    bool first = true;
+    for (int chunk = part; chunk * CHUNK < n_ids; chunk += n_parts) {
+        const int c0 = chunk * CHUNK;
+        const int n_here = min(CHUNK, n_ids - c0);
+        __syncthreads();   // the previous chunk's sp / srow / weights are read
+        if (t < CHUNK) {
+            long long r = -1;
+            if (t < n_here) r = cell_row(p, ids[c0 + t], kvh, n_kv_heads, page_size);
+            srow[t] = r;
+        }
+        __syncthreads();
+        for (int c = warp; c < CHUNK; c += WARPS) {
+            if (c >= n_here || srow[c] == -1) {
+                if (lane < G) sp[lane][c] = -FLT_MAX;
+                continue;
+            }
+            float k8[8];
+            load8r<KV_MODE>(p, false, srow[c], lane * 8, k8);
+#pragma unroll
+            for (int h = 0; h < G; ++h) {
+                const float4 qa = *reinterpret_cast<const float4*>(&sq[h][lane * 8]);
+                const float4 qb = *reinterpret_cast<const float4*>(&sq[h][lane * 8 + 4]);
+                float s = k8[0] * qa.x + k8[1] * qa.y + k8[2] * qa.z + k8[3] * qa.w +
+                          k8[4] * qb.x + k8[5] * qb.y + k8[6] * qb.z + k8[7] * qb.w;
+                s = warp_sum(s);
+                if (lane == 0) sp[h][c] = s * scale;
+            }
+        }
+        __syncthreads();
+        for (int h = warp; h < G; h += WARPS) {
+            const float a = sp[h][lane], b = sp[h][lane + 32];
+            const float m = warp_max(fmaxf(a, b));
+            const float ea = (lane < n_here && srow[lane] != -1) ? __expf(a - m) : 0.0f;
+            const float eb = (lane + 32 < n_here && srow[lane + 32] != -1) ? __expf(b - m) : 0.0f;
+            sp[h][lane] = ea;
+            sp[h][lane + 32] = eb;
+            const float l = warp_sum(ea + eb);
+            if (lane == 0) {
+                if (first) {
+                    run_m[h] = m; run_l[h] = l;
+                } else {
+                    // a chunk with every cell masked has m = -FLT_MAX and l = 0: its weight is 0 (or both are 1, sums 0)
+                    const float mn = fmaxf(run_m[h], m);
+                    const float wr = __expf(run_m[h] - mn), wn = __expf(m - mn);
+                    run_l[h] = fmaf(l, wn, run_l[h] * wr);
+                    run_m[h] = mn;
+                    w_run[h] = wr; w_new[h] = wn;
+                }
+            }
+        }
+        __syncthreads();
+        float cacc[G];
+#pragma unroll
+        for (int h = 0; h < G; ++h) cacc[h] = 0.0f;
+        for (int c = 0; c < n_here; ++c) {
+            if (srow[c] == -1) continue;
+            const float v = load_v1r<KV_MODE>(p, srow[c], t);
+#pragma unroll
+            for (int h = 0; h < G; ++h) cacc[h] = fmaf(sp[h][c], v, cacc[h]);
+        }
+        if (first) {
+#pragma unroll
+            for (int h = 0; h < G; ++h) acc[h] = cacc[h];
+        } else {
+#pragma unroll
+            for (int h = 0; h < G; ++h) acc[h] = fmaf(cacc[h], w_new[h], acc[h] * w_run[h]);
+        }
+        first = false;
+    }
+    if (t < G) { part_m[slot * G + t] = run_m[t]; part_l[slot * G + t] = run_l[t]; }
+#pragma unroll
+    for (int h = 0; h < G; ++h) part_acc[((size_t) slot * G + h) * HD + t] = acc[h];
+}
+
+// STRATA_ATTN_SPLITS: 0 (default, one partial per chunk) or the partition count, read once; the parity test sets it
+int& attn_splits_ref() {
+    static int n = [] {
+        const char* v = std::getenv("STRATA_ATTN_SPLITS");
+        const int x = v ? std::atoi(v) : 0;
+        return x >= 16 && x <= 65535 ? x : 0;
+    }();
+    return n;
+}
+// the partials one query uses: the chunk count, or P when the split-K form runs (the context exceeds P chunks)
+int attn_parts(int64_t cap) {
+    const int chunks = (int) ((cap + CHUNK - 1) / CHUNK);
+    const int p = attn_splits_ref();
+    return p > 0 && chunks > p ? p : chunks;
+}
+
 #if defined(STRATA_HIP_GFX906)
 // The compat backend can target other architectures. Check the calling thread's current device,
 // caching only its last ordinal so a layer split or another thread cannot reuse the wrong answer.
@@ -972,7 +1098,8 @@ void launch_chunks_batch(const float* q, const QsaAttnPools& pools, const int32_
                          int64_t cap, const QsaShapes& s, float* scratch, int64_t n_q, cudaStream_t st, int kernel) {
     const int kv_mode = pools.k_q4 != nullptr ? 2 : (pools.k_q != nullptr && pools.v_q4 != nullptr ? 3
                         : (pools.k_q != nullptr ? 1 : 0));
-    const int n_chunks = (int) ((cap + CHUNK - 1) / CHUNK);
+    const int n_chunks = attn_parts(cap);   // the chunk count, or STRATA_ATTN_SPLITS' P past P chunks
+    const bool split = n_chunks < (int) ((cap + CHUNK - 1) / CHUNK);
     // per query: [acc: n_chunks*n_head*HD][m: n_chunks*n_head][l: n_chunks*n_head], all offsets from one stride
     const long long stride = (long long) qsa_decode_attn_scratch_floats(cap, s);
     float* part_acc = scratch;
@@ -999,6 +1126,14 @@ void launch_chunks_batch(const float* q, const QsaAttnPools& pools, const int32_
                      use_query_swizzle, (long long) n_q, (long long) cap, kv_mode, lane_cell);
     }
 #endif
+#define STRATA_ATTN_SPLIT(M) attn_split_kernel<M><<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv, (int) s.page_size, scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride)
+    if (split) {   // STRATA_ATTN_SPLITS (the parity harness's kernel choice does not apply past P chunks)
+        if (kv_mode == 3) STRATA_ATTN_SPLIT(3);
+        else if (kv_mode == 2) STRATA_ATTN_SPLIT(2);
+        else if (kv_mode == 1) STRATA_ATTN_SPLIT(1);
+        else STRATA_ATTN_SPLIT(0);
+    } else
+#undef STRATA_ATTN_SPLIT
 #define STRATA_ATTN_LC(M) attn_chunk_kernel<M, true><<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv, (int) s.page_size, scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride)
     if (lane_cell) {
         if (kv_mode == 3) STRATA_ATTN_LC(3);
@@ -1064,7 +1199,7 @@ void launch_chunks_batch(const float* q, const QsaAttnPools& pools, const int32_
 // qsa_decode_attn_batch's merge pass over the partials launch_chunks_batch wrote; `v2` names the merge kernel
 void launch_merge_batch(const int32_t* steps, int64_t cap, const QsaShapes& s, const float* scratch, float* attn,
                         int64_t n_q, int v2, cudaStream_t st) {
-    const int n_chunks = (int) ((cap + CHUNK - 1) / CHUNK);
+    const int n_chunks = attn_parts(cap);
     const long long stride = (long long) qsa_decode_attn_scratch_floats(cap, s);
     const float* part_acc = scratch;
     const float* part_m = scratch + (size_t) n_chunks * s.n_head * HD;
@@ -1076,6 +1211,7 @@ void launch_merge_batch(const int32_t* steps, int64_t cap, const QsaShapes& s, c
 
 #if STRATA_QDA_G == 12
 // the G = 8 instance (qsa_decode_attn_g8.cu)
+void qsa_decode_attn_set_splits_g8(int parts);
 void qsa_decode_attn_batch_g8(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
                            int64_t cap, const QsaShapes& s, float* scratch, float* attn, int64_t n_q, void* stream);
 bool qsa_decode_attn_slots_g8(const float* q, const QsaAttnSlotPools& pools, const int32_t* ids, const int32_t* steps,
@@ -1122,6 +1258,7 @@ bool STRATA_QDA_FN(qsa_decode_attn_slots)(const float* q, const QsaAttnSlotPools
 #endif
     if (n_q <= 0) return true;
     if (n_q > kQsaAttnMaxSlots) return false;
+    if (attn_parts(cap) < (int) ((cap + CHUNK - 1) / CHUNK)) return false;   // STRATA_ATTN_SPLITS past P chunks
     if (s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !scratch || !ids || !steps) {
         std::fprintf(stderr, "qsa_decode_attn_slots: unsupported geometry or missing buffers\n");
         std::exit(1);
@@ -1204,7 +1341,7 @@ void STRATA_QDA_FN(qsa_decode_attn_batch_rows)(const float* q, const QsaAttnPool
     // The plain kernel is what qsa_decode_attn_batch runs unless one of its variants is on (lane-cell scoring, the
     // pre-sm_75 / gfx103x kernel, the gfx906 swizzle): there each row goes through that call, one launch per row.
     static const bool lane_cell_rows = [] { const char* v = std::getenv("STRATA_ATTN_LANECELL"); return v && v[0] == '1'; }();
-    bool per_row = lane_cell_rows;
+    bool per_row = lane_cell_rows || attn_parts(cap) < (int) ((cap + CHUNK - 1) / CHUNK);   // + STRATA_ATTN_SPLITS
 #if defined(STRATA_ATTN_PRE75_BUILT)
     per_row = per_row || pre75_attn();
 #endif
@@ -1234,9 +1371,16 @@ void STRATA_QDA_FN(qsa_decode_attn_batch_rows)(const float* q, const QsaAttnPool
     }
 }
 
+void STRATA_QDA_FN(qsa_decode_attn_set_splits)(int parts) {
+    attn_splits_ref() = parts >= 16 && parts <= 65535 ? parts : 0;
 #if STRATA_QDA_G == 12
+    qsa_decode_attn_set_splits_g8(parts);   // the other instance's copy of the switch
+#endif
+}
+#if STRATA_QDA_G == 12
+int qsa_decode_attn_splits() { return attn_splits_ref(); }
 uint64_t qsa_decode_attn_scratch_floats(int64_t cap, const QsaShapes& s) {
-    const int64_t chunks = (cap + CHUNK - 1) / CHUNK;
+    const int64_t chunks = attn_parts(cap);
     return (uint64_t) chunks * (uint64_t) s.n_head * (HD + 2) + 64;
 }
 #endif
@@ -1262,7 +1406,8 @@ void STRATA_QDA_FN(qsa_decode_attn_step)(const float* q, const QsaAttnPools& poo
         std::fprintf(stderr, "qsa_decode_attn: incomplete KV pools\n");
         std::exit(1);
     }
-    const int n_chunks = (int) ((cap + CHUNK - 1) / CHUNK);
+    const int n_chunks = attn_parts(cap);
+    const bool split = n_chunks < (int) ((cap + CHUNK - 1) / CHUNK);
     float* part_acc = scratch;
     float* part_m = scratch + (size_t) n_chunks * s.n_head * HD;
     float* part_l = part_m + (size_t) n_chunks * s.n_head;
@@ -1270,11 +1415,25 @@ void STRATA_QDA_FN(qsa_decode_attn_step)(const float* q, const QsaAttnPools& poo
     const dim3 grid((unsigned) n_chunks, (unsigned) s.n_head_kv);
     cudaStream_t st = (cudaStream_t) stream;
 #if !defined(__HIPCC__) && STRATA_QDA_G == 12
-    if (kv_mode == 1 && attn_v3_on())
+    if (!split && kv_mode == 1 && attn_v3_on())
         attn_chunk_q8_v3_kernel<<<grid, THREADS, 0, st>>>(q, pools, ids, step, (int) s.n_head_kv, (int) s.page_size,
                                                           scale, part_acc, part_m, part_l, n_chunks, 0, 0);
     else
 #endif
+    if (split) {
+        if (kv_mode == 3)
+            attn_split_kernel<3><<<grid, THREADS, 0, st>>>(q, pools, ids, step, (int) s.n_head_kv, (int) s.page_size,
+                                                           scale, part_acc, part_m, part_l, n_chunks, 0, 0);
+        else if (kv_mode == 2)
+            attn_split_kernel<2><<<grid, THREADS, 0, st>>>(q, pools, ids, step, (int) s.n_head_kv, (int) s.page_size,
+                                                           scale, part_acc, part_m, part_l, n_chunks, 0, 0);
+        else if (kv_mode == 1)
+            attn_split_kernel<1><<<grid, THREADS, 0, st>>>(q, pools, ids, step, (int) s.n_head_kv, (int) s.page_size,
+                                                           scale, part_acc, part_m, part_l, n_chunks, 0, 0);
+        else
+            attn_split_kernel<0><<<grid, THREADS, 0, st>>>(q, pools, ids, step, (int) s.n_head_kv, (int) s.page_size,
+                                                           scale, part_acc, part_m, part_l, n_chunks, 0, 0);
+    } else
     if (kv_mode == 3)
         STRATA_ATTN_CHUNK(3)<<<grid, THREADS, 0, st>>>(q, pools, ids, step, (int) s.n_head_kv, (int) s.page_size,
                                                         scale, part_acc, part_m, part_l, n_chunks, 0, 0);

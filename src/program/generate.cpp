@@ -62,6 +62,7 @@
 #include "strata/kernels/mrope.hpp"
 #include "strata/kernels/kv_q4.hpp"
 #include "strata/kernels/qsa.hpp"
+#include "strata/kernels/qsa_decode_attn.hpp"
 #include "strata/core/native_head.hpp"
 #include "strata/core/verify.hpp"
 #include "strata/core/mtp.hpp"
@@ -5990,7 +5991,8 @@ int main(int argc, char** argv) {
                      (double) free_b / 1073741824.0, o.vram_reserve_mib, (long long) (mtp_bind >> 20), o.expert_cache);
         if (dense_attn > 0)
             std::fprintf(stderr, "strata generate: expert cache auto: +%lld MiB kept for the dense attention at %lld "
-                                 "tokens of context\n", (long long) (dense_attn >> 20), (long long) o.max_context);
+                                 "tokens of context%s\n", (long long) (dense_attn >> 20), (long long) o.max_context,
+                         strata::kernels::qsa_decode_attn_splits() > 0 ? " (split-K partials, STRATA_ATTN_SPLITS)" : "");
 #if defined(STRATA_USE_HIP) && !defined(_WIN32)
         // An APU's "VRAM" is system RAM: the device-free figure above counts the whole GPU-addressable pool and does not
         // subtract ordinary CPU allocations (the host expert arena), so a cache sized from it alone can ask the OOM killer

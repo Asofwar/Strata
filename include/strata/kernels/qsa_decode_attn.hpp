@@ -54,6 +54,13 @@ struct QsaAttnPoolsRows {
 /// Scratch floats for `cap` selected cells: partial accumulators, maxima and sums.
 uint64_t qsa_decode_attn_scratch_floats(int64_t cap, const QsaShapes& s);
 
+/// Opt-in split-K (`STRATA_ATTN_SPLITS=P`, 16..65535; 0 = off, the default): past P chunks of 64 cells each KV head
+/// runs P partitions that fold their chunks in turn, so the partials (and the scratch above) stop growing with the
+/// context. Bit-identical to the default while a selection fits P x 64 cells. Set it before any scratch is sized:
+/// the scratch size and the kernels read the same value. The setter exists for the parity test.
+void qsa_decode_attn_set_splits(int parts);
+int qsa_decode_attn_splits();
+
 void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* step,
                           int64_t cap, const QsaShapes& s, float* scratch, float* attn, void* stream);
 
