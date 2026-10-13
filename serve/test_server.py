@@ -815,6 +815,120 @@ class LiteralControlTokens(unittest.TestCase):
         self.assertEqual(ThinkTokenizer().control_tokens, ByteTokenizer.SPECIALS)
 
 
+class MarkerTextInReplies(unittest.TestCase):
+    """#2266: a reply ends only on the end-of-turn token's id, never on text that looks like it.  The model writing
+    `<|im_end|>` with ordinary characters (explaining chat formats, quoting a template) keeps the whole reply, in the
+    answer, the thinking and a tool call's arguments; the end-of-turn id itself ends the reply and its text is never
+    sent.  (The model sampling that id after marker-shaped text is the model's choice, not something parsed here.)"""
+    TEXT = "The marker <|im_end|> ends a turn; <|endoftext|> and <|im_start|> too."
+    TOOLS = [{"type": "function", "function": {"name": "write", "parameters": {
+        "type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}}]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tok = ByteTokenizer()
+        cls.engine = MockEngine(cls.tok, "x", max_context=CTX)
+        cls.svc = Service(cls.engine, cls.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        cls.httpd = serve(cls.svc, port=0)
+        cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def script(self, *parts):
+        """The engine's reply: `str` parts as ordinary character tokens, `int` parts as that id (the stop token)."""
+        ids = []
+        for p in parts:
+            ids += [p] if isinstance(p, int) else list(p.encode())
+        self.engine.scripts, self.engine.script = [ids], ids
+
+    def post(self, path, body):
+        req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.read().decode()
+
+    def openai(self, stream, **extra):
+        """-> (content, reasoning, tool call arguments, finish_reason) of a chat completion."""
+        raw = self.post("/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": "q"}],
+                                                 "reasoning_effort": "high", "stream": stream, **extra})
+        if not stream:
+            choice = json.loads(raw)["choices"][0]
+            m = choice["message"]
+            args = [c["function"]["arguments"] for c in m.get("tool_calls") or []]
+            return m.get("content") or "", m.get("reasoning_content") or "", args, choice["finish_reason"]
+        content, reasoning, args, finish = "", "", {}, None
+        for line in raw.splitlines():
+            if not line.startswith("data: {"):
+                continue
+            choice = json.loads(line[6:])["choices"][0]
+            d = choice.get("delta", {})
+            content += d.get("content") or ""
+            reasoning += d.get("reasoning_content") or ""
+            for c in d.get("tool_calls") or []:
+                args[c["index"]] = args.get(c["index"], "") + (c.get("function", {}).get("arguments") or "")
+            finish = choice.get("finish_reason") or finish
+        return content, reasoning, list(args.values()), finish
+
+    def anthropic(self, stream):
+        """-> (text, thinking, stop_reason) of a message."""
+        raw = self.post("/v1/messages", {"model": "m", "messages": [{"role": "user", "content": "q"}],
+                                         "max_tokens": 400, "thinking": {"type": "enabled", "budget_tokens": 200},
+                                         "stream": stream})
+        if not stream:
+            b = json.loads(raw)
+            return ("".join(c.get("text", "") for c in b["content"]),
+                    "".join(c.get("thinking", "") for c in b["content"]), b["stop_reason"])
+        text, thinking, stop = "", "", None
+        for line in raw.splitlines():
+            if not line.startswith("data: {"):
+                continue
+            e = json.loads(line[6:])
+            d = e.get("delta", {})
+            text += d.get("text", "") if d.get("type") == "text_delta" else ""
+            thinking += d.get("thinking", "") if d.get("type") == "thinking_delta" else ""
+            stop = d.get("stop_reason") or stop
+        return text, thinking, stop
+
+    def test_marker_text_in_the_answer_is_kept(self):
+        self.script("</think>\n\n" + self.TEXT + " More after it.", 257)
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                self.assertEqual(self.openai(stream), (self.TEXT + " More after it.", "", [], "stop"))
+                self.assertEqual(self.anthropic(stream), (self.TEXT + " More after it.", "", "end_turn"))
+
+    def test_marker_text_in_the_thinking_is_kept(self):
+        self.script(self.TEXT + "\n</think>\n\nok", 257)
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                content, reasoning, _, finish = self.openai(stream)
+                self.assertEqual((content, finish), ("ok", "stop"))
+                self.assertIn(self.TEXT, reasoning)
+                text, thinking, stop = self.anthropic(stream)
+                self.assertEqual((text, stop), ("ok", "end_turn"))
+                self.assertIn(self.TEXT, thinking)
+
+    def test_marker_text_in_tool_call_arguments_is_kept(self):
+        self.script("</think>\n\n<tool_call>\n<function=write>\n<parameter=text>\n" + self.TEXT +
+                    "\n</parameter>\n</function>\n</tool_call>", 257)
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                _, _, args, finish = self.openai(stream, tools=self.TOOLS)
+                self.assertEqual(finish, "tool_calls")
+                self.assertEqual([json.loads(a) for a in args], [{"text": self.TEXT}])
+
+    def test_the_stop_token_ends_the_reply_and_is_not_sent(self):
+        # the end-of-turn id in the middle of a sentence ends the reply there; its text never reaches the client
+        for stop_id in (257, 258):                       # <|im_end|>, <|endoftext|>
+            self.script("</think>\n\nBefore the marker", stop_id, " after it.")
+            for stream in (False, True):
+                with self.subTest(stop_id=stop_id, stream=stream):
+                    self.assertEqual(self.openai(stream), ("Before the marker", "", [], "stop"))
+                    self.assertEqual(self.anthropic(stream), ("Before the marker", "", "end_turn"))
+
+
 class EffortAtTheEnd(unittest.TestCase):
     """#458 (opt-in "effort_position": "end"): a non-default effort goes in a system turn right before the answer, so
     a request that changes only the effort keeps the cached conversation.  The engine's checkpoint rule is simulated
