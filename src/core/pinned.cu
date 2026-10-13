@@ -5,6 +5,7 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <atomic>
 #include <climits>
 #include <cerrno>
@@ -85,15 +86,120 @@ uint64_t free_huge_bytes() {
 }
 #endif
 
+#ifdef _WIN32
+// #2295: VirtualAlloc(MEM_LARGE_PAGES) is all or nothing.  A 50 GB arena needs ~24,000 free 2 MB frames at once,
+// and after some uptime the OS may not be able to put that many together (error 1450, ERROR_NO_SYSTEM_RESOURCES)
+// while it still has most of them: the same PC got large pages on some boots and not on others.  So the arena is
+// stitched instead: one placeholder reservation for the whole range, replaced piece by piece (1 GiB, halved on a
+// refusal down to 64 MiB), large pages for as long as the OS gives them, then 4 KB pages for the rest - one virtual
+// range either way, so nothing after the reservation sees a difference.  The prefix on large pages is
+// `large_prefix`; every piece is its own allocation and is released on its own (`pieces`).
+//
+// `simulate_gib` >= 0 (STRATA_LARGEPAGES_SIMULATE_1450, a test switch): no large page is asked for.  The first
+// `simulate_gib` GiB are stand-in pieces on 4 KB pages that count as large, then every large piece is refused as
+// with 1450 - so the stitching, the halving and the 4 KB tail run on a PC without SeLockMemoryPrivilege too.
+// Returns nullptr (and releases everything) when the stitch cannot be made; the caller then falls back as before.
+using VirtualAlloc2Fn = PVOID (WINAPI*)(HANDLE, PVOID, SIZE_T, ULONG, ULONG, MEM_EXTENDED_PARAMETER*, ULONG);
+
+void* reserve_large_pieces(SIZE_T lbytes, SIZE_T large, int simulate_gib, std::vector<void*>& pieces,
+                           uint64_t& large_prefix, std::string& how) {
+    pieces.clear();
+    large_prefix = 0;
+    HMODULE kb = GetModuleHandleW(L"kernelbase.dll");
+    auto va2 = kb ? (VirtualAlloc2Fn) (void*) GetProcAddress(kb, "VirtualAlloc2") : nullptr;
+    if (va2 == nullptr) {
+        how = "VirtualAlloc2 is not available (Windows 10 1803 or later)";
+        return nullptr;
+    }
+    MEM_ADDRESS_REQUIREMENTS req{};
+    req.Alignment = large;   // a power of two; every piece then starts on a large-page boundary
+    MEM_EXTENDED_PARAMETER ext{};
+    ext.Type = MemExtendedParameterAddressRequirements;
+    ext.Pointer = &req;
+    uint8_t* const base = (uint8_t*) va2(nullptr, nullptr, lbytes, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS,
+                                         &ext, 1);
+    if (base == nullptr) {
+        how = "placeholder reservation refused (error " + std::to_string((unsigned long long) GetLastError()) + ")";
+        return nullptr;
+    }
+    // [off, lbytes) is always ONE placeholder between the steps below
+    // `second`: the start of a second placeholder after a split that could not be undone
+    auto give_up = [&](SIZE_T off, const std::string& why, SIZE_T second = 0) -> void* {
+        const DWORD e = GetLastError();
+        for (void* p : pieces) VirtualFree(p, 0, MEM_RELEASE);
+        pieces.clear();
+        large_prefix = 0;
+        if (off < lbytes) VirtualFree(base + off, 0, MEM_RELEASE);
+        if (second > off && second < lbytes) VirtualFree(base + second, 0, MEM_RELEASE);
+        SetLastError(e);
+        how = why + " (error " + std::to_string((unsigned long long) GetLastError()) + ")";
+        return nullptr;
+    };
+    const SIZE_T min_piece = (std::max)((SIZE_T) 64 << 20, large) / large * large;
+    SIZE_T piece = (std::max)((SIZE_T) 1 << 30, min_piece) / large * large;
+    const SIZE_T sim_bytes = simulate_gib >= 0 ? (SIZE_T) simulate_gib << 30 : 0;
+    SIZE_T off = 0;
+    DWORD last = 0;
+    bool large_on = true;
+    while (large_on && off < lbytes) {
+        const SIZE_T n = (std::min)(piece, lbytes - off);
+        const bool split = n < lbytes - off;
+        if (split && !VirtualFree(base + off, n, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER))
+            return give_up(off, "placeholder split refused");
+        void* p = nullptr;
+        if (simulate_gib < 0) {
+            p = va2(nullptr, base + off, n, MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES | MEM_REPLACE_PLACEHOLDER,
+                    PAGE_READWRITE, nullptr, 0);
+            if (p == nullptr) last = GetLastError();
+        } else if (off + n <= sim_bytes) {
+            p = va2(nullptr, base + off, n, MEM_RESERVE | MEM_COMMIT | MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0);
+            if (p == nullptr) return give_up(off, "4 KB stand-in piece refused", split ? off + n : 0);
+        } else {
+            last = ERROR_NO_SYSTEM_RESOURCES;
+        }
+        if (p != nullptr) {
+            pieces.push_back(p);
+            off += n;
+            large_prefix = off;
+            continue;
+        }
+        // refused: merge the split piece back into the rest, then a smaller piece, or 4 KB pages from here on.
+        // Only 1450 is worth a smaller piece: 1314 (privilege) or 87 (no large pages in a placeholder) will not change.
+        if (split && !VirtualFree(base + off, lbytes - off, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS))
+            return give_up(off, "placeholder merge refused", off + n);
+        if (last == ERROR_NO_SYSTEM_RESOURCES && piece / 2 >= min_piece)
+            piece = piece / 2 / large * large;
+        else
+            large_on = false;
+    }
+    if (off < lbytes) {
+        void* p = va2(nullptr, base + off, lbytes - off, MEM_RESERVE | MEM_COMMIT | MEM_REPLACE_PLACEHOLDER,
+                      PAGE_READWRITE, nullptr, 0);
+        if (p == nullptr) return give_up(off, "4 KB tail refused");
+        pieces.push_back(p);
+    }
+    char b[256];
+    std::snprintf(b, sizeof b, "%.1f of %.1f GiB on large pages in %zu pieces%s, the rest on 4 KB pages (last refusal: "
+                  "error %lu)", (double) large_prefix / (1ull << 30), (double) lbytes / (1ull << 30),
+                  pieces.size() - (large_prefix < lbytes ? 1 : 0),
+                  simulate_gib >= 0 ? " (simulated: STRATA_LARGEPAGES_SIMULATE_1450, 4 KB stand-ins)" : "",
+                  (unsigned long) last);
+    how = b;
+    return base;
+}
+#endif
+
 // A 2 MB-aligned reservation.  Large pages first, then the largest alignment the OS will give us for free.
 // A non-empty shared_file instead maps one file whose first 4 KiB identify the pack and whose remaining bytes
 // are the resident arena.  This shared-file layout is intended for tmpfs (/dev/shm); hugetlbfs would need
 // hugepage-aligned file size and arena offset rather than the 4 KiB header layout used here.
 void* reserve(uint64_t bytes, PageBacking& got, std::string& note, const std::string& shared_file,
-              uint64_t shared_pack_hash, void*& mapping_base, uint64_t& mapping_bytes) {
+              uint64_t shared_pack_hash, void*& mapping_base, uint64_t& mapping_bytes,
+              std::vector<void*>& pieces, uint64_t& large_page_bytes) {
     mapping_base = nullptr;
     mapping_bytes = 0;
-
+    pieces.clear();
+    large_page_bytes = 0;
 #ifdef _WIN32
     if (!shared_file.empty()) {
         note = "shared-file arena backing is not implemented on Windows";
@@ -120,23 +226,43 @@ void* reserve(uint64_t bytes, PageBacking& got, std::string& note, const std::st
     // fails with ERROR_PRIVILEGE_NOT_HELD.  That is the EXPECTED outcome on a desktop, not an error.
     SIZE_T large = GetLargePageMinimum();
     // A/B switch: STRATA_NO_LARGEPAGES=1 skips the large-page attempt, same run, same boot.
+    // #2295 test switch: STRATA_LARGEPAGES_SIMULATE_1450=N acts as if the whole arena were refused with 1450 and
+    // gives the first N GiB of the stitched arena 4 KB stand-ins for large pages (see reserve_large_pieces)
+    const char* sim_env = std::getenv("STRATA_LARGEPAGES_SIMULATE_1450");
+    const int simulate_gib = sim_env != nullptr && sim_env[0] != 0 ? (std::max)(std::atoi(sim_env), 0) : -1;
     if (large > 0 && std::getenv("STRATA_NO_LARGEPAGES") == nullptr) {
         // MEM_LARGE_PAGES requires the allocation size to be an exact multiple of the large page size -
         // anything else is ERROR_INVALID_PARAMETER (87), which reads like a privilege problem but is not.
         // Round up: the slack is under 2 MB and the tail stays unused.
         const SIZE_T lbytes = (SIZE_T) (((SIZE_T) bytes + large - 1) / large * large);
-        void* p = VirtualAlloc(nullptr, lbytes, MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES,
-                               PAGE_READWRITE);
+        void* p = simulate_gib >= 0 ? nullptr
+                                    : VirtualAlloc(nullptr, lbytes, MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES,
+                                                   PAGE_READWRITE);
         if (p) {
             got = PageBacking::LargePages;
             note = "large pages (" + std::to_string((unsigned long long) large) + " B)";
             return p;
         }
+        const DWORD err = simulate_gib >= 0 ? (DWORD) ERROR_NO_SYSTEM_RESOURCES : GetLastError();
         // 1450 (ERROR_NO_SYSTEM_RESOURCES) is the large-page pool saying no, 87 is a size that is not a
         // multiple of the minimum, 1314 is the privilege: without the byte count the three read as one bug.
         note = "large pages refused for " + std::to_string((unsigned long long) lbytes) + " B (GetLargePageMinimum=" +
                std::to_string((unsigned long long) large) + ", VirtualAlloc error " +
-               std::to_string((unsigned long long) GetLastError()) + "); using 4 KB pages";
+               std::to_string((unsigned long long) err) + ")";
+        // #2295: 1450 is the OS not finding that many 2 MB frames at once, not a refusal of large pages as such:
+        // keep the ones it can give, piece by piece, in one stitched range
+        if (err == ERROR_NO_SYSTEM_RESOURCES) {
+            std::string how;
+            void* q = reserve_large_pieces(lbytes, large, simulate_gib, pieces, large_page_bytes, how);
+            if (q != nullptr) {
+                got = large_page_bytes >= lbytes ? PageBacking::LargePages : PageBacking::NormalPages;
+                if (large_page_bytes >= lbytes) large_page_bytes = 0;   // the whole arena: `backing` says it
+                note += "; stitched instead: " + how;
+                return q;
+            }
+            note += "; stitching it from pieces failed: " + how;
+        }
+        note += "; using 4 KB pages";
     } else if (std::getenv("STRATA_NO_LARGEPAGES") != nullptr) {
         note = "large pages skipped (STRATA_NO_LARGEPAGES); using 4 KB pages";
     } else {
@@ -409,7 +535,8 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
                          uint64_t max_pinned_bytes, const std::string& shared_file,
                          uint64_t shared_pack_hash) : capacity(bytes) {
     if (bytes == 0) return;
-    base = reserve(bytes, backing, note, shared_file, shared_pack_hash, mapping_base, mapping_bytes);
+    base = reserve(bytes, backing, note, shared_file, shared_pack_hash, mapping_base, mapping_bytes, pieces,
+                   large_page_bytes);
     if (base != nullptr && mapping_base == nullptr) {
         mapping_base = base;
         mapping_bytes = bytes;
@@ -485,10 +612,7 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
                 if (backing == PageBacking::LargePages) {   // #779: large pages cannot be paged out: nothing to lock
                     note = "large pages are resident without a lock; " + note;
                 } else if (env == nullptr || std::string(env) != "0") {
-                    const strata::platform::LockResult lr =
-                        strata::platform::lock_resident((uint8_t*) base + registered_bytes, bytes - registered_bytes);
-                    locked_bytes = lr.locked_bytes;
-                    note = lr.note + "; " + note;
+                    lock_from(registered_bytes);
                 }
             }
         } else {
@@ -513,9 +637,7 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
             if (backing == PageBacking::LargePages) {       // #779: large pages cannot be paged out: nothing to lock
                 note = "large pages are resident without a lock; " + note;
             } else if (env == nullptr || std::string(env) != "0") {
-                const strata::platform::LockResult lr = strata::platform::lock_resident(base, bytes);
-                locked_bytes = lr.locked_bytes;
-                note = lr.note + "; " + note;
+                lock_from(0);
             } else {
                 note = "arena lock disabled (STRATA_ARENA_LOCK=0); " + note;
             }
@@ -528,7 +650,8 @@ PinnedArena::PinnedArena(uint64_t bytes, ByNeed, const std::vector<std::pair<uin
                          uint64_t shared_pack_hash) : capacity(bytes) {
     by_need = true;
     if (bytes == 0) return;
-    base = reserve(bytes, backing, note, shared_file, shared_pack_hash, mapping_base, mapping_bytes);
+    base = reserve(bytes, backing, note, shared_file, shared_pack_hash, mapping_base, mapping_bytes, pieces,
+                   large_page_bytes);
     if (base != nullptr && mapping_base == nullptr) {
         mapping_base = base;
         mapping_bytes = bytes;
@@ -615,7 +738,7 @@ PinnedArena::PinnedArena(uint64_t bytes, ByNeed, const std::vector<std::pair<uin
 PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds, Deferred)
     : capacity(bytes), bounds_(bounds) {
     if (bytes == 0 || bounds.size() < 2) return;
-    base = reserve(bytes, backing, note, std::string{}, 0, mapping_base, mapping_bytes);
+    base = reserve(bytes, backing, note, std::string{}, 0, mapping_base, mapping_bytes, pieces, large_page_bytes);
     if (base != nullptr && mapping_base == nullptr) {
         mapping_base = base;
         mapping_bytes = bytes;
@@ -645,13 +768,22 @@ void PinnedArena::register_slices(std::atomic<int>& ready) {
         if (backing == PageBacking::LargePages) {           // #779: large pages cannot be paged out: nothing to lock
             note = "large pages are resident without a lock; " + note;
         } else if (env == nullptr || std::string(env) != "0") {
-            const strata::platform::LockResult lr =
-                strata::platform::lock_resident((uint8_t*) base + registered_bytes, capacity - registered_bytes);
-            locked_bytes = lr.locked_bytes;
-            note = lr.note + "; " + note;
+            lock_from(registered_bytes);
         }
     }
     ready.store(INT_MAX, std::memory_order_release);   // every slice done (or given up on)
+}
+
+void PinnedArena::lock_from(uint64_t off) {
+    // #2295: a stitched arena's large-page prefix cannot be paged out (#779): only the 4 KB rest needs the lock
+    const uint64_t start = (std::max)(off, large_page_bytes);
+    if (large_page_bytes > off) note = "the first " + std::to_string(large_page_bytes >> 20) +
+                                       " MiB are large pages, resident without a lock; " + note;
+    if (start >= capacity) return;
+    const strata::platform::LockResult lr = strata::platform::lock_resident((uint8_t*) base + start, capacity - start);
+    locked_bytes = lr.locked_bytes;
+    locked_off = start;
+    note = lr.note + "; " + note;
 }
 
 PinnedArena::~PinnedArena() {
@@ -665,12 +797,18 @@ PinnedArena::~PinnedArena() {
         return;
     }
     if (base) {
-        if (locked_bytes) strata::platform::unlock_resident((uint8_t*) base + (slice_bytes ? registered_bytes : 0), locked_bytes);
+        if (locked_bytes) strata::platform::unlock_resident((uint8_t*) base + locked_off, locked_bytes);
         if (slice_bytes) {
             for (uint64_t off : slice_starts) pin_unregister((uint8_t*) base + off);
         } else {
             pin_unregister(base);
         }
+#ifdef _WIN32
+        if (!pieces.empty()) {   // #2295: a stitched arena is one allocation per piece
+            for (void* p : pieces) VirtualFree(p, 0, MEM_RELEASE);
+            pieces.clear();
+        } else
+#endif
         release(mapping_base ? mapping_base : base, mapping_bytes ? mapping_bytes : capacity);
         base = nullptr;
         mapping_base = nullptr;
