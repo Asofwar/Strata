@@ -1474,7 +1474,7 @@ bool launch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const
 constexpr int DQ = 8;     // queries per block
 constexpr int DCH = 32;   // cells per chunk
 
-template <int KV_MODE>   // 0: fp16 K and V; 1: int8 codes + an fp16 scale per 64 values
+template <int KV_MODE, bool LO = true>   // KV_MODE 0: fp16 K and V; 1: int8 codes + an fp16 scale per 64 values
 struct SmemD {
     static constexpr int PIECES = HD * (KV_MODE == 0 ? 2 : 1) / 16;   // 16-byte pieces per K/V row
     uint4 qh[DQ * 8][HD / 8];   // 64 rows; a row's pieces XOR-swizzled by row & 7 (conflict-free ldmatrix)
@@ -1484,6 +1484,18 @@ struct SmemD {
     uint2 ksc[DCH];             // int8: the cell's 4 fp16 scales
     uint2 vsc[DCH];
     float qdn[DQ * 8];          // per row: the q prescale taken back out, times log2(e) / 16
+};
+// LO = false (STRATA_PROMPT_ATTN_FP16ACC): no lo part of q. 49,920 bytes for int8 K/V, so two blocks share an SM's
+// 100 KB (the 81 KB above leave one block of 4 warps per SM)
+template <int KV_MODE>
+struct SmemD<KV_MODE, false> {
+    static constexpr int PIECES = HD * (KV_MODE == 0 ? 2 : 1) / 16;
+    uint4 qh[DQ * 8][HD / 8];
+    uint4 k[DCH][PIECES];
+    uint4 v[DCH][PIECES];
+    uint2 ksc[DCH];
+    uint2 vsc[DCH];
+    float qdn[DQ * 8];
 };
 
 __device__ __forceinline__ void ldsm_x4(uint32_t* r, const void* p) {
@@ -1528,14 +1540,45 @@ __device__ __forceinline__ void split_h2(float a, float b, uint32_t& hi, uint32_
     lo = pack_h2(a - f.x, b - f.y);
 }
 
-template <int KV_MODE>
+// m16n8k16 with an FP16 accumulator (twice the FP32-accumulator rate on GeForce cards): c[0] = row gid, c[1] = row
+// gid + 8, each the columns 2tig and 2tig + 1 as a half2 - the FP32 fragment's layout, two values per register
+__device__ __forceinline__ void mma16816_h(uint32_t* c, const uint32_t* a, const uint32_t* b) {
+#if STRATA_PA_SM80
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%0,%1}, {%2,%3,%4,%5}, {%6,%7}, {%0,%1};\n"
+                 : "+r"(c[0]), "+r"(c[1])
+                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
+#else
+    (void) c; (void) a; (void) b;
+    __trap();
+#endif
+}
+__device__ __forceinline__ void h2_to_f4(const uint32_t* c, float* f) {
+    const float2 a = __half22float2(*reinterpret_cast<const __half2*>(&c[0]));
+    const float2 b = __half22float2(*reinterpret_cast<const __half2*>(&c[1]));
+    f[0] = a.x; f[1] = a.y; f[2] = b.x; f[3] = b.y;
+}
+
+// PREC (STRATA_PROMPT_ATTN_FP16ACC, opt-in; 0 is the kernel as described above):
+//   1: q and p as one FP16 value each (no lo part), FP32 accumulators: half the MMAs.
+//   2: as 1, and int8 V: each chunk's p.v (32 cells) in an FP16 accumulator, added to the FP32 sum per chunk. p
+//      carries 2^3 / the chunk's largest V scale instead of 2^14, so 32 cells x |code| <= 128 x |p| < 2^3 stays below
+//      FP16's 65504.
+//   3: as 2, and int8 K: each 64-dim group's q.k in an FP16 accumulator, times the K scale in FP32. q carries 2^2 /
+//      its row's largest value instead of 2^14: 64 dims x 128 x 2^2 < 65504.
+// The softmax (max, exp, sum) stays FP32 in every mode. FP16 K/V take mode 1 at most (their values have no bound).
+template <int KV_MODE, int PREC = 0>
 __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const float* __restrict__ q, QsaAttnPools p,
                                                                        const int32_t* __restrict__ steps, int n_q,
                                                                        int n_kv_heads, int page_size, float scale_log2,
                                                                        float* __restrict__ attn) {
-    constexpr int GQ = 8, PIECES = SmemD<KV_MODE>::PIECES, ROWB = PIECES * 16;
+    constexpr bool LO = PREC == 0;                    // q and p carry an FP16 lo part
+    using Sm = SmemD<KV_MODE, LO>;
+    constexpr int GQ = 8, PIECES = Sm::PIECES, ROWB = PIECES * 16;
+    static_assert(PREC <= 1 || KV_MODE == 1, "FP16 accumulation needs int8 K/V");
+    constexpr int QEXP = PREC >= 3 ? 2 : 14;          // q's largest value per row lands near 2^QEXP
+    constexpr int VEXP = PREC >= 2 ? 3 : 14;          // p times the V scale stays below 2^VEXP
     extern __shared__ __align__(16) unsigned char smem_raw[];
-    SmemD<KV_MODE>& S = *reinterpret_cast<SmemD<KV_MODE>*>(smem_raw);
+    Sm& S = *reinterpret_cast<Sm*>(smem_raw);
     const int q0 = blockIdx.x * DQ, kvh = blockIdx.y, n_head = n_kv_heads * GQ;
     const int t = threadIdx.x, lane = t & 31, warp = t >> 5, gid = lane >> 2, tig = lane & 3;
     const int rbase = warp * 16;   // this warp's MMA rows: query q0 + 2w (rows 0-7), q0 + 2w + 1 (rows 8-15), by head
@@ -1595,15 +1638,15 @@ __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const flo
         for (int o = 16; o > 0; o >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o));
         int e = 0;
         if (m > 0.0f) frexpf(m, &e);   // m < 2^e
-        const float up = ldexpf(1.0f, 14 - e);
+        const float up = ldexpf(1.0f, QEXP - e);
         uint4 hi, lo;
         split_h2(x[0] * up, x[1] * up, hi.x, lo.x);
         split_h2(x[2] * up, x[3] * up, hi.y, lo.y);
         split_h2(x[4] * up, x[5] * up, hi.z, lo.z);
         split_h2(x[6] * up, x[7] * up, hi.w, lo.w);
         S.qh[row][lane ^ (row & 7)] = hi;
-        S.ql[row][lane ^ (row & 7)] = lo;
-        if (lane == 0) S.qdn[row] = ldexpf(scale_log2, e - 14);
+        if constexpr (LO) S.ql[row][lane ^ (row & 7)] = lo;
+        if (lane == 0) S.qdn[row] = ldexpf(scale_log2, e - QEXP);
     }
     __syncwarp();
     const float da = S.qdn[rbase + gid], db = S.qdn[rbase + 8 + gid];
@@ -1628,6 +1671,9 @@ __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const flo
             float tg[DCH / 8][4];
 #pragma unroll
             for (int nt = 0; nt < DCH / 8; ++nt) tg[nt][0] = tg[nt][1] = tg[nt][2] = tg[nt][3] = 0.0f;
+            uint32_t th[DCH / 8][2];   // PREC 3: the group's FP16 accumulator
+#pragma unroll
+            for (int nt = 0; nt < DCH / 8; ++nt) th[nt][0] = th[nt][1] = 0u;
 #pragma unroll
             for (int kq = 0; kq < 4; ++kq) {
                 const int kk = g * 4 + kq;   // 16-dim step
@@ -1635,7 +1681,7 @@ __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const flo
                 {
                     const int mi = lane >> 3, rr = rbase + (mi & 1) * 8 + (lane & 7), pc = kk * 2 + (mi >> 1);
                     ldsm_x4(ah, &S.qh[rr][pc ^ (rr & 7)]);
-                    ldsm_x4(al, &S.ql[rr][pc ^ (rr & 7)]);
+                    if constexpr (LO) ldsm_x4(al, &S.ql[rr][pc ^ (rr & 7)]);
                 }
                 if constexpr (KV_MODE == 0) {
 #pragma unroll
@@ -1644,9 +1690,9 @@ __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const flo
                         uint32_t b[4];
                         ldsm_x4(b, &S.k[c][pc ^ (c & 7)]);
                         mma16816(tg[2 * np], ah, b);
-                        mma16816(tg[2 * np], al, b);
+                        if constexpr (LO) mma16816(tg[2 * np], al, b);
                         mma16816(tg[2 * np + 1], ah, b + 2);
-                        mma16816(tg[2 * np + 1], al, b + 2);
+                        if constexpr (LO) mma16816(tg[2 * np + 1], al, b + 2);
                     }
                 } else {
                     const unsigned char* K = reinterpret_cast<const unsigned char*>(&S.k[0][0]);
@@ -1657,10 +1703,18 @@ __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const flo
                         uint32_t b[2];
                         b[0] = i8x2_to_h2(*reinterpret_cast<const uint16_t*>(rowp));
                         b[1] = i8x2_to_h2(*reinterpret_cast<const uint16_t*>(rowp + 8));
-                        mma16816(tg[nt], ah, b);
-                        mma16816(tg[nt], al, b);
+                        if constexpr (PREC >= 3) {
+                            mma16816_h(th[nt], ah, b);
+                        } else {
+                            mma16816(tg[nt], ah, b);
+                            if constexpr (LO) mma16816(tg[nt], al, b);
+                        }
                     }
                 }
+            }
+            if constexpr (PREC >= 3) {
+#pragma unroll
+                for (int nt = 0; nt < DCH / 8; ++nt) h2_to_f4(th[nt], tg[nt]);
             }
 #pragma unroll
             for (int nt = 0; nt < DCH / 8; ++nt) {
@@ -1733,7 +1787,7 @@ __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const flo
                 if (vm > 0.0f) {
                     int e = 0;
                     frexpf(vm, &e);   // vm < 2^e: |scale * 2^(14 - e)| < 2^14
-                    e_new = 14 - e;
+                    e_new = VEXP - e;
                 }
 #pragma unroll
                 for (int ks = 0; ks < 2; ++ks) {
@@ -1752,6 +1806,9 @@ __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const flo
             float tmp[8][4];
 #pragma unroll
             for (int j = 0; j < 8; ++j) tmp[j][0] = tmp[j][1] = tmp[j][2] = tmp[j][3] = 0.0f;
+            uint32_t tmph[8][2];   // PREC 2+: the chunk's FP16 accumulator
+#pragma unroll
+            for (int j = 0; j < 8; ++j) tmph[j][0] = tmph[j][1] = 0u;
 #pragma unroll
             for (int ks = 0; ks < 2; ++ks) {
                 uint32_t ah[4], al[4];
@@ -1768,9 +1825,9 @@ __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const flo
                         float* t0 = tmp[2 * (jp - 4 * g)];
                         float* t1 = tmp[2 * (jp - 4 * g) + 1];
                         mma16816(t0, ah, b);
-                        mma16816(t0, al, b);
+                        if constexpr (LO) mma16816(t0, al, b);
                         mma16816(t1, ah, b + 2);
-                        mma16816(t1, al, b + 2);
+                        if constexpr (LO) mma16816(t1, al, b + 2);
                     }
                 } else {
                     const unsigned char* V = reinterpret_cast<const unsigned char*>(&S.v[0][0]);
@@ -1782,10 +1839,18 @@ __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const flo
                         uint32_t b[2];
                         b[0] = i8x2_to_h2(at(cA) | (at(cA + 1) << 8));
                         b[1] = i8x2_to_h2(at(cB) | (at(cB + 1) << 8));
-                        mma16816(tmp[j - 8 * g], ah, b);
-                        mma16816(tmp[j - 8 * g], al, b);
+                        if constexpr (PREC >= 2) {
+                            mma16816_h(tmph[j - 8 * g], ah, b);
+                        } else {
+                            mma16816(tmp[j - 8 * g], ah, b);
+                            if constexpr (LO) mma16816(tmp[j - 8 * g], al, b);
+                        }
                     }
                 }
+            }
+            if constexpr (PREC >= 2) {
+#pragma unroll
+                for (int j = 0; j < 8; ++j) h2_to_f4(tmph[j], tmp[j]);
             }
             // the running sum: times alpha, moved to this chunk's power of two (exact), plus the chunk's
             const float fa = ldexpf(alpha_a, e_new - ve[g]), fb = ldexpf(alpha_b, e_new - ve[g]);
@@ -1824,24 +1889,29 @@ __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const flo
     }
 }
 
-template <int KV_MODE>
+template <int KV_MODE, int PREC = 0>
 bool launch_dense(const float* q, const QsaAttnPools& pools, const int32_t* steps, const QsaShapes& s, float* attn,
                   int64_t n_q, cudaStream_t st) {
     static bool attr[64] = {};   // per device, as above
     int dev = 0;
     cudaGetDevice(&dev);
-    const int bytes = (int) sizeof(SmemD<KV_MODE>);
+    const int bytes = (int) sizeof(SmemD<KV_MODE, PREC == 0>);
     if (dev < 0 || dev >= 64 || n_q > (int64_t) 0x7fffffff - DQ) return false;
     if (!attr[dev]) {
-        if (cudaFuncSetAttribute(prompt_attn_dense_kernel<KV_MODE>, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) !=
+        if (cudaFuncSetAttribute(prompt_attn_dense_kernel<KV_MODE, PREC>, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) !=
             cudaSuccess) {
             cudaGetLastError();
             return false;
         }
+        // the reduced-precision modes: all of the SM's shared memory for blocks, so two fit (a hint; ignored if refused)
+        if (PREC > 0 &&
+            cudaFuncSetAttribute(prompt_attn_dense_kernel<KV_MODE, PREC>, cudaFuncAttributePreferredSharedMemoryCarveout,
+                                 (int) cudaSharedmemCarveoutMaxShared) != cudaSuccess)
+            cudaGetLastError();
         attr[dev] = true;
     }
     const float scale_log2 = 1.4426950408889634f / sqrtf((float) HD);
-    prompt_attn_dense_kernel<KV_MODE><<<dim3((unsigned) ((n_q + DQ - 1) / DQ), (unsigned) s.n_head_kv), THREADS, bytes, st>>>(
+    prompt_attn_dense_kernel<KV_MODE, PREC><<<dim3((unsigned) ((n_q + DQ - 1) / DQ), (unsigned) s.n_head_kv), THREADS, bytes, st>>>(
         q, pools, steps, (int) n_q, (int) s.n_head_kv, (int) s.page_size, scale_log2, attn);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
@@ -2669,8 +2739,20 @@ bool dispatch_g8(const float* q, const QsaAttnPools& pools, const int32_t* ids, 
     constexpr int GQ = 8;
     const char* dn = std::getenv("STRATA_PROMPT_ATTN_DENSE");   // read per call: the parity test switches it
     if (ids == nullptr && !turing && !(dn && dn[0] == '0') && pools.k_q4 == nullptr && pools.v_q4 == nullptr) {
-        if (pools.k_q && pools.v_q && pools.k_scale && pools.v_scale) return launch_dense<1>(q, pools, steps, s, attn, n_q, st);
-        if (!pools.k_q && pools.k_pool && pools.v_pool) return launch_dense<0>(q, pools, steps, s, attn, n_q, st);
+        // STRATA_PROMPT_ATTN_FP16ACC=1|2|3 (opt-in, read per call as above): the reduced-precision modes of
+        // prompt_attn_dense_kernel (PREC there); FP16 K/V take mode 1 for 2 and 3
+        const char* fa = std::getenv("STRATA_PROMPT_ATTN_FP16ACC");
+        const int prec = fa && fa[0] >= '1' && fa[0] <= '3' ? fa[0] - '0' : 0;
+        if (pools.k_q && pools.v_q && pools.k_scale && pools.v_scale) {
+            if (prec == 1) return launch_dense<1, 1>(q, pools, steps, s, attn, n_q, st);
+            if (prec == 2) return launch_dense<1, 2>(q, pools, steps, s, attn, n_q, st);
+            if (prec == 3) return launch_dense<1, 3>(q, pools, steps, s, attn, n_q, st);
+            return launch_dense<1>(q, pools, steps, s, attn, n_q, st);
+        }
+        if (!pools.k_q && pools.k_pool && pools.v_pool) {
+            if (prec > 0) return launch_dense<0, 1>(q, pools, steps, s, attn, n_q, st);
+            return launch_dense<0>(q, pools, steps, s, attn, n_q, st);
+        }
     }
     if (pools.k_q4 != nullptr) {   // Q4_0 K and V (--kv q4_0): mode 4, sm_80+.  STRATA_PROMPT_ATTN_Q4=0: the old kernel
         const char* v = std::getenv("STRATA_PROMPT_ATTN_Q4");

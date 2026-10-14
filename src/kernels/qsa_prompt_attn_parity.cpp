@@ -343,7 +343,10 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
 }
 // Dense (Qwen3.6: 16 query heads, 2 KV heads, no selection - query i reads cells 0..pos): the 8-query kernel against the
 // per-query tensor-core kernel it replaces (STRATA_PROMPT_ATTN_DENSE=0) and an FP64 reference. Same two checks as run().
-int run_dense(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16
+// Then the reduced-precision modes (STRATA_PROMPT_ATTN_FP16ACC=1..3) against the FP32 kernel and FP64: reported, a
+// failure only if an output is not finite. sharp: queries share a direction per KV head that cell 0 (a sink) and
+// every 4099th cell (needles) carry, so the softmax is peaked as a model's is, not the near-flat of random data.
+int run_dense(int fmt, int64_t ctx, int64_t nq, int reps, bool sharp = false) {   // fmt 1 int8, 0 fp16
 #if defined(__HIPCC__) || defined(STRATA_USE_HIP)
     (void) fmt; (void) ctx; (void) nq; (void) reps;
     return 0;
@@ -382,6 +385,23 @@ int run_dense(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 f
     for (int64_t i = 0; i < nq; ++i) steps[i * k::kStepCount + k::kStepWidth] = (int32_t) (ctx - nq + i + 1);
     std::vector<float> q((size_t) (nq * NH * HD));
     for (auto& x : q) x = nd(rng) * 2.0f;
+    if (sharp) {
+        std::vector<float> mu((size_t) (NKV * HD));
+        for (auto& x : mu) x = rng() & 1 ? 1.0f : -1.0f;
+        for (int64_t i = 0; i < nq; ++i)
+            for (int64_t h = 0; h < NH; ++h)
+                for (int64_t d = 0; d < HD; ++d) q[(i * NH + h) * HD + d] += 0.3f * mu[(h / (NH / NKV)) * HD + d];
+        for (int64_t c = 0; c < ctx; c += 4099)
+            for (int64_t kvh = 0; kvh < NKV; ++kvh) {
+                const int64_t row = ((int64_t) table[c / PS] * NKV + kvh) * PS + c % PS;
+                for (int64_t d = 0; d < HD; ++d) {
+                    const float m = mu[kvh * HD + d];
+                    if (fmt == 1) kq[row * HD + d] = (int8_t) (c == 0 ? 127 * m : 64 * m);
+                    else kh[row * HD + d] = f2h(c == 0 ? 4.0f * m : 2.0f * m);
+                }
+                if (fmt == 1) for (int j = 0; j < 4; ++j) ks[row * 4 + j] = f2h(0.03f);
+            }
+    }
     k::QsaAttnPools pl;
     if (fmt == 1) { pl.k_q = up(kq); pl.v_q = up(vq); pl.k_scale = up(ks); pl.v_scale = up(vs); }
     else { pl.k_pool = up(kh); pl.v_pool = up(vh); }
@@ -408,7 +428,24 @@ int run_dense(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 f
     std::vector<float> o((size_t) (nq * NH * HD)), nw(o.size());
     ck(cudaMemcpy(o.data(), d_old, o.size() * 4, cudaMemcpyDeviceToHost), "down");
     ck(cudaMemcpy(nw.data(), d_new, nw.size() * 4, cudaMemcpyDeviceToHost), "down");
-    double err_old = 0, err_new = 0, ref_scale = 0;
+    auto set_prec = [](int pr) {
+        const char v[2] = {(char) ('0' + pr), 0};
+#if defined(_WIN32)
+        _putenv_s("STRATA_PROMPT_ATTN_FP16ACC", pr ? v : "");
+#else
+        if (pr) setenv("STRATA_PROMPT_ATTN_FP16ACC", v, 1); else unsetenv("STRATA_PROMPT_ATTN_FP16ACC");
+#endif
+    };
+    std::vector<float> lp[4];   // the reduced-precision modes' outputs (lp[0] unused)
+    for (int pr = 1; pr <= 3; ++pr) {
+        set_prec(pr);
+        go(true, d_new);
+        ck(cudaDeviceSynchronize(), "run");
+        lp[pr].resize(o.size());
+        ck(cudaMemcpy(lp[pr].data(), d_new, o.size() * 4, cudaMemcpyDeviceToHost), "down");
+    }
+    set_prec(0);
+    double err_old = 0, err_new = 0, ref_scale = 0, err_lp[4] = {0, 0, 0, 0};
     for (int64_t i = 0; i < nq; i += std::max<int64_t>(1, nq / 6)) {
         const int64_t w = ctx - nq + i + 1;
         for (int64_t h = 0; h < NH; h += 3) {
@@ -440,6 +477,7 @@ int run_dense(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 f
                 ref_scale = std::max(ref_scale, std::fabs(r));
                 err_old = std::max(err_old, std::fabs(o[at] - r));
                 err_new = std::max(err_new, std::fabs(nw[at] - r));
+                for (int pr = 1; pr <= 3; ++pr) err_lp[pr] = std::max(err_lp[pr], std::fabs(lp[pr][at] - r));
             }
         }
     }
@@ -471,14 +509,50 @@ int run_dense(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 f
 #endif
     const bool ok1 = err_new <= std::max(4.0 * err_old, 1e-6 * ref_scale);
     const bool ok2 = finite && diff <= 1e-4 * scale;
-    std::printf("%s dense %s ctx %lld, %lld queries: vs FP64 old %.3g new %.3g (output scale %.3g); new vs old %.3g (%.2g of "
+    std::printf("%s dense %s%s ctx %lld, %lld queries: vs FP64 old %.3g new %.3g (output scale %.3g); new vs old %.3g (%.2g of "
                 "scale); %.3f -> %.3f ms per chunk (%.2fx)\n",
-                ok1 && ok2 ? "PASS" : "FAIL", fmt == 1 ? "int8" : "fp16", (long long) ctx, (long long) nq, err_old, err_new,
-                ref_scale, diff, diff / scale, ms_old / reps, ms_new / reps, ms_old / ms_new);
+                ok1 && ok2 ? "PASS" : "FAIL", fmt == 1 ? "int8" : "fp16", sharp ? " sharp" : "", (long long) ctx,
+                (long long) nq, err_old, err_new, ref_scale, diff, diff / scale, ms_old / reps, ms_new / reps, ms_old / ms_new);
+    // the reduced-precision modes against the FP32 dense kernel (d = mode - FP32, per output row of HD values):
+    // max and mean |d|, max |d| / output scale, mean and max of |d|_2 / |FP32 row|_2, and FP64's max error for both
+    bool lp_ok = true;
+    for (int pr = 1; pr <= 3; ++pr) {
+        double mx = 0, sum = 0, rel_sum = 0, rel_max = 0;
+        bool fin = true;
+        const int64_t n_rows = (int64_t) nw.size() / HD;
+        for (int64_t r = 0; r < n_rows; ++r) {
+            double dn = 0, on = 0;
+            for (int64_t d = 0; d < HD; ++d) {
+                const size_t at = (size_t) (r * HD + d);
+                fin = fin && std::isfinite(lp[pr][at]);
+                const double e = std::fabs((double) lp[pr][at] - nw[at]);
+                mx = std::max(mx, e);
+                sum += e;
+                dn += e * e;
+                on += (double) nw[at] * nw[at];
+            }
+            const double rel = on > 0 ? std::sqrt(dn / on) : 0.0;
+            rel_sum += rel;
+            rel_max = std::max(rel_max, rel);
+        }
+        set_prec(pr);
+        float ms = 0;
+        cudaEventRecord(e0);
+        for (int r = 0; r < reps; ++r) go(true, d_new);
+        cudaEventRecord(e1);
+        ck(cudaEventSynchronize(e1), "time");
+        cudaEventElapsedTime(&ms, e0, e1);
+        set_prec(0);
+        lp_ok = lp_ok && fin;
+        std::printf("  %s FP16ACC=%d vs FP32: max |d| %.3g (%.2g of scale), mean |d| %.3g, row rel L2 mean %.3g max %.3g; "
+                    "vs FP64 %.3g (FP32 %.3g); %.3f ms per chunk (%.2fx the FP32 dense)\n",
+                    fin ? "ok" : "NOT FINITE", pr, mx, mx / scale, sum / (double) nw.size(), rel_sum / (double) n_rows,
+                    rel_max, err_lp[pr], err_new, ms / reps, ms_new / ms);
+    }
     cudaFree((void*) d_steps); cudaFree((void*) d_q); cudaFree(d_old); cudaFree(d_new);
     cudaFree((void*) pl.k_q); cudaFree((void*) pl.v_q); cudaFree((void*) pl.k_scale); cudaFree((void*) pl.v_scale);
     cudaFree((void*) pl.k_pool); cudaFree((void*) pl.v_pool); cudaFree((void*) pl.page_table);
-    return ok1 && ok2 ? 0 : 1;
+    return ok1 && ok2 && lp_ok ? 0 : 1;
 #endif
 }
 }  // namespace
@@ -519,6 +593,8 @@ int main(int argc, char** argv) {
     fails += run_dense(0, ctx, nq, reps);
     fails += run_dense(1, 1000, 37, reps);
     fails += run_dense(0, 1000, 37, reps);
+    fails += run_dense(1, ctx, nq, reps, true);
+    fails += run_dense(0, ctx, nq, reps, true);
     std::printf("FAILURES: %d\n", fails);
     return fails;
 }

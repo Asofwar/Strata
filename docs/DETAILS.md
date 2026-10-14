@@ -2205,6 +2205,46 @@ the pairs in which the switched arm won). They are here so you can try them on y
   `tools/batch_test.py --n 16` prompts (solo and batch) were identical too, and to those of a build without the
   option. The uniform cache (no profile) holds no resident expert when a native pack's prompt is read (serve needs the
   profile, and a one-shot run fills the cache only while it decodes), so `expert_cache_slot_guard_test` covers it.
+- **`STRATA_PROMPT_ATTN_FP16ACC=1|2|3`: the dense prompt attention (Qwen3.6 / Ornith, sm_80+) at FP16 precision.** By
+  default `prompt_attn_dense_kernel` carries q and p as FP16 hi + lo parts with FP32 accumulators (FP32-level accuracy).
+  `=1` drops the lo parts (half the MMAs) and with them half the kernel's shared memory, so two blocks of 4 warps share
+  an SM instead of one (int8 K/V: 49,920 bytes a block against 81 KB); that occupancy is most of the gain. `=2` also adds
+  each 32-cell chunk's p.v in an FP16 accumulator (int8 V only; p is scaled so the sum stays below 2^15), promoted to
+  the FP32 sum per chunk. `=3` also adds each 64-dim group's q.k in an FP16 accumulator (int8 K only). The softmax
+  (max, exp, sum) stays FP32 in every mode; FP16 K/V take `=1` for any value. Unset, the kernels compile to the same
+  SASS as before (all 14 kernels of `qsa_prompt_attn.cu`, sm_120, compared with `cuobjdump -sass`).
+  `qsa_prompt_attn_parity` reports each mode against the FP32 kernel and an FP64 reference (int8 K/V, RTX 5080):
+
+  | | chunk time, 2048 queries at 16K | chunk time, 8192 queries at 64K | row error vs FP32 (rel. L2, mean / max) | max error vs FP64 (FP32: 4-7e-6) |
+  |---|---|---|---|---|
+  | default | 21.4 ms | 326 ms | - | - |
+  | `=1` | 11.3 ms | 152 ms | 5.7e-4 / 2.7e-3 | 7.8e-4 |
+  | `=2` | 10.2 ms | 135 ms | 6.3e-4 / 2.7e-3 | 1.0e-3 |
+  | `=3` | 8.4 ms | 117 ms | 1.9e-3 / 8.0e-3 | 4.5e-3 |
+
+  For scale, the int8 KV cache itself rounds each value to 1/254 of its group's largest. The parity tool's `sharp`
+  rows (queries that share a direction with a sink cell and needles, a peaked softmax) give the same picture.
+  Whole engine, Ornith 1.5 35B-A3B IQ4_XS, `--kv int8`, prompt chunk 8192, RTX 5080 16 GB (PCIe 5.0 x8, Windows 11,
+  CUDA 13.4), the config's arguments plus `--vram-reserve-mib 1472`, a fresh engine per arm, three different prompts
+  per size (time to first token, s):
+
+  | | 4K | 16K | 64K |
+  |---|---|---|---|
+  | default | 0.70 / 0.70 / 0.71 | 2.70 / 2.68 / 2.68 | 19.09 / 19.06 / 19.06 |
+  | `=2` | 0.70 / 0.69 / 0.69 | 2.25 / 2.23 / 2.23 | 11.95 / 11.96 / 11.96 |
+  | `=3` | 0.68 / 0.67 / 0.67 | 2.20 / 2.18 / 2.61 | 11.58 / 11.63 / 11.64 |
+
+  So 1.20x at 16K and 1.59x (`=2`) / 1.64x (`=3`) at 64K (`=1`: 14.2-14.5 s at 64K, one run). Decode does not use
+  this kernel: 128 tokens after a 200-token prompt ran 130-270 tok/s in both arms (medians ~205 / ~207). Quality, the
+  same runs: a passphrase asked back from 16K and 64K documents (4 depths, 2 documents each) was found 16 of 16 times
+  in every arm (2 default, 2 `=2`, 2 `=3`). Greedy 128 tokens after 12 real-text prompts (4K-64K): two default runs
+  first differ at token 52.7 on average (2 of 12 identical: the engine is not bit-reproducible), default against `=2`
+  at 47.9-58.1 (2-4 identical), against `=3` at 34.8-52.1 (1-3 identical). Teacher-forced log-probabilities of the last
+  511 tokens of six real texts (four 16K, two 64K; `STRATA_LOGPOS`, top 40): two default runs KL 0.0080 nats, argmax
+  agreement 96.4%; default against `=2` KL 0.0094 / 0.0101, 96.7% / 96.2%; against `=3` 0.0097 / 0.0106, 96.3% /
+  96.0%; perplexity 3.305 and 3.318 (default), 3.319 (`=2`), 3.312 (`=3`). The reduced modes add a little to the
+  engine's own run-to-run KL and nothing measurable to retrieval or perplexity; `=2` keeps the error at FP16 rounding.
+  Not measured: other cards (the occupancy gain depends on the 100 KB per SM of sm_86/89/120), FP16 K/V in the engine.
 
 ## Thread placement: `--aux-cpus` (Linux, off by default)
 
