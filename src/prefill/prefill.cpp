@@ -9,6 +9,7 @@
 #include "mmq_resident_sort.hpp"
 #include "wmma_gemm.h"
 #include "strata/core/mtp.hpp"
+#include "strata/core/deterministic.hpp"
 #include "strata/core/pinned_ring.hpp"
 #include "strata/core/progress.hpp"
 #include "strata/core/on_device.hpp"
@@ -210,7 +211,11 @@ inline double cpu_share_explicit() {   // -2: the variable is not set; -1: measu
 }
 inline double cpu_share_env() {   // -1: measured
     const double v = cpu_share_explicit();
-    return v == -2.0 ? (g_share_default ? -1.0 : 0.0) : v;
+    const double r = v == -2.0 ? (g_share_default ? -1.0 : 0.0) : v;
+    // --deterministic: the measured share and its gate follow CUDA event and CPU thread times, so which experts the CPU
+    // takes changes from one run to the next; it is off then (a fixed STRATA_PREFILL_CPU_SHARE=x is kept: its experts
+    // follow from the routing alone)
+    return r < 0.0 && core::deterministic() ? 0.0 : r;
 }
 inline bool cpu_share_on() { return cpu_share_env() != 0.0; }
 // STRATA_PREFILL_CPU_SHARE_MAX (default 3072, at least 1024): with the share on, chunks below it are staged after their
@@ -2451,7 +2456,13 @@ int64_t Prefill::ring_slots_for(int64_t chunk) { return ring_slots((size_t) chun
 void Prefill::set_cpu_pool(kernels::cpu::ExpertPool* pool) { cpu_pool_ = pool; }
 void Prefill::arm_cpu_share(bool applies, bool by_default) {
 #if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906)
-    if (applies && by_default && cpu_share_explicit() == -2.0 && !g_share_default) {
+    if (applies && cpu_share_explicit() < 0.0 && (by_default || cpu_share_explicit() == -1.0) && core::deterministic()) {
+        static bool said = false;
+        if (!said)
+            std::fprintf(stderr, "prefill: --deterministic: the measured CPU share is off (it follows timing); a fixed "
+                                 "STRATA_PREFILL_CPU_SHARE=x is kept\n");
+        said = true;
+    } else if (applies && by_default && cpu_share_explicit() == -2.0 && !g_share_default) {
         g_share_default = true;
         std::fprintf(stderr, "prefill: the CPU share is ON by default for prompt chunks below 1024 tokens (the idle CPU "
                              "takes some of the experts the GPU would stream; answers can differ slightly from 0.1.40.3, "

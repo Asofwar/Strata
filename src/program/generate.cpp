@@ -18,6 +18,7 @@
 #include "strata/platform/memory.hpp"
 #include "strata/core/arch_defaults.hpp"
 #include "strata/core/nv_defaults.hpp"
+#include "strata/core/deterministic.hpp"
 #include "strata/kernels/gfx_arch.hpp"
 #include "strata/core/batch_telemetry.hpp"
 #include "strata/core/dma_batch.hpp"
@@ -922,6 +923,9 @@ void usage() {
                  "                       of the batched prompt path (default 64, 0 = off)\n"
                  "  --prefill-head-alias --serve: unload the native output head while each fresh prompt is read,\n"
                  "                       then release prompt buffers and reload it before decode\n"
+                 "  --deterministic      greedy answers are the same bytes from one start to the next: every choice\n"
+                 "                       taken from a clock or an async copy's arrival is taken from the data and the\n"
+                 "                       step counters instead (also STRATA_DETERMINISTIC=1; docs/DETAILS.md)\n"
                  "  --suffix-draft N     prompt lookup: draft from an earlier repeat of the last N+ tokens of context\n"
                  "                       when it pays (default 3; 0 = MTP only)\n"
                  "  --mtp-max-t M        cap the MTP's windows at M tokens (0 = --spec; longer ones come from suffixes)\n"
@@ -1577,7 +1581,7 @@ void mem_mark(const char* where) {
 /// #463's A/B: STRATA_ADAPT_NOWAIT=1 lets a verify window start before the adaptive tier's copies have landed (0.1.37)
 bool adapt_nowait() {
     static const bool v = [] { const char* e = std::getenv("STRATA_ADAPT_NOWAIT"); return e && e[0] == '1'; }();
-    return v;
+    return v && !strata::core::deterministic();   // --deterministic: the window count decides, not the copy's arrival
 }
 
 /// #463 without the stall: a verify window takes the adaptive tier's previous swaps only once they are this many windows
@@ -2587,6 +2591,7 @@ int main(int argc, char** argv) {
         else if (a == "--no-ple-prefetch") o.no_ple_prefetch = true;
         else if (a == "--coupled-draft") o.coupled_draft = true;
         else if (a == "--no-coupled-draft") o.coupled_draft = false;
+        else if (a == "--deterministic") strata::core::set_deterministic(true);
         else parsed = false;
         // The chain continues here in a second statement: one chain of 120+ `else if` passed MSVC's limit of 128
         // nested blocks (C1061).  The order of the tests and what each does are unchanged.
@@ -2819,6 +2824,19 @@ int main(int argc, char** argv) {
             return 2;
         }
         }
+    }
+    // --deterministic (strata/core/deterministic.hpp): the switches that decide by timing are set before anything
+    // reads them.  --pipeline-windows and --adapt-async move on when an event query says a copy or a window is done;
+    // the serial windows and the blocking adaptive tier decide the same things by the window count.
+    if (strata::core::deterministic()) {
+        if (o.pipeline_windows > 0 || o.adapt_async)
+            std::fprintf(stderr, "strata generate: --deterministic: %s off (they move on when a copy has landed)\n",
+                         o.pipeline_windows > 0 && o.adapt_async ? "--pipeline-windows and --adapt-async are"
+                         : o.pipeline_windows > 0 ? "--pipeline-windows is" : "--adapt-async is");
+        o.pipeline_windows = 0;
+        o.adapt_async = 0;
+        std::fprintf(stderr, "strata generate: --deterministic: verify windows priced by a fixed cost shape, no PcieAuto, "
+                             "no measured prompt CPU share, the automatic expert cache in whole 512 MiB\n");
     }
 #if defined(STRATA_USE_HIP)
     {   // gfx1151 (Strix Halo): the switches that are exact there are on by default (strata/core/arch_defaults.hpp); before
@@ -3625,6 +3643,9 @@ int main(int argc, char** argv) {
 #endif
         } else if (bw > 0.0) {
             o.pcie_frac = pcie_frac_for_gbps(bw, base);
+            // --deterministic: the share follows the timed burst, so it moves with the reading; a 0.05 step keeps it
+            // in place for the small run-to-run spread of one link (--pcie-frac pins it outright)
+            if (strata::core::deterministic()) o.pcie_frac = std::round(o.pcie_frac * 20.0) / 20.0;
             std::fprintf(stderr, "strata generate: PCIe probe: %.1f GB/s host->device (best of %s) -> pcie_frac %.2f "
                                  "(default %.2f)\n", bw, bursts.c_str(), o.pcie_frac, base);
             // 0.1.43: split opt-in + gfx12 default-on (decode_defaults_arch_ok).  Other HIP parts: STRATA_PCIE_FRAC_DEFAULT=auto
@@ -3644,8 +3665,12 @@ int main(int argc, char** argv) {
     // 16 workers: 12.2 either way.  One GPU, no batch slots, no --pcie-frac.
     auto pcie_balance = [&]() {
         const char* e = std::getenv("STRATA_PCIE_BALANCE");
-        return !pcie_given && native_pack && !multi_gpu && o.batch <= 0 && e != nullptr && std::strcmp(e, "1") == 0;
+        // (not with --deterministic: its counts come from measured round times)
+        return !pcie_given && native_pack && !multi_gpu && o.batch <= 0 && e != nullptr && std::strcmp(e, "1") == 0 &&
+               !strata::core::deterministic();
     };
+    // --deterministic: PcieAuto sets the share from the CPU pool's wall time; the share stays at its start value
+    if (strata::core::deterministic()) o.pcie_frac_auto = false;
     mem_mark("the CUDA context (the PCIe probe)");
     // the canonical Q2_0 pack's CPU kernels are AVX-512 only; a native pack runs on AVX2 CPUs as well
     if (!native_pack) {
@@ -6364,6 +6389,29 @@ int main(int argc, char** argv) {
                                  "shrinking the expert cache\n", (long long) (free_b >> 20), o.vram_reserve_mib);
             xcache.close();
             if (!shrink_to(keep_bytes)) break;
+        }
+        // --deterministic: an automatic cache follows the free VRAM, which moves by tens of MiB from one start to the
+        // next (6501-6587 slots in six starts on one RTX 5080), and with it which experts are resident and so which are
+        // computed on the GPU and which on the CPU.  A whole number of 512 MiB keeps the same slots for that spread;
+        // --expert-cache N pins them outright.
+        if (auto_cache && strata::core::deterministic() && o.expert_cache > 0) {
+            constexpr int64_t kStep = 512ll << 20;
+            const int64_t have = cache_bytes(), keep = have / kStep * kStep;
+            const int before = o.expert_cache;
+            if (keep > 0 && keep < have) {
+                xcache.close();
+                if (shrink_to(keep)) {
+                    const bool ok = sized_slots.empty()
+                        ? xcache.open(o.expert_cache, g.n_layers, g.n_expert, (int64_t) strata::kernels::cpu::expert_layout().max_blob, err)
+                        : xcache.open_sized(sized_slots, g.n_layers, g.n_expert, err);
+                    if (!ok) {
+                        std::fprintf(stderr, "strata generate: %s\n", err.c_str());
+                        return 1;
+                    }
+                    std::fprintf(stderr, "strata generate: --deterministic: the automatic expert cache %d -> %d slots (a whole "
+                                         "number of 512 MiB; --expert-cache N pins it)\n", before, o.expert_cache);
+                }
+            }
         }
         if (failed > 0 && o.expert_cache > 0)
             std::fprintf(stderr, "strata generate: expert cache: %d slots (%.2f GiB) after %d smaller tries - a bigger "
@@ -11180,6 +11228,7 @@ int main(int argc, char** argv) {
         else if (use_mtp && mtp.max_t() > S_mtp) mtp.set_max_drafts(S_mtp - 1);
         strata::spec::SuffixDrafter sfx(std::max(1, o.suffix_draft), 64, (size_t) o.max_context + 4096);
         strata::spec::DraftPolicy policy(S);   // MTP or lookup window, learned over the whole process
+        policy.set_fixed_cost(strata::core::deterministic());
         // The vision path (--vision): GENI <max_new> <embeddings file> <id,id,...> carries images.  The file is one
         // or more strata-vision records (int32 'SVE1', n, nx, ny, n_embd, then n x n_embd floats) in prompt order;
         // each image's rows go to its run of <|image_pad|> tokens, whose M-RoPE positions are mtmd's: t = p,
@@ -11547,7 +11596,7 @@ int main(int argc, char** argv) {
             drive.d.layers = 0;
             drive.d.experts = 0;
             drive.d.failed = false;
-            apply_pending(false);
+            apply_pending(strata::core::deterministic());   // --deterministic: wait, as the serial windows do
             // --adapt-async: the round in flight moves on a step when its job and copies are done (or a due round starts).
             // Never between a prompt's chunks (its loan of cache slots and its chunks read the tables); a request drains
             // the round before its prompt starts (adapt_tick(true) where the request begins).  The main thread's part is
@@ -11886,7 +11935,7 @@ int main(int argc, char** argv) {
                         return false;
                     }
                     drive.d.failed = false;
-                    apply_pending(false);
+                    apply_pending(strata::core::deterministic());   // --deterministic: wait
                 }
                 PGroup& G = pg[(size_t) pick];
                 strata::core::progress().busy.store(true);
@@ -16390,6 +16439,7 @@ int main(int argc, char** argv) {
         if (use_mtp && S_mtp < o.spec) mtp.set_max_drafts(S_mtp - 1);
         strata::spec::SuffixDrafter sfx(std::max(1, o.suffix_draft), 64, (size_t) o.max_context + 4096);
         strata::spec::DraftPolicy policy(o.spec);   // MTP or lookup window (see draft_policy.hpp)
+        policy.set_fixed_cost(strata::core::deterministic());
         std::vector<int32_t> sbuf((size_t) o.spec, 0);
         int64_t sfx_windows = 0, sfx_drafts = 0, sfx_ok = 0;
         int64_t chain_windows = 0, chain_drafts = 0, chain_ok = 0;   // --lookup-chain's own counts

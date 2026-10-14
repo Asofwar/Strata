@@ -2065,6 +2065,79 @@ pairs, plan off against the planner's `8192 -> 3840`, medians):
 The same box with its real NVMe and a 32 GB cap picks 8192 again (bigger chunk 480 vs 327 tok/s at 3328, even though it thrashes), and the 16 GiB cap is unchanged. Identity gate (fixed flags,
 `--expert-cache 1500`): the plan line says `kept`. The host model is `include/strata/program/prefill_plan.hpp` with `tests/program/prefill_plan_test.cpp`.
 
+## Deterministic mode: the same greedy answer every start (`--deterministic`, opt-in)
+
+With the default settings a greedy answer can change from one engine start to the next, with the same prompt, model
+and flags. On an RTX 5080 16 GB (Windows 11, CUDA 13.4, Core i9-14900K with 7 pool workers) the second and third of three starts
+each gave other 256 tokens than the first on every prompt tried: Ornith 1.5 IQ4_XS first differed at tokens 0-89, the Coder IQ1_M at
+13-43. The answers are all good ones; they differ because some choices are taken from a clock, and different choices
+round differently. That gets in the way of A/B tests and regression checks, which compare answers.
+
+`--deterministic` (or `STRATA_DETERMINISTIC=1` in the config's `env`) takes those choices from the data and the step
+counters instead. Off, nothing changes: a build with the switch decodes the same bytes as one without it (checked on
+Ornith with a fixed cache, 3 of 3). What it changes, and why each one moved the answer:
+
+- **The verify window's size.** With prompt lookup on (`--suffix-draft`, default 3) a policy chooses each round
+  between the MTP's window and a lookup window of another size, by expected tokens per millisecond, and the
+  milliseconds were the measured round times. A window's size changes which kernels run, so the rounding. In the
+  mode the policy prices a window by its fixed cost shape (the prior it uses for sizes not measured yet) instead of
+  the clock; the acceptance it learns is data, so the choices repeat. This was the main cause on Ornith: with
+  `--suffix-draft 0` and a fixed cache, three starts gave the same answer while decode speed swung 66-250 tok/s from
+  other load on the PC; with it on they did not.
+- **The prompt's CPU share** (`STRATA_PREFILL_CPU_SHARE`, on by default for chunks below 1,024 tokens on one NVIDIA
+  GPU, above). `auto` sets the share and its gate from CUDA event and CPU thread times; three Coder starts measured
+  0.05, 0.00 and 0.28. The mode turns the measured share off; a fixed `STRATA_PREFILL_CPU_SHARE=0.4` is kept, since
+  which experts it hands the CPU follows from the routing alone. (Ornith, without hyper-connections, never uses the share.)
+- **The PCIe share** of the missed experts. PcieAuto (above) refines it from the CPU pool's wall time; the mode keeps
+  the start value, and rounds the link probe's share to a 0.05 step. `--pcie-frac` still pins it outright.
+- **The size of an automatic expert cache.** `--expert-cache auto` follows the free VRAM, which moves from one start
+  to the next; a different size makes other experts resident, so other experts are computed on the GPU instead of the
+  CPU. The mode cuts the cache to a whole number of 512 MiB and prints the slots it kept. On Ornith that held the size
+  for every start (7388 slots in 30 starts, 5461 in 16 serve starts at 262K context). On the Coder it did not: under
+  WDDM the free figure re-read after the slots are written came back as 559 MiB in one start and 0 MiB in others, and
+  the cache landed on 2875 to 4728 slots. The answer then follows the size (every start with the same size gave the
+  same answer). **Pass `--expert-cache N` (the number the mode printed) for the same answer across starts when other
+  programs use the GPU.**
+- **The timing-gated opt-ins** take their step-counted forms: `STRATA_ADAPT_NOWAIT=1` (a window starts before the
+  adaptive tier's copies land) waits as the default does, `--adapt-async` and `--pipeline-windows` (they move on when
+  an event query says a copy or a window is done) are off, the batch slots' windows wait for the tier's copies, and the
+  Foresight swap space (`STRATA_FS_SLOTS`) is off.
+
+What it leaves alone: the default adaptive tier already decides by the window count (`STRATA_ADAPT_LAG`), so it stays
+on: with the window size fixed, three Ornith starts swapped the same 1,487 experts and gave the same answer. The route
+tail skip decides from the routing and the residency. The CPU pool splits rows between threads by a fixed rule. No
+GPU kernel on these paths sums floats with atomics. Through `--serve`, what a request learns (the window policy, the
+adaptive tier, the conversation cache) carries over to the next one, so the same answer needs the same requests in the
+same order from a fresh start; with `--vram-elastic` a VRAM request shrinks the cache and so changes the answer as well.
+
+Measured on the RTX 5080 above, the run config's engine arguments (`--max-context 262144`, `--adapt-every 1`, MTP
+`--spec 4`), 256 greedy tokens:
+
+| check | default | `--deterministic` |
+|---|---|---|
+| Ornith, one-shot (`--tokens-file`), 10 starts x 3 prompts (chat, 300, 2,048 tokens) | - | 10/10 the same on each |
+| Ornith, `--serve`, the 3 prompts in one start | 2 of 3 starts differ on each prompt | 10/10 the same on each |
+| Coder, one-shot, 10 starts x 3 prompts, `--expert-cache 2875` | - | 10/10 the same on each |
+| Coder, `--serve`, `--expert-cache 2875` | 2 of 3 starts differ on each prompt | 10/10 the same on each |
+| Coder, one-shot, automatic cache | - | 4 cache sizes in 30 starts; each size one answer |
+
+The cost, Ornith through `--serve`, 300 / 2,048 / 16,000-token prompts in one start, six interleaved pairs of starts
+(medians; the decode speed of both arms swung between 120 and 290 tok/s with other work on the PC, so only a large
+difference would show):
+
+| prompt | time to first token, default | `--deterministic` | decode tok/s, default | `--deterministic` |
+|---|---|---|---|---|
+| 300 tokens | 375 ms | 385 ms (+2.7%, 6/6 pairs slower) | 242.6 | 254.5 |
+| 2,048 tokens | 459 ms | 462 ms (+0.7%) | 244.9 | 259.4 |
+| 16,000 tokens | 2,617 ms | 2,616 ms | 227.2 | 241.8 |
+
+The prompt cost is the 512 MiB cut (5718 -> 5461 slots here, decode hit rate 0.3-1.2 points lower); the decode
+difference is within the noise. On a card where PcieAuto moves the share far from its start value (an RTX 3060:
+0.55 -> 0.20, +30% decode, above) the mode loses that gain; run once without it, read the `PCIe share:` line, and pass
+that value with `--pcie-frac`. Likewise on a machine where the prompt CPU share pays, a fixed
+`STRATA_PREFILL_CPU_SHARE=x` keeps part of it. Not tested: HIP and SYCL builds, layer splits, batch slots, sampled
+requests.
+
 ## More opt-in switches measured for 0.1.41 (all off unless you set them)
 
 None of these changes the default answers; each was measured against the default with interleaved off/on pairs of whole

@@ -45,6 +45,9 @@ public:
     double chain_rate(int match) const;
     double lookup_rate(int match) const;   // current q for a match length
     double cost_ms(int t) const;           // measured or scaled round time of a window of t tokens
+    /// --deterministic: a round is priced by the fixed cost shape instead of its measured time, so the windows chosen
+    /// follow from the drafts' acceptance alone (a window's size changes the kernels, and with them the rounding)
+    void set_fixed_cost(bool on) { fixed_cost_ = on; }
 
 private:
     static int bucket(int match);
@@ -53,6 +56,7 @@ private:
 
     int max_t_;
     double margin_;
+    bool fixed_cost_ = false;
     std::array<double, kMaxT + 1> cost_{}, cost_n_{};      // round ms by window size
     std::array<double, kMaxT + 1> mtp_tok_{}, mtp_n_{};    // tokens committed by MTP windows of that size
     std::array<double, kBuckets> ok_{}, bad_{};            // lookup drafts accepted / windows cut short, decayed
