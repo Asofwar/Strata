@@ -204,7 +204,9 @@ REASONING_CLOSE = "\n</think>\n\n"
 REASONING_WRAP_UP = "\n\nI have thought about this long enough; time to give my answer.\n</think>\n\n"
 # #728: opt-in handling of reasoning that repeats whole passages (which the single-token guard above cannot see).
 # "reasoning_loop_recovery": "stop" ends the reply there; "recover" (or true) goes on from the same output with the
-# low-effort instruction in place of the xhigh one.  Both off by default.
+# low-effort instruction in place of the xhigh one.  Both off by default.  "resample" is "recover", and where the
+# prompt has no xhigh sentence to swap (an agent's own system prompt: Codex's, for one) it goes on from the same
+# prompt and output too, only with the raised temperature and presence penalty, instead of letting the loop run on.
 HIGH_EFFORT = EFFORT_TEXT["xhigh"]
 LOW_EFFORT = EFFORT_TEXT["low"]
 LOOP_CHECK_EVERY = 512           # output tokens between two looks at the reasoning (at a clean parser boundary)
@@ -4923,6 +4925,8 @@ class Service:
                                             break
                                         if not emb:              # "recover": not for a request with pictures
                                             recover_prompt = focused_recovery_prompt(self.tok, ids, raw_ids)
+                                            if recover_prompt is None and self.reasoning_loop_recovery == "resample":
+                                                recover_prompt = list(ids) + list(raw_ids)   # no sentence to swap
                                             if recover_prompt is not None:
                                                 break
                                 if budget and parser.state == "reasoning":
@@ -8080,12 +8084,13 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         if budget:
             print(f"[strata] thinking budget: {budget} tokens (reasoning_budget_tokens; a request can set its own)",
                   flush=True)
-    recovery = cfg.get("reasoning_loop_recovery", False)   # #728: false (default) | "stop" | "recover" (true)
+    # #728: false (default) | "stop" | "recover" (true) | "resample"
+    recovery = cfg.get("reasoning_loop_recovery", False)
     if recovery is True:
         recovery = "recover"
-    if recovery is not False and recovery not in ("stop", "recover"):
-        raise SystemExit("[strata] config \"reasoning_loop_recovery\" must be false, \"stop\" or \"recover\", "
-                         f"not {recovery!r}")
+    if recovery is not False and recovery not in ("stop", "recover", "resample"):
+        raise SystemExit("[strata] config \"reasoning_loop_recovery\" must be false, \"stop\", \"recover\" or "
+                         f"\"resample\", not {recovery!r}")
     svc.reasoning_loop_recovery = recovery
     svc.gpu_index = (gpu_list(cfg) or [0])[0]           # the Monitor reads the card the engine runs on (issue #51)
     svc.gpu_indices = gpu_list(cfg)                     # ... or every card of a layer split (issue #112)

@@ -179,6 +179,23 @@ class ReasoningLoopRecovery(unittest.TestCase):
         self.assertEqual(len(engine.calls), 1)
         self.assertEqual(events[-1][1]['reasoning_recoveries'], 0)
 
+    def test_resample_goes_on_without_the_high_hint(self):
+        """"resample": an agent's own system prompt has no xhigh sentence; the same prompt and output go on with the
+        raised sampler instead of the loop running to max_tokens."""
+        engine = RecordingEngine(self.tok, [self.loop, 'Verified.\n</think>\nComplete solution.'])
+        service = Service(engine, self.tok, None)
+        service.reasoning_loop_recovery = "resample"
+        ids = self.tok.encode('<|im_start|>system\nYou are an agent.<|im_end|>\n<|im_start|>user\nTask<|im_end|>\n'
+                              '<|im_start|>assistant\n<think>\n', parse_special=True)
+        events = list(service.run(ids, True, [], 40000, {'temperature': 0, 'top_p': .9}, threading.Event()))
+        self.assertEqual(len(engine.calls), 2)
+        self.assertEqual(engine.calls[1][0][:len(ids)], ids)               # the prompt is not rewritten
+        self.assertEqual(engine.calls[1][0][len(ids):], self.tok.encode(self.loop)[:len(engine.calls[1][0]) - len(ids)])
+        self.assertEqual((engine.sampling_calls[1]['temperature'], engine.sampling_calls[1]['presence_penalty']), (1.0, 1.5))
+        self.assertEqual(engine.sampling_calls[1]['top_p'], .9)
+        self.assertEqual(events[-1][1]['reasoning_recoveries'], 1)
+        self.assertEqual(events[-1][1]['finish'], 'stop')
+
     def test_cancel_during_reasoning_does_not_start_recovery(self):
         engine = RecordingEngine(self.tok, [self.loop, 'Unused'])
         service = Service(engine, self.tok, None)
