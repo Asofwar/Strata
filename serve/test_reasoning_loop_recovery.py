@@ -196,6 +196,32 @@ class ReasoningLoopRecovery(unittest.TestCase):
         self.assertEqual(events[-1][1]['reasoning_recoveries'], 1)
         self.assertEqual(events[-1][1]['finish'], 'stop')
 
+    def test_resample_prompt_extends_the_engines_state(self):
+        """The tokens the engine still wrote after the STOP are in its state: the resample prompt ends with them, so
+        it extends that state (a GDN model cannot rewind, so a shorter prompt was read again in full)."""
+        tail = self.tok.encode('Let me search', parse_special=False)
+
+        class Draining(RecordingEngine):
+            def generate(self, ids, max_new, sampling, cancel, **kwargs):
+                self.drained = []
+                try:
+                    yield from super().generate(ids, max_new, sampling, cancel, **kwargs)
+                finally:
+                    if len(self.calls) == 1:
+                        self.drained = list(tail)     # written between the STOP and the DONE of the looping pass
+
+        engine = Draining(self.tok, [self.loop, 'Verified.\n</think>\nComplete solution.'])
+        service = Service(engine, self.tok, None)
+        service.reasoning_loop_recovery = "resample"
+        ids = self.tok.encode('<|im_start|>system\nYou are an agent.<|im_end|>\n<|im_start|>user\nTask<|im_end|>\n'
+                              '<|im_start|>assistant\n<think>\n', parse_special=True)
+        events = list(service.run(ids, True, [], 40000, {}, threading.Event()))
+        second = engine.calls[1][0]
+        self.assertEqual(second[-len(tail):], tail)
+        streamed = second[len(ids):-len(tail)]
+        self.assertEqual(streamed, self.tok.encode(self.loop)[:len(streamed)])
+        self.assertEqual(events[-1][1]['reasoning_recoveries'], 1)
+
     def test_cancel_during_reasoning_does_not_start_recovery(self):
         engine = RecordingEngine(self.tok, [self.loop, 'Unused'])
         service = Service(engine, self.tok, None)

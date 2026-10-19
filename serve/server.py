@@ -2161,6 +2161,7 @@ class StrataEngine:
             return
         self.progress, self.progress_ms, self.reused = None, 0, 0
         self.prefill_tok_s_mean = None
+        self.drained = []      # tokens the engine still wrote after a STOP: its live state includes them
         # an image request takes the same sampling keys as text (#75: it used to decode greedily whatever was asked)
         head = f"GENI {int(max_new)}{self.sampling_keys(sampling or {})} {embeddings}" if embeddings else \
             f"GEN {int(max_new)}{self.sampling_keys(sampling or {})}"
@@ -2269,6 +2270,11 @@ class StrataEngine:
                     if line.startswith("DONE"):
                         self._parse_done(line)
                         break
+                    if line.startswith("T "):
+                        try:
+                            self.drained.append(int(line[2:]))
+                        except ValueError:
+                            pass
                     if not self.can_stop:
                         heard = time.monotonic()
 
@@ -4853,7 +4859,7 @@ class Service:
                         segments_before = len(segments)     # (#879: a pass sent again leaves no segment)
                         gen = self.engine.generate(prompt, max_new - n, sampling, cancel, embeddings=emb) if emb \
                             else self.engine.generate(prompt, max_new - n, sampling, cancel)
-                        recover_prompt = None
+                        recover_prompt, resample_tail = None, False
                         seg, wrap, leaving = [], False, False   # this pass's tokens; the budget is reached; closed
                         nonfinite = False               # #879: the engine ended this pass on non-finite logits
                         opens = False                   # the thinking is over: write the forced call's opening
@@ -4927,6 +4933,7 @@ class Service:
                                             recover_prompt = focused_recovery_prompt(self.tok, ids, raw_ids)
                                             if recover_prompt is None and self.reasoning_loop_recovery == "resample":
                                                 recover_prompt = list(ids) + list(raw_ids)   # no sentence to swap
+                                                resample_tail = True
                                             if recover_prompt is not None:
                                                 break
                                 if budget and parser.state == "reasoning":
@@ -4971,6 +4978,14 @@ class Service:
                             segment_done = getattr(self.engine, "last", None)
                             if segment_done is not None and segment_done is not segment_before:
                                 segments.append(dict(segment_done))
+                        if resample_tail and recover_prompt is not None:
+                            # the tokens the engine wrote between the STOP and its DONE are in its live state; the
+                            # same prompt plus them extends that state, so the next pass reads nothing again
+                            # (without them it is shorter than the state, which a GDN model cannot rewind: the whole
+                            # prompt was read again, 209,688 tokens in 72 s)
+                            tail_ids = list(getattr(self.engine, "drained", None) or [])
+                            recover_prompt += tail_ids
+                            raw_ids += tail_ids
                         if nonfinite and not cancel.is_set():
                             # #879: the engine emitted none of the poisoned window's tokens and reads its next prompt
                             # from token 0.  Nothing sent yet: the same request once more, unseen by the client
