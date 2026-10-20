@@ -1766,7 +1766,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                     const char* v = std::getenv("STRATA_BATCH_ATTN_ROWS");
                     return v != nullptr && std::atoi(v) != 0;
                 }();
-                bool rows_ok = batch_rec_ && attn_rows && te - tb <= strata::kernels::kAttnRowsMax;
+                // (the row and slot launches score blocks through the indexer: a model without one takes the per-row
+                // path below, whose selection is qsa_select_all)
+                bool rows_ok = idx && batch_rec_ && attn_rows && te - tb <= strata::kernels::kAttnRowsMax;
                 for (int t = tb; rows_ok && t < te; ++t) rows_ok = slot_ss(t).qsa_states[qi].kv_mode != 1;
                 if (rows_ok) {
                     const int n_rows = te - tb;
@@ -1787,7 +1789,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                                cap_, s, attn_scratch_ + (size_t) tb * attn_scratch_floats_,
                                                attn_ + tb * NH * HD, n_rows, cs);
                 } else
-                if (batch_rec_ && g_qsa_slots && !streamed) {
+                if (idx && batch_rec_ && g_qsa_slots && !streamed) {
                     // the rows' block scores, top-k and attention, up to 8 rows per launch.  The rows only read
                     // their slots' keys and K/V here and write their own scores/sel/scratch/attn rows, so running
                     // each step for all rows before the next is the per-row loop's result

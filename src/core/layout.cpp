@@ -165,14 +165,19 @@ std::string main_engine_geometry(const GgufFile& f, ModelGeometry& g) {
     if (g.n_mtp_layers < 0 || g.n_mtp_layers > 1) return bad("nextn_predict_layers", g.n_mtp_layers, "0 or 1");
     if (g.n_embd <= 0 || g.n_embd > cap.n_embd || g.n_embd % 256 != 0)
         return bad("embedding_length", g.n_embd, "a multiple of 256, at most 2560");
-    if (g.n_head > cap.n_head) return bad("attention.head_count", g.n_head, "at most 24");
+    // the kernels' instances: split_q / gate_attn and the attention take 16 or 24 query heads (8 or 12 per KV head)
+    if (g.n_head != 16 && g.n_head != 24) return bad("attention.head_count", g.n_head, "16 or 24");
     if (g.n_head_kv != cap.n_head_kv) return bad("attention.head_count_kv", g.n_head_kv, "2");
     // the DeltaNet kernels (gdn_keyhead_ok<32, 8192>, the gdn_l2 / gdn_rec_kh grids) are built for exactly 16 key heads:
     // a model with fewer would pass "at most" and run them with the wrong head count
     if (g.ssm_k_heads != cap.ssm_k_heads) return bad("ssm.group_count", g.ssm_k_heads, "16");
-    if (g.ssm_v_heads > cap.ssm_v_heads) return bad("ssm.time_step_rank", g.ssm_v_heads, "at most 48");
+    // the prompt's GDN kernels have a silu-gated instance for 32 value heads only (48 is Flash-Next's, sigmoid)
+    if (g.ssm_v_heads != 32) return bad("ssm.time_step_rank", g.ssm_v_heads, "32");
     if (g.n_expert > cap.n_expert) return bad("expert_count", g.n_expert, "at most 512");
     if (g.n_expert_used > cap.n_expert_used) return bad("expert_used_count", g.n_expert_used, "at most 10");
+    // the prompt's MoE combine has instances for 2048 x 8 (Qwen3.6) and 2560 x 10 (Flash-Next's shape)
+    if (!((g.n_embd == 2048 && g.n_expert_used == 8) || (g.n_embd == 2560 && g.n_expert_used == 10)))
+        return bad("expert_used_count", g.n_expert_used, "8 at embedding_length 2048 (or 10 at 2560)");
     if (g.n_ff > cap.n_ff || g.n_ff % 256 != 0)
         return bad("expert_feed_forward_length", g.n_ff, "a multiple of 256, at most 640");
     if (g.n_ff_shexp != g.n_ff) return bad("expert_shared_feed_forward_length", g.n_ff_shexp, "expert_feed_forward_length");

@@ -331,6 +331,9 @@ public:
                 if (stays(i)) { ++kept; kept_bytes += entries_[i].bytes(); }
             if (kept >= slots_ || kept_bytes > budget_ - held - incoming) { guard_blocked_ = true; return false; }
         }
+        // with the incoming chain, a pinned holder may go (#2255): only when the whole exchange fits, so a refusal
+        // half way cannot leave a pinned prefix with no parked holder (the same choice as can_make_room's)
+        if (pins.checkpoints != nullptr && !can_make_room(incoming, held, pins)) return false;
         if (bytes() > budget_ - held - incoming) reuse_ = {};
         while (!entries_.empty() && (entries_.size() >= slots_ || bytes_ > budget_ - held - incoming)) {
             // the oldest entry that does not hold a pinned shared prefix leaves; with only pinned ones left the oldest
