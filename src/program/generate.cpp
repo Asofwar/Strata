@@ -14550,6 +14550,16 @@ int main(int argc, char** argv) {
                                drive.d.pcie_experts};
             };
             const DecSnap ds0 = dec_snap();
+            // the CPU pool's own phases over this request (the decode timing's pool line)
+            const double pgu0 = pool.ms_multi_gu, pq0 = pool.ms_multi_q, pdown0 = pool.ms_multi_down;
+            const int64_t pbytes0 = pool.multi_bytes;
+            const std::vector<strata::kernels::cpu::ExpertPool::ThreadStat> pst0 = pool.thread_stats();
+            std::array<int, 64> host_cpus{};   // where the host thread ran, sampled twice per window (the pool line)
+            auto host_cpu_tick = [&]() {
+#if defined(_WIN32)
+                if (dec_timing) ++host_cpus[GetCurrentProcessorNumber() & 63u];
+#endif
+            };
             double dt_run = 0, dt_commit = 0, dt_draft = 0;
             double dt_adapt_wait = 0, dt_adapt_join = 0;   // the tier's wait before a window / join after the draft (ms, summed)
             const int64_t dt_sw0 = ajob ? a_swapped : adapt_nswaps;
@@ -15419,6 +15429,7 @@ int main(int argc, char** argv) {
                     return 1;
                 }
                 tr("window", p, T);
+                host_cpu_tick();
                 const Clock::time_point tw0 = Clock::now();
                 // STRATA_SPEC_PROB: the MTP drafts' distributions q, judged by rejection sampling (core/spec_prob.hpp);
                 // a suffix window and the lookup chain's tail are point masses and keep the exact-match rule
@@ -15454,6 +15465,7 @@ int main(int argc, char** argv) {
                     if (mtp.top2(a) == outv[(size_t) a]) ++t2_hit[a];
                 }
                 const Clock::time_point tw1 = Clock::now();
+                host_cpu_tick();
                 std::thread adapt_thr;   // the adaptive tier beside the commit and the draft (as in generate)
                 bool adapt_ok = true;
                 // (--adapt-async 1: the asynchronous tier above instead, ticked before the window)
@@ -15555,6 +15567,29 @@ int main(int argc, char** argv) {
                              (d1.host - ds0.host) / w, dt_commit / w, dt_draft / w, (d1.misses - ds0.misses) / (w * L),
                              (d1.entries - ds0.entries) / (w * L), (d1.hits - ds0.hits) / (w * L), (d1.pcie - ds0.pcie) / (w * L),
                              dt_adapt_wait / w, dt_adapt_join / w, (double) ((ajob ? a_swapped : adapt_nswaps) - dt_sw0) / w);
+                {   // the pool's phases (prompt windows included when a prompt tail merged into decode windows)
+                    const double gu = pool.ms_multi_gu - pgu0, q = pool.ms_multi_q - pq0, dn = pool.ms_multi_down - pdown0;
+                    std::string hc;
+                    for (size_t c = 0; c < host_cpus.size(); ++c)
+                        if (host_cpus[c] > 0) hc += " " + std::to_string(c) + ":" + std::to_string(host_cpus[c]);
+                    std::fprintf(stderr, "strata decode pool: gate/up %.2f  quantize %.2f  down %.2f ms/window; %.1f GB/s over "
+                                         "the rows phases; %d workers%s; host thread on CPU%s\n", gu / w, q / w, dn / w,
+                                 (double) (pool.multi_bytes - pbytes0) / 1e6 / std::max(1e-9, gu + dn), pool.workers(),
+                                 o.no_host_worker ? "" : " + the host", hc.empty() ? " ?" : hc.c_str());
+                    const std::vector<strata::kernels::cpu::ExpertPool::ThreadStat> pst1 = pool.thread_stats();
+                    if (!pst1.empty() && pst1.size() == pst0.size()) {   // STRATA_POOL_STATS: per thread, tasks and us/task
+                        std::string ts;
+                        for (size_t i = 0; i < pst1.size(); ++i) {
+                            const int64_t nt = pst1[i].tasks - pst0[i].tasks;
+                            char b[64];
+                            std::snprintf(b, sizeof b, " %s%zu:%lld/%.0f/s%lld", i + 1 == pst1.size() ? "h" : "w", i, (long long) nt,
+                                          nt > 0 ? (pst1[i].ms - pst0[i].ms) * 1000.0 / (double) nt : 0.0,
+                                          (long long) (pst1[i].sleeps - pst0[i].sleeps));
+                            ts += b;
+                        }
+                        std::fprintf(stderr, "strata decode pool threads (tasks/us per task):%s\n", ts.c_str());
+                    }
+                }
                 if (aov)
                     std::fprintf(stderr, "strata decode adapt overlap: %lld windows took swaps still landing, a layer waited %.2f ms in all so far\n",
                                  (long long) aov_flips, ver.ms_gate);

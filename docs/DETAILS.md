@@ -428,6 +428,47 @@ hits, the router, the head, ...). The GPU profile times every stage with events,
 use it to compare, not to measure speed. This works with every pack; `--gpu-stages` (a one-token replay of
 per-layer graphs) refuses a native (IQ) pack, which has no such graphs.
 
+The same switch adds a `strata decode pool:` line: the CPU expert pool's gate/up, quantize and down time per window,
+the GB/s it read over the rows phases, and the CPUs the host thread ran on (sampled twice per window, Windows).
+`STRATA_POOL_STATS=1` (a diagnostic, off by default) adds `strata decode pool threads`: for every worker and the host,
+the tasks it ran and its microseconds per task. Equal numbers on every thread with a low GB/s mean the pool waits
+between its phases, not that one core is slow. None of these lines changes what the engine computes.
+
+**The CPU experts at 130K-200K context, RTX 5080 16 GB + i9-14900K (measured 2026-10-21):** Cyber-Tiel-Coder
+35B-A3B UD-IQ4_XS (gate/up IQ3_S in every layer, down IQ4_XS or Q6_K), 48 GB DDR5, Windows 11, CUDA 13.4, the
+server's settings (`--expert-cache auto --kv int8 --max-context 262144 --pcie-frac 0.00 --pool-workers 7 --adapt-every 1
+--adapt-swaps 160 --adapt-decay 0.97`, `STRATA_ATTN_WINDOW=1 STRATA_ATTN_WINDOW_PREC=2`, `--spec 4 --spec-min-p 0.40`),
+`--serve` with the requests 2K, then 130K and 200K in turn, 192 tokens each, greedy. With the window attention on, a
+verify window at 200K took about 14-20 ms; the GPU waited for the CPU's experts 1.2-3.3 ms of it (`waitCPU` in the GPU
+profile) and the pool computed 2-3.5 missed experts per layer. The pool read 36-41 GB/s in its good requests, while
+this PC streams 78 GB/s from RAM on the same 8 P-cores: the gate/up rows of one token went through ggml's IQ3_S dot,
+which is bound by its codebook lookups, not by the memory.
+
+| what was changed | 130K tok/s | 200K tok/s | CPU ms/window (130K / 200K) | hit rate (130K / 200K) |
+|---|---|---|---|---|
+| the server's settings (control, 4 runs each) | 114.3 | 116.8 | 5.37 / 6.02 | 85.7% / 88.7% |
+| `STRATA_IQ3S_MT1=1` + `--kv-grow` (4 runs each, same downtime) | 163.7 | 140.2 | 2.31 / 3.05 | 91.6% / 90.8% |
+| `STRATA_IQ3S_MT1=1` alone (9 runs of 3 starts, against 27 runs of 9 starts of the control and of the settings below that measured the same) | 145.0 vs 131.5 | 163.2 vs 126.6 | 3.90 / 4.39 vs 4.98 / 6.43 | same |
+
+Medians. `STRATA_IQ3S_MT1=1` takes Strata's gathered IQ3_S kernel for one token too: the pool's gate/up rows went
+from 36-41 to 56-64 GB/s in the good requests. `--kv-grow` let the cache start with 7,668 slots instead of 5,519-5,796
+and keep 6,796 of them at 130K and 6,204 at 200K; the missed experts per layer fell by about a third and the prompts
+read as fast (2,209-2,229 tok/s for 85K new tokens at 200K, against 2,179-2,223). Greedy text: the first token where
+two runs differ came at a median of 15 of 192 between the control's own starts (the adaptive tier makes the decode
+non-deterministic) and at 15 between the control and `STRATA_IQ3S_MT1=1`, so the change is inside that noise.
+Measured and not better: `--pool-workers 5`, 8 (an E-core joins), 12, `--pool-affinity p-cores --pool-workers 15`
+(the P-cores' SMT siblings too), `--no-host-worker`, process priority High, `--vram-reserve-mib 1472`,
+the PCIe share at 0.1 and 0.2 (it moved at most 0.17 experts per layer to the link, no speed change), `--adapt-swaps 320`
+and `--adapt-decay 0.90` (hit rate and CPU time within the control's spread). `--max-context 196608` gives the cache
+513 more slots but refuses a 200K prompt; `--kv-grow` gives more slots without losing context.
+
+Not solved: in about half the requests the pool read only 13-25 GB/s with the same work. Every thread ran its tasks
+at the same speed (`STRATA_POOL_STATS`), but the threads sat idle 30-50% of each pool phase instead of about 10%;
+a request kept its speed until the next long prompt (85K new tokens) and two starts repeated the same pattern. It was
+not other programs (no other process used more than 2.3 cores then), not the workers sleeping (0 sleeps), not the
+host thread moving (always CPU 0), not Windows power throttling, process priority, a fuller VRAM or the CPU clock
+(P-cores at 5.3-5.4 GHz throughout). Compare such runs by medians over several starts, not by one request.
+
 **How good the next-layer expert prediction is (measurement only):** `STRATA_LOOKAHEAD_STATS=1` runs the router look-ahead on any expert tier and
 scores it against the routing of the next layer: every 100 windows the engine log has a `strata lookahead stats:` line with the experts per layer
 outside the GPU cache, the recall and precision of the top-k / k+4 / k+10 guesses and of the vote-ranked top 4 / 8 / 12, how much of the PCIe share they

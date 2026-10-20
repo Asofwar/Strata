@@ -629,6 +629,7 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity af
     plan_logical_ = plan_in.logical;
     if (n_ < 1) n_ = 1;
     scratch_.resize((size_t) n_);
+    if (stats_on()) tstat_.reset(new ThreadStatSlot[(size_t) n_ + 1]);
     wstate_.reset(new std::atomic<int32_t>[(size_t) n_]);
     for (int i = 0; i < n_; ++i) wstate_[(size_t) i].store(kParked);
     hstate_ms_.store(now_ms());
@@ -712,6 +713,7 @@ void ExpertPool::worker(int id) {
                 if ((++spins & 1023u) != 0) continue;
             }
             if (std::chrono::steady_clock::now() - parked_at < spin_before_sleep_) continue;
+            if (tstat_) ++tstat_[(size_t) id].s.sleeps;
             std::unique_lock<std::mutex> lk(sleep_mu_);
             wstate_[(size_t) id].store(kSleeping, std::memory_order_relaxed);
             sleepers_.fetch_add(1, std::memory_order_seq_cst);
@@ -805,11 +807,23 @@ void ExpertPool::wait_done(int n) {
     }
 }
 
+bool ExpertPool::stats_on() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_POOL_STATS"); return v != nullptr && std::atoi(v) != 0; }();
+    return on;
+}
+
+std::vector<ExpertPool::ThreadStat> ExpertPool::thread_stats() const {
+    std::vector<ThreadStat> out;
+    if (tstat_) for (int i = 0; i <= n_; ++i) out.push_back(tstat_[(size_t) i].s);
+    return out;
+}
+
 void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
-    (void) id;
+    ThreadStat* const st = tstat_ ? &tstat_[(size_t) (id >= 0 ? id : n_)].s : nullptr;
     for (;;) {
         const int ci = claim(epoch);
         if (ci < 0) break;
+        const auto st0 = st != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         const uint32_t i = (uint32_t) ci;
         if (id >= 0) wstate_[(size_t) id].store(ci, std::memory_order_relaxed);
         else { hstate_.store(ci, std::memory_order_relaxed); hstate_ms_.store(now_ms(), std::memory_order_relaxed); }
@@ -882,6 +896,10 @@ void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
                 }
                 r += r1 - r0;
             }
+        }
+        if (st != nullptr) {
+            ++st->tasks;
+            st->ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - st0).count();
         }
         done_.fetch_add(1, std::memory_order_release);
     }

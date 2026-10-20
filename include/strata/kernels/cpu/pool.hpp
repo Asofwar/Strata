@@ -213,6 +213,12 @@ public:
     static constexpr int kMaxSplitMulti = 96;
     /// run_split_multi's phases, accumulated ms: gate/up rows, the intermediate quantization, down rows.
     double ms_multi_gu = 0, ms_multi_q = 0, ms_multi_down = 0;
+    /// STRATA_POOL_STATS=1 (a diagnostic, off by default): the tasks each thread ran and the time it spent in them,
+    /// accumulated, and how often each worker went to sleep; index workers() is the host.  Tells one slow thread (a
+    /// core shared with something else) from a pool that waits between its phases.  Read between batches only.
+    struct ThreadStat { int64_t tasks = 0; double ms = 0; int64_t sleeps = 0; };
+    static bool stats_on();
+    std::vector<ThreadStat> thread_stats() const;
     int64_t multi_bytes = 0;
 
     /// Total `_mm_pause` iterations spent waiting, over all workers, is no longer counted - see the note on the
@@ -307,6 +313,8 @@ private:
     std::chrono::microseconds spin_before_sleep_{kSpinBeforeSleep};
     std::vector<std::thread> threads_;
     std::vector<ExpertScratch> scratch_;   // one per worker: no allocation, no false sharing of the hot data
+    struct alignas(64) ThreadStatSlot { ThreadStat s; };
+    std::unique_ptr<ThreadStatSlot[]> tstat_;   // STRATA_POOL_STATS: n_ + 1 slots, each written by its own thread
     // run_split state: mode 0 = whole experts, 1 = gate/up row parts, 2 = down row parts
     int mode_ = 0;
     int parts_a_ = 1, parts_b_ = 1;
