@@ -44,6 +44,12 @@ bool qsa_hip_wmma_active();
 bool qsa_decode_attn_split(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
                            int64_t cap, const QsaShapes& s, float* scratch, uint64_t scratch_floats, float* attn, int64_t n_q,
                            void* stream);
+/// STRATA_ATTN_WINDOW=1 (opt-in): a window of `n_q` queries' dense decode attention (the selection is every cell,
+/// cell = index; 8 query heads per KV head, int8 KV in VRAM, sm_80+) with each K/V chunk read once for the whole window,
+/// split over the cells, partials in `scratch` (`scratch_floats` available).  False (nothing launched) when off or not
+/// applicable: the caller keeps qsa_decode_attn_batch.  Not bitwise the decode kernel (another summation order).
+bool qsa_decode_attn_window(const float* q, const QsaAttnPools& pools, const int32_t* steps, const QsaShapes& s,
+                            float* scratch, uint64_t scratch_floats, float* attn, int64_t n_q, void* stream);
 /// Tests: the int8-KV kernel on INT8 tensor cores (1), v2 (0), or as STRATA_PROMPT_ATTN_IMMA says (-1).
 void qsa_prompt_attn_set_imma(int on);
 /// HIP: STRATA_HIP_WMMA asks for the matrix-core prompt attention (=1 or =auto) and this device is a gfx11 / gfx12 matrix-core part

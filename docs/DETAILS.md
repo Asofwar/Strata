@@ -2664,6 +2664,65 @@ level because of the fused prompt experts (below). What changed:
 
 Not measured: other 12.0 cards (RTX 5070), Windows, partly-resident caches, the IQ3_XXS and IQ2_XS packs.
 
+## Long-context decode attention: one K/V read per verify window (`STRATA_ATTN_WINDOW=1`, opt-in)
+
+Qwen3.6 / qwen35moe models (Cyber-Tiel, Ornith: 8 query heads per KV head, no indexer, every cached cell attended) spend
+most of a long-context decode in the 10 full-attention layers: 57% of the decode time at 200K cells on an RTX 5080. The
+decode kernel runs one block per (query, KV head, part of the cells), so a verify window of T tokens reads the whole KV
+cache T times, at about 210-250 GB/s (nsys: 995 µs for one query at 200K cells, 3,488 µs for five).
+
+`STRATA_ATTN_WINDOW=1` runs a window's attention through the dense prompt kernel instead, split over the cells: a block
+holds up to 8 queries x the 8 heads of one KV head (64 tensor-core rows), so each K/V chunk is read once for the whole
+window (cp.async double buffering, 16-byte loads, rows found from the page table, int8 codes into the MMA, the per-64
+scales in FP32), and the ranges are merged with the log-sum-exp rescale. Only for int8 KV in VRAM on sm_80+, without
+an indexer; anything else (FP16 or Q4 KV, a streamed KV cache, a model with an indexer) keeps the decode kernel.
+`STRATA_ATTN_WINDOW_PREC` picks the prompt kernel's precision mode (as `STRATA_PROMPT_ATTN_FP16ACC`): 0 (the default)
+carries q and p as FP16 hi + lo parts, FP32-level; 2 uses one FP16 value each and an FP16 accumulator per 32-cell chunk
+of p.v (half the MMAs); 1 and 3 are the other modes. At precision 0 a lone query keeps the decode kernel (as fast).
+`STRATA_ATTN_WINDOW_SPLITS=N` fixes the number of cell ranges (default: two waves of blocks).
+
+Accuracy (`attn_window_parity`, synthetic int8 KV, page size 4 with a shuffled page table, 2 KV heads x 8 heads,
+T = 1..6, flat and peaked attention, max error relative to the largest output against an FP64 reference):
+
+| cells | decode kernel | window, precision 0 | window, precision 2 |
+|---|---|---|---|
+| 2,048 | 1.3e-6 | 1.6e-6 | - |
+| 66,000 | 5.3e-6 | 2.2e-6 | - |
+| 200,000 | 1.9e-5 | 1.7e-6 | 7.2e-4 (mean up to 8e-5) |
+
+Kernel time at 200,000 cells (same tool, RTX 5080, µs per call including the merge):
+
+| T (queries) | 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---|---|---|---|---|---|
+| decode kernel | 1,030 | 1,830 | 2,650 | 3,480 | 4,290 | 5,160 |
+| window, precision 0 | 1,104 | 1,096 | 1,093 | 1,110 | 1,104 | 1,096 |
+| window, precision 2 | 515 | 512 | 539 | 519 | 505 | 507 |
+
+In the engine (nsys, 200K prompt, precision 0) the window kernel takes 980 µs per layer and window: 216 GB/s of KV for
+the whole window. It is bound by the tensor-core work of 64 rows (a window rarely fills 8 queries), not by memory:
+precision 2 halves it (about 420 GB/s).
+
+Decode, RTX 5080 16 GB (PCIe 5.0 x8), i9-14900K, Windows 11, Cyber-Tiel-Coder 35B-A3B UD-IQ4_XS, `--kv int8 --spec 4`
+with MTP, `--spec-min-p 0.50`, `--vram-reserve-mib 1472`, the server's switches (`STRATA_ATTN_SPLITS=256` and others),
+`--serve` with 192-token greedy answers, 3 answers per context in one engine start (the 2nd and 3rd reuse the prompt);
+mean tok/s (each answer):
+
+| context | off | `STRATA_ATTN_WINDOW=1` | `STRATA_ATTN_WINDOW=1` + `STRATA_ATTN_WINDOW_PREC=2` |
+|---|---|---|---|
+| 2K | 111.8 (80.3, 124.9, 130.2) | 114.6 (79.1, 124.3, 140.5) | 110.3 (74.1, 133.3, 123.6) |
+| 66K | 84.5 (76.2, 89.0, 88.4) | 97.7 (85.2, 109.9, 98.0), +16% | 118.8 (98.3, 107.8, 150.4), +41% |
+| 130K | 54.3 (50.6, 57.2, 55.2) | 66.6 (54.9, 70.2, 74.8), +23% | 107.5 (101.4, 104.1, 117.1), +98% |
+| 200K | 48.6 (42.5, 49.1, 54.1) | 68.2 (62.2, 69.8, 72.7), +40% | 88.9 (82.8, 87.4, 96.6), +83% |
+
+Greedy text: the engine is not run-to-run exact here (the adaptive tier and the draft windows follow timing), so the
+bar is the first differing token between two answers of the same switch. Off vs off: 67-139 (2K), 29-103 (66K), 15-26
+(130K), 7-16 (200K). Off vs precision 0: 65-120, 29-166, 15-30, 7-41. Off vs precision 2: 65, 29-192, 15-36, 7-35. Both
+stay inside the noise.
+
+With the window cheaper, longer drafts pay off sooner: at 200K with precision 2, `--spec-min-p 0.30` gave 115.0 and
+140.3 tok/s (2 answers) and 0.40 gave 75.2 and 102.0, against 88.9 at 0.50. Not measured: shorter contexts with a lower
+`--spec-min-p`, other cards, FP16 or Q4 KV (not covered), Linux.
+
 ## CUDA opt-in switches measured for 0.1.45 (RTX 3060 and RTX A4000, sm_86; all off unless you set them)
 
 Ported from open pull requests and A/B'd as whole engine runs against the default (a fresh engine per side, IQ3_XXS, 5 pairs, medians;

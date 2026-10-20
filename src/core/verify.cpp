@@ -1857,6 +1857,11 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 const QsaAttnPools pools = qsa_attn_pools(st);
                 // STRATA_QSA_SPLIT_ATTN=1: the split tensor-core attention where it applies (int8 KV, sm_80+)
                 static const bool split_attn = [] { const char* v = std::getenv("STRATA_QSA_SPLIT_ATTN"); return v != nullptr && std::atoi(v) != 0; }();
+                // STRATA_ATTN_WINDOW=1: no indexer (the identity selection): the window's queries share each K/V read
+                if (!(!idx && qsa_decode_attn_window(qcur_ + tb * NH * HD, pools, step_ + tb * kStepCount, s,
+                                                     attn_scratch_ + (size_t) tb * attn_scratch_floats_,
+                                                     (uint64_t) n * (uint64_t) attn_scratch_floats_, attn_ + tb * NH * HD,
+                                                     n, cs)))
                 if (!(split_attn && qsa_decode_attn_split(qcur_ + tb * NH * HD, pools, sel_ + (size_t) tb * cap_,
                                                           step_ + tb * kStepCount, cap_, s,
                                                           attn_scratch_ + (size_t) tb * attn_scratch_floats_,

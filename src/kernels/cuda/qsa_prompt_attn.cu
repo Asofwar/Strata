@@ -1566,11 +1566,15 @@ __device__ __forceinline__ void h2_to_f4(const uint32_t* c, float* f) {
 //   3: as 2, and int8 K: each 64-dim group's q.k in an FP16 accumulator, times the K scale in FP32. q carries 2^2 /
 //      its row's largest value instead of 2^14: 64 dims x 128 x 2^2 < 65504.
 // The softmax (max, exp, sum) stays FP32 in every mode. FP16 K/V take mode 1 at most (their values have no bound).
-template <int KV_MODE, int PREC = 0>
+// SPLIT (STRATA_ATTN_WINDOW, decode): the cells split into gridDim.z ranges of whole chunks, one block per (query group,
+// KV head, range); each block writes its rows' unnormalized sums and (max, sum) to `part` in decode_attn_merge_kernel's
+// layout instead of `attn`, and a cell whose page is not resident is masked.  SPLIT = false is the prompt kernel as is.
+template <int KV_MODE, int PREC = 0, bool SPLIT = false>
 __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const float* __restrict__ q, QsaAttnPools p,
                                                                        const int32_t* __restrict__ steps, int n_q,
                                                                        int n_kv_heads, int page_size, float scale_log2,
-                                                                       float* __restrict__ attn) {
+                                                                       float* __restrict__ attn,
+                                                                       float* __restrict__ part = nullptr) {
     constexpr bool LO = PREC == 0;                    // q and p carry an FP16 lo part
     using Sm = SmemD<KV_MODE, LO>;
     constexpr int GQ = 8, PIECES = Sm::PIECES, ROWB = PIECES * 16;
@@ -1587,6 +1591,13 @@ __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const flo
     int n_max = 0;
 #pragma unroll
     for (int i = 0; i < DQ; ++i) n_max = max(n_max, width(i));
+    // this block's cells [cb, ce): all of them, or (SPLIT) range blockIdx.z of gridDim.z, in whole chunks
+    int cb = 0, ce = n_max;
+    if constexpr (SPLIT) {
+        const int per = ((n_max + DCH - 1) / DCH + (int) gridDim.z - 1) / (int) gridDim.z;
+        cb = min(n_max, (int) blockIdx.z * per * DCH);
+        ce = min(n_max, cb + per * DCH);
+    }
 
     auto row_of = [&](int cell) -> long long {
         const long long page = (long long) __ldg(p.page_table + cell / page_size);
@@ -1601,23 +1612,34 @@ __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const flo
 #pragma unroll
         for (int i = t; i < DCH * PIECES; i += THREADS) {
             const int c = i / PIECES, pc = i % PIECES, cell = c0 + c;
+            if constexpr (SPLIT) {   // a cell of a page that is not resident reads zeros (and is masked below)
+                const long long r = cell < ce ? row_of(cell) : -1;
+                cp_async16(&dst[c][pc ^ (c & 7)], base + (r >= 0 ? (size_t) r * ROWB + pc * 16 : 0), r >= 0);
+            } else {
             const bool ok = cell < n_max;
             const size_t off = ok ? (size_t) row_of(cell) * ROWB + pc * 16 : 0;
             cp_async16(&dst[c][pc ^ (c & 7)], base + off, ok);
+            }
         }
         if constexpr (KV_MODE == 1) {
             if (t < DCH) {
                 const int cell = c0 + t;
+                if constexpr (SPLIT) {
+                    const long long r = cell < ce ? row_of(cell) : -1;
+                    cp_async8(kv ? &S.vsc[t] : &S.ksc[t],
+                              (kv ? p.v_scale : p.k_scale) + (r >= 0 ? (size_t) r * (HD / KV_Q8_GROUP) : 0), r >= 0);
+                } else {
                 const bool ok = cell < n_max;
                 const size_t off = ok ? (size_t) row_of(cell) * (HD / KV_Q8_GROUP) : 0;
                 cp_async8(kv ? &S.vsc[t] : &S.ksc[t], (kv ? p.v_scale : p.k_scale) + off, ok);
+                }
             }
         }
     };
-    if (n_max > 0) {
-        issue(0, 0);
+    if (cb < ce) {
+        issue(0, cb);
         cp_async_commit();
-        issue(1, 0);
+        issue(1, cb);
         cp_async_commit();
     }
 
@@ -1658,8 +1680,8 @@ __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const flo
     int ve[4] = {14, 14, 14, 14};   // p.v's scale per V group: p carries 2^ve (int8: 2^ve / the chunk's largest scale)
 
 #pragma unroll 1
-    for (int c0 = 0; c0 < n_max; c0 += DCH) {
-        const bool more = c0 + DCH < n_max;
+    for (int c0 = cb; c0 < ce; c0 += DCH) {
+        const bool more = c0 + DCH < ce;
         cp_async_wait1();
         __syncthreads();   // K in
         // q.k: 4 n-tiles of 8 cells x 16 k-steps (hi and lo); int8 per 64-dim group, then times the cell's K scale
@@ -1742,10 +1764,19 @@ __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const flo
 #pragma unroll
             for (int nt = 0; nt < DCH / 8; ++nt) {
                 const int cell = c0 + nt * 8 + 2 * tig;
+                if constexpr (SPLIT) {   // a page that is not resident: its cells masked
+                    const bool r0 = cell < ce && __ldg(p.page_table + cell / page_size) >= 0;
+                    const bool r1 = cell + 1 < ce && __ldg(p.page_table + (cell + 1) / page_size) >= 0;
+                    s[nt][0] = r0 && cell < na ? s[nt][0] * da : -INFINITY;
+                    s[nt][1] = r1 && cell + 1 < na ? s[nt][1] * da : -INFINITY;
+                    s[nt][2] = r0 && cell < nb ? s[nt][2] * db : -INFINITY;
+                    s[nt][3] = r1 && cell + 1 < nb ? s[nt][3] * db : -INFINITY;
+                } else {
                 s[nt][0] = cell < na ? s[nt][0] * da : -INFINITY;
                 s[nt][1] = cell + 1 < na ? s[nt][1] * da : -INFINITY;
                 s[nt][2] = cell < nb ? s[nt][2] * db : -INFINITY;
                 s[nt][3] = cell + 1 < nb ? s[nt][3] * db : -INFINITY;
+                }
                 mxa = fmaxf(mxa, fmaxf(s[nt][0], s[nt][1]));
                 mxb = fmaxf(mxb, fmaxf(s[nt][2], s[nt][3]));
             }
@@ -1875,6 +1906,26 @@ __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const flo
         l_b += __shfl_xor_sync(0xffffffffu, l_b, o);
     }
     const int qa = q0 + 2 * warp, qb = qa + 1;
+    if constexpr (SPLIT) {   // decode_attn_merge_kernel's layout: per query, per range [n_head x HD sums][n_head x (m, l)]
+        const int nsp = (int) gridDim.z, h = kvh * GQ + gid;
+        auto put = [&](int qi, float m, float l, int half) {
+            if (qi >= n_q) return;
+            float* ps = part + ((size_t) qi * nsp + blockIdx.z) * n_head * (HD + 2);
+#pragma unroll
+            for (int g = 0; g < 4; ++g) {
+#pragma unroll
+                for (int j = 8 * g; j < 8 * g + 8; ++j) {
+                    const int d = j * 8 + 2 * tig;
+                    *reinterpret_cast<float2*>(ps + (size_t) h * HD + d) =
+                        make_float2(ldexpf(acc[j][2 * half], -ve[g]), ldexpf(acc[j][2 * half + 1], -ve[g]));
+                }
+            }
+            if (tig == 0) { ps[(size_t) n_head * HD + 2 * h] = m; ps[(size_t) n_head * HD + 2 * h + 1] = l; }
+        };
+        put(qa, m_a, l_a, 0);
+        put(qb, m_b, l_b, 1);
+        return;
+    }
     float* oa = attn + ((size_t) qa * n_head + kvh * GQ + gid) * HD;
     float* ob = attn + ((size_t) qb * n_head + kvh * GQ + gid) * HD;
 #pragma unroll
@@ -2827,6 +2878,88 @@ bool qsa_decode_attn_split(const float* q, const QsaAttnPools& pools, const int3
     return true;
 #endif
 }
+namespace {
+template <int PREC>
+bool launch_window(const float* q, const QsaAttnPools& pools, const int32_t* steps, const QsaShapes& s, float* scratch,
+                   uint64_t scratch_floats, float* attn, int64_t n_q, int splits, int sms, cudaStream_t st) {
+    static bool attr[64] = {};   // per device
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
+    const int bytes = (int) sizeof(SmemD<1, PREC == 0>);
+    if (!attr[dev]) {
+        if (cudaFuncSetAttribute(prompt_attn_dense_kernel<1, PREC, true>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 bytes) != cudaSuccess) {
+            cudaGetLastError();
+            return false;
+        }
+        if (PREC > 0 && cudaFuncSetAttribute(prompt_attn_dense_kernel<1, PREC, true>,
+                                             cudaFuncAttributePreferredSharedMemoryCarveout,
+                                             (int) cudaSharedmemCarveoutMaxShared) != cudaSuccess)
+            cudaGetLastError();
+        attr[dev] = true;
+    }
+    const int64_t groups = (n_q + DQ - 1) / DQ;
+    // ranges: about two waves of blocks (one block per SM at full precision, two in the FP16 modes) unless set
+    int64_t nsp = splits > 0 ? splits : (2 * (int64_t) sms * (PREC > 0 ? 2 : 1) + groups * s.n_head_kv - 1) /
+                                            (groups * s.n_head_kv);
+    nsp = std::max<int64_t>(1, std::min<int64_t>(nsp, 65535));
+    while (nsp > 1 && (uint64_t) (n_q * nsp * s.n_head * (HD + 2)) > scratch_floats) nsp /= 2;   // the caller's scratch
+    if ((uint64_t) (n_q * nsp * s.n_head * (HD + 2)) > scratch_floats) return false;
+    const float scale_log2 = 1.4426950408889634f / sqrtf((float) HD);
+    prompt_attn_dense_kernel<1, PREC, true>
+        <<<dim3((unsigned) groups, (unsigned) s.n_head_kv, (unsigned) nsp), THREADS, bytes, st>>>(
+            q, pools, steps, (int) n_q, (int) s.n_head_kv, (int) s.page_size, scale_log2, nullptr, scratch);
+    decode_attn_merge_kernel<<<dim3((unsigned) n_q, (unsigned) s.n_head), HD, 0, st>>>(scratch, (int) s.n_head, (int) nsp,
+                                                                                      attn);
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) {
+        std::fprintf(stderr, "qsa_decode_attn_window: %s\n", cudaGetErrorString(e));
+        std::exit(1);
+    }
+    return true;
+}
+}  // namespace
+
+// STRATA_ATTN_WINDOW=1: a verify window's dense decode attention (Qwen3.6 / qwen35moe, 8 query heads per KV head,
+// int8 KV) through prompt_attn_dense_kernel split over the cells: each block holds up to 8 queries x 8 heads of one KV
+// head, so a K/V chunk is read once per window instead of once per query, on the int8 tensor-core path (cp.async,
+// 16-byte loads, page-contiguous rows), merged with decode_attn_merge_kernel.  STRATA_ATTN_WINDOW_PREC=1|2|3 picks the
+// prompt kernel's FP16 modes (fewer MMAs); STRATA_ATTN_WINDOW_SPLITS=N fixes the range count.
+bool qsa_decode_attn_window(const float* q, const QsaAttnPools& pools, const int32_t* steps, const QsaShapes& s,
+                            float* scratch, uint64_t scratch_floats, float* attn, int64_t n_q, void* stream) {
+#if defined(__HIPCC__)
+    (void) q; (void) pools; (void) steps; (void) s; (void) scratch; (void) scratch_floats; (void) attn; (void) n_q;
+    (void) stream;
+    return false;
+#else
+    static const int on = [] { const char* v = std::getenv("STRATA_ATTN_WINDOW"); return v != nullptr && std::atoi(v) != 0; }();
+    static const int prec = [] { const char* v = std::getenv("STRATA_ATTN_WINDOW_PREC"); return v ? std::atoi(v) : 0; }();
+    static const int splits = [] { const char* v = std::getenv("STRATA_ATTN_WINDOW_SPLITS"); return v ? std::atoi(v) : 0; }();
+    // a lone query at full precision: the decode kernel is as fast (RTX 5080, 200K cells: 1.04 vs 1.10 ms)
+    if (!on || n_q <= 0 || n_q > 65535 || (prec == 0 && n_q < 2)) return false;
+    if (s.head_dim != HD || s.n_head_kv <= 0 || s.n_head != 8 * s.n_head_kv || !steps || !pools.page_table || !scratch ||
+        pools.k_q == nullptr || pools.v_q == nullptr || pools.k_scale == nullptr || pools.v_scale == nullptr ||
+        pools.k_q4 != nullptr || pools.v_q4 != nullptr || pools.host_k_q != nullptr)
+        return false;
+    static int cc[64] = {}, sms[64] = {};
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
+    if (cc[dev] == 0) {
+        int major = 0, minor = 0;
+        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+        cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
+        cudaDeviceGetAttribute(&sms[dev], cudaDevAttrMultiProcessorCount, dev);
+        cc[dev] = 10 * major + minor;
+    }
+    if (cc[dev] < 80) return false;
+    cudaStream_t st = (cudaStream_t) stream;
+    if (prec == 1) return launch_window<1>(q, pools, steps, s, scratch, scratch_floats, attn, n_q, splits, sms[dev], st);
+    if (prec == 2) return launch_window<2>(q, pools, steps, s, scratch, scratch_floats, attn, n_q, splits, sms[dev], st);
+    if (prec == 3) return launch_window<3>(q, pools, steps, s, scratch, scratch_floats, attn, n_q, splits, sms[dev], st);
+    return launch_window<0>(q, pools, steps, s, scratch, scratch_floats, attn, n_q, splits, sms[dev], st);
+#endif
+}
+
 void qsa_prompt_attn_set_imma(int on) { g_pa_imma = on < 0 ? -1 : (on ? 1 : 0); }
 bool qsa_prompt_attn_matrix_cores_requested() {
 #if defined(__HIPCC__)
