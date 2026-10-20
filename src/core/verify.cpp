@@ -2540,7 +2540,7 @@ bool Verifier::capture_commit(std::string& err) {
         }
         // the QSA layers' tail restore + indexer append, one launch for all of them (one block per layer)
         bool qsa_batched = false;
-        if (commit_batch && ok && !g_no_batch_kv) {
+        if (commit_batch && ok && !g_no_batch_kv && g.has_indexer()) {   // (no indexer: nothing to replay)
             QsaIndexerLayers il;
             int nq = 0;
             int64_t mc = -1;

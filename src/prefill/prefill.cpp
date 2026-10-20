@@ -1409,14 +1409,24 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
         err = "prefill: geometry differs from the artifact's"; return false;
     }
     {   // a native pack's experts: this path's expert buffers and products (and so their Hadamard rotations) are
-        // N wide in and 640 wide in the middle; the sign vectors are looked up at the layout's own widths
+        // N wide in and 640 wide in the middle - the model's own widths for a qwen35moe pack (one residual stream:
+        // its MoE section reads g's widths, and APR's rotated experts are Flash-Next's only); the sign vectors are
+        // looked up at the layout's own widths
         const strata::kernels::cpu::ExpertLayout& lay = strata::kernels::cpu::expert_layout();
-        for (size_t l = 0; lay.native && l < lay.fmt.size(); ++l)
-            if (lay.fmt[l].n_embd != N || lay.fmt[l].n_ff != 640) {
+        const bool one_stream = !g.has_hyper_connections();
+        const int64_t want_e = one_stream ? g.n_embd : N, want_f = one_stream ? g.n_ff : 640;
+        for (size_t l = 0; lay.native && l < lay.fmt.size(); ++l) {
+            if (lay.fmt[l].n_embd != want_e || lay.fmt[l].n_ff != want_f) {
                 err = "prefill: layer " + std::to_string(l) + "'s experts are " + std::to_string(lay.fmt[l].n_embd) +
-                      " x " + std::to_string(lay.fmt[l].n_ff) + ", not the artifact's 2560 x 640";
+                      " x " + std::to_string(lay.fmt[l].n_ff) + ", not the model's " + std::to_string(want_e) + " x " +
+                      std::to_string(want_f);
                 return false;
             }
+            if (one_stream && (lay.fmt[l].had_gu || lay.fmt[l].had_d)) {
+                err = "prefill: Hadamard-rotated (APR) experts are Flash-Next's only";
+                return false;
+            }
+        }
         // APR: the sign vectors on this device, once (hadamard_device_signs takes a mutex and, the first time per
         // device, cudaMallocs its copy): run_impl reads m.had_sx / m.had_sh
         m.had_sx.assign(lay.native ? lay.fmt.size() : 0, nullptr);
