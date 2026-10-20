@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <utility>
 #include <vector>
 
@@ -359,8 +360,10 @@ public:
         const size_t v = pick_victim(pins, {});
         if (v == kNone) return false;
         bytes_ -= entries_[v].bytes();
+        SavedConversation gone = std::move(entries_[v]);
         erase(v);
         ++evictions_;
+        if (on_evict_) on_evict_(std::move(gone));   // e.g. the disk tier (conversation_disk.hpp); else dropped here
         return true;
     }
 
@@ -386,6 +389,9 @@ public:
         }
         return true;
     }
+
+    /// Where an evicted conversation goes instead of being dropped (the disk tier); it owns the image from then on.
+    void set_on_evict(std::function<void(SavedConversation&&)> fn) { on_evict_ = std::move(fn); }
 
     // #879: every parked conversation (pinned ones too) and the retained K/V go - after non-finite logits any of them
     // may carry the poison.  Returns how many were parked.
@@ -506,6 +512,7 @@ private:
     std::deque<uint64_t> serials_;          // entries_[i]'s identity, never reused
     uint64_t next_serial_ = 1, guarded_ = 0;
     bool guard_blocked_ = false;
+    std::function<void(SavedConversation&&)> on_evict_;
     ConversationKvReuse reuse_;
 };
 
