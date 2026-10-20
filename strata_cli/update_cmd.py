@@ -20,9 +20,9 @@ import sys
 import threading
 from pathlib import Path
 
-#: Where the feed is read when nothing else is set: the files of the latest GitHub release of Niko1221/Strata (the same folder the
+#: Where the feed is read when nothing else is set: the files of the latest GitHub release of Asofwar/Strata (this fork has no signed feed yet: `strata update` finds none and changes nothing) (the same folder the
 #: one-line installers use). Only a feed signed with a key in update_keys.json (or STRATA_UPDATE_TRUSTED_KEYS) is accepted.
-DEFAULT_FEED = "https://github.com/Niko1221/Strata/releases/latest/download/strata-feed.json"
+DEFAULT_FEED = "https://github.com/Asofwar/Strata/releases/latest/download/strata-feed.json"
 ENV_FEED = "STRATA_UPDATE_FEED"
 ENV_APP_VERSION = "STRATA_APP_VERSION"
 
