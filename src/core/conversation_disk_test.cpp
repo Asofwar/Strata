@@ -129,6 +129,89 @@ ConversationDiskOptions opts(const fs::path& dir, uint64_t budget) {
     o.log = [](const std::string& l) { std::lock_guard<std::mutex> g(lines_m); lines.push_back(l); };
     return o;
 }
+// The streamed park's K/V sources: each layer of `s` read from its buffers (as conversation_kv_source reads the
+// device pools); `meta` gets the rest of `s`, its kv empty.
+std::vector<SessionKvSource> sources_of(const SavedConversation& s, SavedConversation& meta) {
+    meta = SavedConversation{};
+    meta.geometry = s.geometry; meta.layer_lo = s.layer_lo; meta.layer_hi = s.layer_hi; meta.cvec = s.cvec;
+    meta.live = s.live; meta.checkpoints = s.checkpoints;
+    std::vector<SessionKvSource> out;
+    for (const auto& kv : s.kv) {
+        SessionKvSource src;
+        src.format = kv.format; src.cells = kv.cells; src.heads = kv.heads; src.head_dim = kv.head_dim;
+        src.page_size = kv.page_size; src.pooled_rows = kv.pooled_rows; src.idx_dim = kv.idx_dim;
+        const ConversationKv* k = &kv;
+        src.sizes = {kv.k.size(), kv.v.size(), kv.k_scale.size(), kv.v_scale.size(), kv.pooled.size()};
+        src.read = [k](size_t part, size_t offset, void* dst, size_t n) {
+            const ConversationBuffer* b[5] = {&k->k, &k->v, &k->k_scale, &k->v_scale, &k->pooled};
+            uint8_t* d = static_cast<uint8_t*>(dst);
+            return b[part]->visit(offset, n, [&](const uint8_t* p, size_t c, size_t at) {
+                std::copy(p, p + c, d + (at - offset));
+                return true;
+            });
+        };
+        out.push_back(std::move(src));
+    }
+    return out;
+}
+
+// The streamed read's K/V sink: every part collected into `got` (as the device pools would take it).
+struct Collected {
+    std::vector<std::vector<std::vector<uint8_t>>> got;   // [layer][part]
+    size_t begins = 0;
+    bool refuse_begin = false;
+};
+SessionKvSink sink_into(Collected& c) {
+    SessionKvSink s;
+    s.begin = [&c](size_t layer, const ConversationKv&, const SavedConversation& meta, std::string& why) {
+        if (c.refuse_begin) { why = "refused by the test"; return false; }
+        ++c.begins;
+        if (c.got.size() < meta.kv.size()) c.got.resize(meta.kv.size());
+        c.got[layer].assign(5, {});
+        return true;
+    };
+    s.part = [&c](size_t layer, size_t part, uint64_t size, std::string&) {
+        c.got[layer][part].reserve((size_t) size);
+        return true;
+    };
+    s.write = [&c](size_t layer, size_t part, uint64_t offset, const void* data, size_t n, std::string& why) {
+        auto& v = c.got[layer][part];
+        if (offset != v.size()) { why = "out of order"; return false; }
+        const uint8_t* p = static_cast<const uint8_t*>(data);
+        v.insert(v.end(), p, p + n);
+        return true;
+    };
+    return s;
+}
+bool same_kv(const SavedConversation& s, const Collected& c) {
+    if (c.got.size() != s.kv.size()) return false;
+    for (size_t l = 0; l < s.kv.size(); ++l) {
+        const ConversationBuffer* b[5] = {&s.kv[l].k, &s.kv[l].v, &s.kv[l].k_scale, &s.kv[l].v_scale, &s.kv[l].pooled};
+        for (size_t part = 0; part < 5; ++part) {
+            ConversationBuffer x;
+            x.resize(c.got[l][part].size());
+            x.visit(0, x.size(), [&](uint8_t* p, size_t n, size_t at) {
+                std::copy(c.got[l][part].begin() + (std::ptrdiff_t) at, c.got[l][part].begin() + (std::ptrdiff_t) (at + n), p);
+                return true;
+            });
+            if (!(x == *b[part])) return false;
+        }
+    }
+    return true;
+}
+bool same_meta(const SavedConversation& a, const SavedConversation& b) {
+    if (a.geometry != b.geometry || a.layer_lo != b.layer_lo || a.layer_hi != b.layer_hi || a.cvec != b.cvec ||
+        !same_checkpoint(a.live, b.live) || a.checkpoints.size() != b.checkpoints.size() || a.kv.size() != b.kv.size())
+        return false;
+    for (size_t i = 0; i < a.checkpoints.size(); ++i)
+        if (!same_checkpoint(a.checkpoints[i], b.checkpoints[i])) return false;
+    for (size_t i = 0; i < a.kv.size(); ++i)
+        if (a.kv[i].format != b.kv[i].format || a.kv[i].cells != b.kv[i].cells || a.kv[i].heads != b.kv[i].heads ||
+            a.kv[i].head_dim != b.kv[i].head_dim || a.kv[i].page_size != b.kv[i].page_size ||
+            a.kv[i].pooled_rows != b.kv[i].pooled_rows || a.kv[i].idx_dim != b.kv[i].idx_dim) return false;
+    return true;
+}
+
 bool logged(const char* what) {
     std::lock_guard<std::mutex> g(lines_m);
     for (const auto& l : lines) if (l.find(what) != std::string::npos) return true;
@@ -326,6 +409,132 @@ int main() {
             check(!tier.take(m.id, m.tokens, back, e) && back.kv.empty() && logged("hold another conversation"),
                   "persist: a's image under b's index is refused, never restored as b");
             check(tier.best(prompt_of(450), {}, false).tokens == 400, "persist: a is still there");
+        }
+    }
+
+    {   // streamed park and restore: no RAM image of the K/V on either side, the same bytes as a RAM park's
+        fs::remove_all(dir);
+        ConversationDiskTier tier(opts(dir, GiB));
+        check(tier.open(e), "stream: open");
+        const SavedConversation expect = image(800, 61);
+        SavedConversation meta;
+        const auto src = sources_of(expect, meta);
+        check(tier.write_now(meta, src, expect.bytes(), e), "stream: write_now");
+        check(tier.size() == 1 && tier_files(dir) == 1 && !tier.pending(), "stream: written at once, one file");
+        check(logged("wrote 800 tokens streamed from the GPU"), "stream: the write is logged");
+        const auto m = tier.best(prompt_of(900), {}, false);
+        check(m.tokens == 800 && m.live && m.length == 800 && !m.queued && tier.files_of(m.id) == 1,
+              "stream: best finds it, its length and its one file");
+        const auto mc = tier.best([] { auto p = prompt_of(400); p.push_back(7); return p; }(), {}, false);
+        check(mc.tokens == 400 && !mc.live && mc.length == 800, "stream: a checkpoint match restores the whole entry");
+        Collected got;
+        SessionKvSink sink = sink_into(got);
+        SavedConversation back;
+        check(tier.take_stream(m.id, m.tokens, sink, back, e), "stream: take_stream");
+        check(sink.wrote && got.begins == 2 && same_kv(expect, got), "stream: every K/V byte reached the sink, in order");
+        check(same_meta(back, expect) && back.kv[0].k.empty() && back.kv[1].k.empty(),
+              "stream: the running state and checkpoints in RAM, the K/V headers only");
+        check(tier.size() == 0 && tier_files(dir) == 0, "stream: the entry and its file are gone");
+        const auto st = tier.stats();
+        check(st.streamed_writes == 1 && st.streamed_reads == 1 && st.disk_hits == 1 && st.bytes_read == st.bytes_written,
+              "stream: counters");
+
+        // a RAM park and a streamed park write the same file: either one is read back by either reader
+        check(tier.put(image(800, 61)), "stream: put the same image");
+        tier.wait_idle();
+        const auto q = tier.best(prompt_of(900), {}, false);
+        Collected got2;
+        SessionKvSink sink2 = sink_into(got2);
+        check(tier.take_stream(q.id, q.tokens, sink2, back, e) && same_kv(expect, got2) && same_meta(back, expect),
+              "stream: a background-written file streams back the same");
+        check(tier.write_now(meta, src, expect.bytes(), e), "stream: write_now again");
+        const auto r = tier.best(prompt_of(900), {}, false);
+        SavedConversation whole;
+        check(tier.take(r.id, r.tokens, whole, e) && same(whole, expect), "stream: a streamed file reads back whole");
+
+        // the sink refuses the image before any K/V byte: nothing written, the entry gone
+        check(tier.write_now(meta, src, expect.bytes(), e), "stream: write_now 3");
+        const auto s3 = tier.best(prompt_of(900), {}, false);
+        Collected refused;
+        refused.refuse_begin = true;
+        SessionKvSink sink3 = sink_into(refused);
+        check(!tier.take_stream(s3.id, s3.tokens, sink3, back, e) && !sink3.wrote && logged("refused by the test"),
+              "stream: a refusal at the header writes nothing");
+        check(tier.size() == 0 && tier_files(dir) == 0, "stream: a refused entry is gone with its file");
+
+        // a damaged K/V byte: the sink took the K/V, the hash refuses the file at the end
+        check(tier.write_now(meta, src, expect.bytes(), e), "stream: write_now 4");
+        const auto s4 = tier.best(prompt_of(900), {}, false);
+        fs::path bin;
+        for (const auto& f : fs::directory_iterator(dir)) if (f.path().extension() == ".bin") bin = f.path();
+        {
+            std::fstream f(bin, std::ios::binary | std::ios::in | std::ios::out);
+            f.seekp((std::streamoff) (fs::file_size(bin) - (1u << 20)));   // inside the K/V, before the trailer
+            f.put('\x5a');
+        }
+        Collected damaged;
+        SessionKvSink sink4 = sink_into(damaged);
+        check(!tier.take_stream(s4.id, s4.tokens, sink4, back, e) && sink4.wrote && back.kv.empty() &&
+              logged("its K/V was already written"), "stream: a damaged file fails after its K/V reached the sink");
+
+        // the budget: a streamed write makes room oldest-first like a background one, and one over it is refused
+        ConversationDiskTier small(opts(dir, expect.bytes() + expect.bytes() / 2));
+        check(small.open(e), "stream: open small");
+        check(small.write_now(meta, src, expect.bytes(), e) && small.write_now(meta, src, expect.bytes(), e) &&
+              small.size() == 1 && tier_files(dir) == 1 && small.stats().evicted == 1,
+              "stream: the oldest file goes for the budget");
+        {   // the entry a request will stream in stays while the outgoing conversation's write makes room
+            const auto kept = small.best(prompt_of(900), {}, false);
+            small.guard(kept.id);
+            check(small.write_now(meta, src, expect.bytes(), e) && small.size() == 2 && small.files_of(kept.id) == 1,
+                  "stream: a guarded entry is not evicted for the budget");
+            Collected got;
+            SessionKvSink sink = sink_into(got);
+            SavedConversation back;
+            check(small.take_stream(kept.id, kept.tokens, sink, back, e) && same_kv(expect, got),
+                  "stream: the guarded entry streams back after the park");
+            check(small.write_now(meta, src, expect.bytes(), e) && small.size() == 1,
+                  "stream: taking it ends the guard; the budget evicts again");
+        }
+        ConversationDiskTier tiny(opts(dir / "tiny", 1u << 20));
+        check(tiny.open(e) && !tiny.write_now(meta, src, expect.bytes(), e) && fs::is_empty(dir / "tiny"),
+              "stream: over the budget, nothing written");
+        SavedConversation split_meta;
+        const SavedConversation split = split_image(100, 3);
+        auto split_src = sources_of(split, split_meta);
+        split_meta.stage_images.push_back(SavedConversation{});
+        check(!small.write_now(split_meta, split_src, split.bytes(), e), "stream: a layer split's image is refused");
+    }
+
+    {   // persist: a streamed file is taken in by the next start with the same identity, removed with another
+        fs::remove_all(dir);
+        auto persistent = [&](uint64_t model) {
+            auto o = opts(dir, GiB);
+            o.persist = true;
+            o.identity = {model, 7};
+            return o;
+        };
+        const SavedConversation expect = image(500, 71);
+        SavedConversation meta;
+        const auto src = sources_of(expect, meta);
+        {
+            ConversationDiskTier tier(persistent(9));
+            check(tier.open(e) && tier.write_now(meta, src, expect.bytes(), e), "persist stream: write_now");
+        }
+        {
+            ConversationDiskTier tier(persistent(9));
+            check(tier.open(e) && tier.size() == 1, "persist stream: taken in by the next start");
+            const auto m = tier.best(prompt_of(600), {}, false);
+            Collected got;
+            SessionKvSink sink = sink_into(got);
+            SavedConversation back;
+            check(m.tokens == 500 && tier.take_stream(m.id, m.tokens, sink, back, e) && same_kv(expect, got),
+                  "persist stream: streamed back after the restart");
+            check(tier.write_now(meta, src, expect.bytes(), e), "persist stream: write_now again");
+        }
+        {
+            ConversationDiskTier tier(persistent(10));   // another model or engine: refused and removed
+            check(tier.open(e) && tier.size() == 0 && tier_files(dir) == 0, "persist stream: another identity removes it");
         }
     }
 

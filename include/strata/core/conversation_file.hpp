@@ -202,6 +202,19 @@ bool session_save_checkpoints(const std::vector<ConversationCheckpoint>& chain, 
                               const std::function<bool(uint64_t need_bytes, std::string& why)>& admit,
                               std::vector<ConversationCheckpoint>& out, std::string& why);
 
+// A read that does not hold the K/V in RAM: each K/V layer's bytes go to their owner as they are read (the reverse of
+// SessionKvSource).  `begin(layer, header, meta)`: the layer's header (its buffers empty) and everything parsed
+// before it (the running state, the checkpoints, meta.kv sized to the layer count); `part(layer, part, size)`: a
+// part's size, before its bytes; `write(layer, part, offset, data, n)`: bytes [offset, offset+n) of that part.  Any
+// of them returning false refuses the file.  The payload hash is checked only at the end, after the K/V went to its
+// owner: a failed read may have written any part of it (`wrote` says whether anything was handed over).
+struct SessionKvSink {
+    std::function<bool(size_t layer, const ConversationKv& header, const SavedConversation& meta, std::string& why)> begin;
+    std::function<bool(size_t layer, size_t part, uint64_t size, std::string& why)> part;
+    std::function<bool(size_t layer, size_t part, uint64_t offset, const void* data, size_t n, std::string& why)> write;
+    bool wrote = false;
+};
+
 // What a read checks before it allocates.  Every count is checked against the bytes left in the payload and against
 // these limits BEFORE its array is allocated; the defaults accept whatever the payload can hold.  The engine sets all
 // of them from its runtime (conversation_session_read_limits), and then the file size is bounded too.
@@ -222,6 +235,9 @@ struct SessionReadLimits {
     // parse holds at its peak (session_read_peak_bytes); false refuses the file.  Not a reservation.
     std::function<bool(uint64_t need_bytes, std::string& why)> admit;
     SessionProgress progress;
+    // Streamed K/V (optional): the K/V parts go to this sink instead of the image (image.kv keeps their headers with
+    // empty buffers).  `admit` is then not asked: the caller admits the running state it will hold.
+    SessionKvSink* kv_sink = nullptr;
 };
 // The largest file these limits admit (UINT64_MAX when one of them is open); session_file_read applies it.
 uint64_t session_read_max_file_bytes(const SessionReadLimits& limits);

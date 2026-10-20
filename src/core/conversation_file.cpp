@@ -602,6 +602,14 @@ public:
         }
         return true;
     }
+    // the next bytes in place (at most `max`), without a copy: valid until the next call
+    bool next(const uint8_t*& p, size_t& c, uint64_t max) {
+        if (at_ == have_ && !fill()) return false;
+        c = (size_t) std::min<uint64_t>(max, have_ - at_);
+        p = buf_.get() + at_;
+        at_ += c;
+        return true;
+    }
     std::optional<Ticker> progress;
     uint64_t expected = 0;
 private:
@@ -716,6 +724,7 @@ struct In {
     const SessionReadLimits& limits;
     SessionError kind = SessionError::invalid;
     size_t kv_layer = 0;
+    SessionKvSink* sink = nullptr;   // streamed K/V (SessionReadLimits::kv_sink)
     bool fail(const std::string& m) { if (error.empty()) error = "session file: " + m; return false; }
     bool raw(void* p, size_t c) {
         if (c > left) return fail("payload ends early");
@@ -746,6 +755,25 @@ struct In {
         const uint64_t limit = kv_layer < limits.max_kv_bytes.size() ? limits.max_kv_bytes[kv_layer][part] : UINT64_MAX;
         if (!count(n, 1, limit)) return false;
         b = {};
+        if (sink) {   // straight to the owner, a block at a time: nothing of it is held here
+            std::string why;
+            if (sink->part && !sink->part(kv_layer, part, n, why)) return fail(why);
+            for (uint64_t at = 0; at < n;) {
+                const uint8_t* p = nullptr;
+                size_t c = 0;
+                if (n - at > left) return fail("payload ends early");
+                if (!f->next(p, c, n - at)) { kind = f->kind(); return fail("read error: " + f->error()); }
+                hash.update(p, c);
+                left -= c;
+                sink->wrote = true;
+                if (!sink->write || !sink->write(kv_layer, part, at, p, c, why)) {
+                    kind = SessionError::io;
+                    return fail(why.empty() ? std::string("K/V sink refused") : why);
+                }
+                at += c;
+            }
+            return true;
+        }
         b.resize((size_t) n);
         return b.visit(0, b.size(), [&](uint8_t* p, size_t c, size_t) { return raw(p, c); });
     }
@@ -789,6 +817,10 @@ bool get_payload(In& in, SavedConversation& s) {
             !in.i64(k.page_size) || !in.i64(k.pooled_rows) || !in.i64(k.idx_dim)) return false;
         if (format < INT32_MIN || format > INT32_MAX) return in.fail("invalid K/V format");
         k.format = (int) format;
+        if (in.sink && in.sink->begin) {
+            std::string why;
+            if (!in.sink->begin(in.kv_layer, k, s, why)) return in.fail(why);
+        }
         if (!in.buffer(k.k, 0) || !in.buffer(k.v, 1) || !in.buffer(k.k_scale, 2) || !in.buffer(k.v_scale, 3) ||
             !in.buffer(k.pooled, 4)) return false;
     }
@@ -1213,7 +1245,7 @@ bool read_impl(const std::string& path, const SessionFileIdentity& id, SavedConv
                 std::to_string(kHeader + payload + kTrailer) + ")";
         return false;
     }
-    if (limits.admit) {
+    if (limits.admit && !limits.kv_sink) {
         std::string why;
         if (!limits.admit(session_read_peak_bytes(size), why)) {
             st.error = SessionError::memory;
@@ -1223,6 +1255,7 @@ bool read_impl(const std::string& path, const SessionFileIdentity& id, SavedConv
     }
     SavedConversation parsed;
     In in{&f, SessionHasher(0), payload, error, limits};
+    in.sink = limits.kv_sink;
     if (!get_payload(in, parsed)) { st.error = in.kind; return false; }
     if (in.left) { error = "session file: payload has " + std::to_string(in.left) + " unparsed bytes"; return false; }
     uint8_t t[kTrailer];

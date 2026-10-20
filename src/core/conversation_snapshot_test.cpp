@@ -174,6 +174,38 @@ void full_session(int fmt, int mode, int experts) {
               x.checkpoints.size()==y.checkpoints.size() && equal(x.kv[0],y.kv[0]) && equal(x.kv.back(),y.kv.back()),
               "streamed file equals captured file");
         check(slurp(p1)==slurp(p2),"streamed file is byte-identical to the captured file");
+        {
+            // disk restore without a host image: A's file streamed into the session that holds B gives A back, the
+            // running state included; a file of another layer range is refused before any K/V byte is written
+            const std::string p3=(dir/"a.bin").string(), p4=(dir/"other.bin").string();
+            size_t n3=0,n4=0;
+            check(session_file_write(p3,a,id,n3,err),"captured A written");
+            auto other=a; other.layer_hi++;
+            check(session_file_write(p4,other,id,n4,err),"another carve's file written");
+            SessionKvSink sink;
+            std::shared_ptr<ConversationSinkState> st;
+            check(conversation_snapshot_sink(sink,st,ss,g,&draft.state,err),"sink over the session");
+            SessionReadLimits limits;
+            limits.kv_sink=&sink;
+            SavedConversation meta4;
+            check(!session_file_read(p4,id,meta4,n4,err,limits) && !sink.wrote && !st->wrote,
+                  "another carve refused before the K/V");
+            SavedConversation still;
+            check(conversation_snapshot_save(still,view,ss,g,draft.state,err) && still.live.gdn==b.live.gdn &&
+                  equal(still.kv[0],b.kv[0]) && equal(still.kv.back(),b.kv.back()),"a refused stream leaves B");
+            check(conversation_snapshot_sink(sink,st,ss,g,&draft.state,err),"a fresh sink");
+            limits.kv_sink=&sink;
+            SavedConversation meta3;
+            check(session_file_read(p3,id,meta3,n3,err,limits) && sink.wrote,"A streamed in");
+            check(meta3.kv.size()==a.kv.size() && meta3.kv[0].k.empty(),"the K/V went to the session, not to RAM");
+            check(conversation_snapshot_sink_finish(meta3,*st,ss,g,&draft.state,true,err),"running state restored");
+            SavedConversation back;
+            check(conversation_snapshot_save(back,view,ss,g,draft.state,err),"capture after the streamed restore");
+            check(back.live.gdn==a.live.gdn && back.live.dead==a.live.dead && back.live.tails==a.live.tails &&
+                  equal(back.kv[0],a.kv[0]) && equal(back.kv.back(),a.kv.back()),
+                  "streamed restore: A byte-exact, K/V, draft and running state");
+            fill(177);   // B again, for the checks below
+        }
         std::error_code ec;
         fs::remove_all(dir,ec);
         auto empty_ids=std::vector<int32_t>{};

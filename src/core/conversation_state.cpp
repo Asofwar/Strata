@@ -334,6 +334,12 @@ bool conversation_snapshot_save(SavedConversation& image, const ConversationView
 bool conversation_snapshot_sources(SavedConversation& meta, std::vector<SessionKvSource>& sources,
                                    const ConversationView& view, const SessionState& ss, const ModelGeometry& g,
                                    const QsaState& draft, std::string& error) {
+    return conversation_snapshot_sources(meta, sources, view, ss, g, &draft, error);
+}
+
+bool conversation_snapshot_sources(SavedConversation& meta, std::vector<SessionKvSource>& sources,
+                                   const ConversationView& view, const SessionState& ss, const ModelGeometry& g,
+                                   const QsaState* draft, std::string& error) {
     if (!view_validate(view, ss, g, error) || !sync(error)) return false;
     SavedConversation captured;
     captured.geometry = geometry_key(g);
@@ -343,10 +349,10 @@ bool conversation_snapshot_sources(SavedConversation& meta, std::vector<SessionK
     if (!conversation_checkpoint_save(captured.live, ss, g, error)) return false;
     const int64_t upto = (int64_t) view.ids.size();
     const size_t layers = owned_qsa(ss);
-    std::vector<SessionKvSource> out(layers + 1);
+    std::vector<SessionKvSource> out(layers + (draft ? 1 : 0));
     for (size_t j = 0; j < layers; ++j)
         if (!conversation_kv_source(out[j], owned(ss, j), g, upto, true, error)) return false;
-    if (!conversation_kv_source(out.back(), draft, g, upto, false, error)) return false;
+    if (draft && !conversation_kv_source(out.back(), *draft, g, upto, false, error)) return false;
     meta = std::move(captured);
     sources = std::move(out);
     return true;
@@ -412,6 +418,71 @@ ConversationRestore conversation_snapshot_restore(const SavedConversation& image
     if ((draft && !conversation_kv_restore(image.kv.back(), *draft, g, upto, false, error)) ||
         !conversation_checkpoint_restore(image.live, ss, g, error)) return ConversationRestore::transfer_failed;
     return ConversationRestore::restored;
+}
+
+bool conversation_snapshot_sink(SessionKvSink& sink, std::shared_ptr<ConversationSinkState>& state,
+                                SessionState& ss, const ModelGeometry& g, const QsaState* draft, std::string& error) {
+    if (ss.max_cells < 0 || (owned_qsa(ss) && !ss.qsa_states)) return fail(error, "invalid session running-state targets");
+    auto st = std::make_shared<ConversationSinkState>();
+    const size_t layers = owned_qsa(ss) + (draft ? 1 : 0);
+    st->sizes.assign(layers, {});
+    std::vector<char> seen(layers, 0);
+    auto target = [&ss, draft](size_t layer) -> const QsaState& {
+        return layer < owned_qsa(ss) ? owned(ss, layer) : *draft;
+    };
+    SessionKvSink k;
+    // everything about the image is checked here, before its first K/V byte goes to the device
+    k.begin = [st, &ss, &g, draft, layers, target, seen](size_t layer, const ConversationKv& header,
+                                                        const SavedConversation& meta, std::string& why) mutable {
+        if (layer >= layers || meta.kv.size() != layers || seen[layer])
+            return fail(why, "invalid K/V layer count");
+        if (layer == 0) {
+            if (!meta.live.stage_parts.empty() || !meta.stage_images.empty())
+                return fail(why, "a layer split's image restored as a single session");
+            if (meta.geometry != geometry_key(g)) return fail(why, "incompatible runtime geometry");
+            if (meta.layer_lo != ss.layer_lo || meta.layer_hi != ss.layer_hi)
+                return fail(why, "snapshot from another session layer range");
+            const ConversationView view{meta.live.ids, meta.live.imgs, meta.checkpoints, meta.cvec};
+            if (!view_validate(view, ss, g, why) || !conversation_checkpoint_validate(meta.live, ss, g, why))
+                return false;
+            st->upto = (int64_t) meta.live.ids.size();
+            if (!sync(why)) return false;
+        } else if (!seen[layer - 1]) {
+            return fail(why, "K/V layers out of order");
+        }
+        seen[layer] = 1;
+        return conversation_kv_sink_check(header, target(layer), g, st->upto, layer < owned_qsa(ss),
+                                          st->sizes[layer], why);
+    };
+    k.part = [st, layers](size_t layer, size_t part, uint64_t size, std::string& why) {
+        if (layer >= layers || part >= 5 || size != st->sizes[layer][part])
+            return fail(why, "invalid K/V payload size");
+        return true;
+    };
+    k.write = [st, layers, target](size_t layer, size_t part, uint64_t offset, const void* data, size_t n,
+                                   std::string& why) {
+        if (layer >= layers || part >= 5 || offset > st->sizes[layer][part] || n > st->sizes[layer][part] - offset)
+            return fail(why, "K/V write out of range");
+        st->wrote = true;
+        return conversation_kv_sink_write(target(layer), part, offset, data, n, why);
+    };
+    sink = std::move(k);
+    state = std::move(st);
+    return true;
+}
+
+bool conversation_snapshot_sink_finish(const SavedConversation& meta, const ConversationSinkState& state,
+                                       SessionState& ss, const ModelGeometry& g, const QsaState* draft,
+                                       bool restore_state, std::string& error) {
+    if (!state.wrote && !restore_state) return true;
+    if (!sync(error)) return false;
+    for (size_t j = 0; j < owned_qsa(ss); ++j)
+        if (!conversation_kv_sink_finish(owned(ss, j), g, state.upto, error)) return false;
+    if (draft && !conversation_kv_sink_finish(*draft, g, state.upto, error)) return false;
+    if (!restore_state) return sync(error);
+    if (meta.kv.size() != owned_qsa(ss) + (draft ? 1 : 0) || (int64_t) meta.live.ids.size() != state.upto)
+        return fail(error, "streamed image does not match its K/V");
+    return conversation_checkpoint_restore(meta.live, ss, g, error) && sync(error);
 }
 
 // the draft layer's K/V included (the stage that owns the draft head, or no layer split)

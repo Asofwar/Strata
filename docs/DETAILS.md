@@ -1555,9 +1555,8 @@ one) when the disk holds a longer prefix than the session, a `--batch` slot or t
 - a background thread (CPU nice 10 on Linux) writes the files, so a switch never waits for the disk; a conversation
   asked for again before its write ends comes back from the write queue (a "RAM hit"). A queued image holds its RAM
   until it is written: when RAM is short, parking and a read back wait for the queue before they evict more;
-- a read back needs RAM for the whole image above `--conversation-cache-min-free-mib`, as a park does; without it the
-  prompt is read again (`not restored (not enough RAM ...)`). A read back removes the conversation from the disk (the
-  session holds it again, and it is parked again on the next switch);
+- when RAM cannot hold the image, the park and the read back are streamed (below) instead of refused. A read back
+  removes the conversation from the disk (the session holds it again, and it is parked again on the next switch);
 - a file is read back only when that is faster than reading the tokens it adds, by this run's measured disk speed and
   prompt speed (the prompt path's parts of 2,048 tokens or more): a new conversation that shares only the system prompt
   with a saved one no longer reads the saved one's whole file (on the box below 6,033 MiB for 16,384 tokens, 11.4 s
@@ -1593,6 +1592,42 @@ one-slot RAM cache that pushed conversations to the disk while the engine ran: a
 instead of a 77.8 s cold read; the background writes ran at 80-370 MB/s while the next prompt was read, and a request
 waited for a write once (0.9 s). Unit test: `conversation_disk_test` (CPU only, `-DSTRATA_BUILD_CONVERSATION_TESTS=ON`).
 Not run on Windows, HIP, SYCL or Metal.
+
+**Streamed park and read back (with `--conversation-disk-dir`, one GPU).** A parked conversation of 140-260K tokens
+is a 2-4 GB image. On a box whose RAM is mostly taken by the expert arena, the RAM park above is refused
+(`skip parking (physical RAM admission ...)`) and so is a read back of the whole image, so every switch read the other
+conversation again (146K tokens: 75 s). With a disk folder neither needs that RAM any more:
+
+- a park the disk takes (over the cache's byte budget) when RAM cannot hold its image right now, and a park the
+  physical-RAM admission refuses, are written straight from the GPU: the K/V goes from the authoritative pools to the
+  file a 16 MiB block at a time (the session SAVE's path), the live running state is copied (one checkpoint's worth of
+  RAM, admitted above `--conversation-cache-min-free-mib`), and the checkpoints are lent to the file for the write
+  instead of copied. The write runs on the serving thread before the next prompt (`sent N tokens to the disk,
+  streamed`); it is the same file as a RAM park's, with the same budget, free-space preflight and persistence;
+- a read back of a file whose whole image RAM cannot hold now (the session RESTORE's preflight,
+  `session_read_peak_bytes` above the floor, without evicting anything) is streamed the other way, once the outgoing
+  conversation is parked: the running state and the checkpoints come into RAM, and each K/V block goes from the file
+  straight into the session's pools. The image's geometry, layer range, running state and every K/V layer's layout are
+  checked before the first byte reaches the GPU. The payload hash is checked at the end: a damaged file found then has
+  already overwritten the K/V, so that request reads its prompt from token 0 (a failure before any write leaves the
+  session as it was; a CUDA failure ends the engine, as for any restore). A streamed read back keeps no host copy of
+  the K/V to reuse at the next park, so that park writes the whole image again;
+- a layer split (one image per stage) and a `--batch` slot still go the RAM way. `STRATA_CONV_DISK_STREAM=1` (tests)
+  streams every disk park and read back whatever RAM is free.
+
+Measured on an RTX 5080 16 GB, 48 GB RAM, Windows 11, files on a Kingston KC3000 NVMe (NTFS), Cyber-Tiel-Coder 35B-A3B
+UD-IQ4_XS (`--pack`, `--kv int8`, `--max-context 262144`, the live config's settings with `--conversation-cache-mib 1024
+--conversation-cache-slots 2 --conversation-cache-min-free-mib 1024 --conversation-disk-dir D:\... --conversation-disk-persist on`
+and `STRATA_CONV_DISK_STREAM=1`), two conversations of 122,044 and 124,997 tokens that share no prefix, asked in turn
+(A, B, A, B, A; 40 tokens each, greedy). Read cold: 32.4 s and 33.7 s. Each switch then wrote the outgoing one
+(1,797 / 1,830 MiB) in 0.75-0.84 s (2.2-2.5 GB/s) and read the incoming one back into the GPU in 0.95-1.05 s
+(1.8-2.0 GB/s); the requests took 2.5, 2.6 and 2.4 s instead of 33-34 s (`reused from the disk in 1.0 s`; the 14-15
+new tokens after a restore took 1.8-2.1 s of that). After a restart without the stream switch the persisted
+125,001-token conversation was taken in and read back the RAM way (1,830 MiB in 1.4 s, GPU restore 0.2 s); its answer
+went on from the earlier turns. Single runs. The streamed path's bytes are checked by `conversation_snapshot_test`
+(a file streamed into a session that holds another conversation gives the first one back byte for byte: K/V, draft
+ring and running state; a file of another layer range is refused before any write) and `conversation_disk_test`
+(CPU only: write, match, stream back, budget, damaged file, restart). Not run with HIP, SYCL, Metal or on Linux.
 
 **Current limits (v1):** one request at a time unless `"parallel": N` is set (opt-in batch slots, up to N requests
 decoded together: [BATCHING.md](BATCHING.md)), and one conversation cached at a time (switching between two chats

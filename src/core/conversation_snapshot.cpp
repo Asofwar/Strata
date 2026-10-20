@@ -312,6 +312,34 @@ bool conversation_kv_source(SessionKvSource& out, const QsaState& st, const Mode
     return true;
 }
 
+bool conversation_kv_sink_check(const ConversationKv& header, const QsaState& st, const ModelGeometry& g,
+                                int64_t upto, bool index, std::array<uint64_t, 5>& sizes, std::string& error) {
+    Layout l{};
+    if (!layout(st, g, upto, index, l, error) || !valid(st, l, upto, error)) return false;
+    if (header.format != l.format || header.cells != l.cells || header.heads != g.n_head_kv ||
+        header.head_dim != g.head_dim || header.page_size != l.page_size || header.pooled_rows != l.pooled_rows ||
+        header.idx_dim != g.idx_key_dim) {
+        error = "conversation snapshot: incompatible K/V geometry";
+        return false;
+    }
+    sizes = {l.data, l.value_data, l.scales, l.value_scales, l.pooled};
+    const auto dst = pools(st);
+    for (size_t i = 0; i < sizes.size(); ++i)
+        if (sizes[i] && !dst[i]) { error = "conversation snapshot: missing target state buffer"; return false; }
+    return true;
+}
+
+bool conversation_kv_sink_write(const QsaState& st, size_t part, uint64_t offset, const void* data, size_t n,
+                                std::string& error) {
+    if (part >= 5) { error = "conversation snapshot: invalid K/V part"; return false; }
+    const auto dst = pools(st);
+    return transfer(dst[part] ? static_cast<uint8_t*>(dst[part]) + offset : nullptr, data, n, error);
+}
+
+bool conversation_kv_sink_finish(const QsaState& st, const ModelGeometry& g, int64_t upto, std::string& error) {
+    return refresh_residency(st, g, upto, error);
+}
+
 bool conversation_kv_verify(const ConversationKv& image, const QsaState& st, const ModelGeometry& g,
                             int64_t upto, bool index, uint64_t& fingerprint, std::string& error) {
     if (!conversation_kv_validate(image, st, g, upto, index, error)) return false;

@@ -368,13 +368,11 @@ void ConversationDiskTier::write(Job& job) {
     if (options_.before_write) options_.before_write();
     const size_t tokens = job.entry.live.ids.size();
     size_t made_room = 0;
+    const uint64_t reserved = job.entry.bytes;
     {
         std::lock_guard<std::mutex> lock(m_);
-        while (!entries_.empty() && bytes_ + job.entry.bytes > options_.budget_bytes) {
-            remove_locked(0, true);
-            ++made_room;
-        }
-        stats_.evicted += made_room;
+        make_room_locked(reserved, made_room);
+        inflight_ += reserved;
     }
     const auto t0 = std::chrono::steady_clock::now();
     // one session file per image: the first stage's, then each later stage's (the writer takes no nested images)
@@ -388,10 +386,7 @@ void ConversationDiskTier::write(Job& job) {
     e.bytes = 0;
     std::string error;
     auto write_one = [&](const SavedConversation& img, size_t k) -> bool {
-        char name[96];
-        std::snprintf(name, sizeof name, "%s%016llx-%llu-%zu.bin", file_prefix(), (unsigned long long) nonce_,
-                      (unsigned long long) e.id, k);
-        const std::string path = (fs::path(options_.dir) / name).string();
+        const std::string path = file_name(e.id, k);
         size_t written = 0;
         if (!session_file_write(path, img, id, written, error, wo)) {
             remove_file(path);
@@ -407,6 +402,10 @@ void ConversationDiskTier::write(Job& job) {
     job.image = SavedConversation{};   // the RAM goes back now, written or not
     parts.clear();
     const double ms = ms_since(t0);
+    {
+        std::lock_guard<std::mutex> lock(m_);
+        inflight_ -= reserved;
+    }
     if (!ok) {
         for (const auto& f : e.files) remove_file(f);
         {
@@ -433,6 +432,165 @@ void ConversationDiskTier::write(Job& job) {
     log(fmt("wrote %zu tokens: %.0f MiB in %zu file%s, %.0f ms (%.0f MB/s); on disk %zu, %.0f MiB; %zu removed for "
             "the budget", tokens, mib(b), nfiles, nfiles == 1 ? "" : "s", ms, mbps(b, ms), on_disk,
             mib(disk_bytes), made_room));
+}
+
+void ConversationDiskTier::make_room_locked(uint64_t incoming, size_t& removed) {
+    size_t n = 0;
+    while (bytes_ + inflight_ + incoming > options_.budget_bytes) {
+        size_t victim = 0;
+        while (victim < entries_.size() && guarded_ != 0 && entries_[victim].id == guarded_) ++victim;
+        if (victim == entries_.size()) break;
+        remove_locked(victim, true);
+        ++n;
+    }
+    stats_.evicted += n;
+    removed += n;
+}
+
+std::string ConversationDiskTier::file_name(uint64_t id, size_t stage) const {
+    char name[96];
+    std::snprintf(name, sizeof name, "%s%016llx-%llu-%zu.bin", file_prefix(), (unsigned long long) nonce_,
+                  (unsigned long long) id, stage);
+    return (fs::path(options_.dir) / name).string();
+}
+
+bool ConversationDiskTier::write_now(const SavedConversation& meta, const std::vector<SessionKvSource>& kv,
+                                     uint64_t estimate, std::string& error) {
+    if (!open_) { error = "the disk tier is off"; return false; }
+    const size_t tokens = meta.live.ids.size();
+    if (!meta.stage_images.empty()) { error = "a layer split's image cannot be streamed"; return false; }
+    if (estimate > options_.budget_bytes) {
+        error = fmt("%.0f MiB is over the disk budget", mib(estimate));
+        std::lock_guard<std::mutex> lock(m_);
+        ++stats_.write_failed;
+        return false;
+    }
+    Entry e;
+    e.live = key_of(meta.live);
+    for (const auto& c : meta.checkpoints) e.checkpoints.push_back(key_of(c));
+    e.cvec = meta.cvec;
+    size_t made_room = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_);
+        e.id = ++next_id_;
+        make_room_locked(estimate, made_room);
+        inflight_ += estimate;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    SessionWriteOptions wo;
+    wo.min_free_bytes = options_.min_free_bytes;
+    wo.durable = false;   // a cache, as write(): a damaged file fails its hash check and the prompt is read again
+    const std::string path = file_name(e.id, 0);
+    size_t written = 0;
+    bool ok = session_file_write(path, meta, kv, file_identity(), written, error, wo);
+    if (ok) {
+        e.files.push_back(path);
+        e.bytes = written;
+        if (options_.persist) ok = write_index(e, error);
+    }
+    const double ms = ms_since(t0);
+    {
+        std::lock_guard<std::mutex> lock(m_);
+        inflight_ -= estimate;
+    }
+    if (!ok) {
+        remove_file(path);
+        std::lock_guard<std::mutex> lock(m_);
+        ++stats_.write_failed;
+        return false;
+    }
+    size_t on_disk = 0;
+    uint64_t disk_bytes = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_);
+        make_room_locked(e.bytes, made_room);   // the estimate fell short (another write landed meanwhile): oldest out
+        bytes_ += e.bytes;
+        entries_.push_back(std::move(e));
+        ++stats_.written;
+        ++stats_.streamed_writes;
+        stats_.bytes_written += written;
+        stats_.write_ms += ms;
+        on_disk = entries_.size();
+        disk_bytes = bytes_;
+    }
+    log(fmt("wrote %zu tokens streamed from the GPU (no RAM copy): %.0f MiB, %.0f ms (%.0f MB/s); on disk %zu, "
+            "%.0f MiB; %zu removed for the budget", tokens, mib(written), ms, mbps(written, ms), on_disk,
+            mib(disk_bytes), made_room));
+    return true;
+}
+
+size_t ConversationDiskTier::files_of(uint64_t id) const {
+    std::lock_guard<std::mutex> lock(m_);
+    for (const auto& e : entries_)
+        if (e.id == id) return e.files.size();
+    return 0;
+}
+
+void ConversationDiskTier::guard(uint64_t id) {
+    std::lock_guard<std::mutex> lock(m_);
+    guarded_ = id;
+}
+
+void ConversationDiskTier::unguard() {
+    std::lock_guard<std::mutex> lock(m_);
+    guarded_ = 0;
+}
+
+bool ConversationDiskTier::take_stream(uint64_t id, int64_t tokens, SessionKvSink& sink, SavedConversation& meta,
+                                       std::string& error, const SessionReadLimits& base) {
+    meta = SavedConversation{};
+    sink.wrote = false;
+    const auto t0 = std::chrono::steady_clock::now();
+    std::unique_lock<std::mutex> lock(m_);
+    if (!open_) { error = "the disk tier is off"; return false; }
+    double waited = 0;
+    if (writing_ && writing_entry_.id == id) {   // its file is complete when the write ends
+        const auto w0 = std::chrono::steady_clock::now();
+        cv_.wait(lock, [&] { return !(writing_ && writing_entry_.id == id); });
+        waited = ms_since(w0);
+    }
+    size_t index = entries_.size();
+    for (size_t i = 0; i < entries_.size(); ++i)
+        if (entries_[i].id == id) index = i;
+    if (index == entries_.size() || entries_[index].files.size() != 1) {
+        ++stats_.read_failed;
+        error = index == entries_.size() ? "the entry is not on the disk" : "a layer split's entry cannot be streamed";
+        return false;
+    }
+    const Entry want = entries_[index];
+    remove_locked(index, false);   // the entry goes now; its file is deleted after the read, whatever it gives
+    if (guarded_ == id) guarded_ = 0;
+    lock.unlock();
+    SessionReadLimits limits = base;
+    limits.kv_sink = &sink;
+    size_t bytes = 0;
+    bool ok = session_file_read(want.files[0], file_identity(), meta, bytes, error, limits);
+    if (ok && !holds(meta, want.live, want.checkpoints, want.cvec)) {
+        ok = false;
+        error = "the file holds another conversation than its index";
+    }
+    remove_file(want.files[0]);
+    const double ms = ms_since(t0) - waited;
+    lock.lock();
+    if (!ok) {
+        ++stats_.read_failed;
+        lock.unlock();
+        meta = SavedConversation{};
+        log(fmt("streamed read of %lld tokens failed after %.0f ms (%s)%s", (long long) tokens, ms, error.c_str(),
+                sink.wrote ? "; its K/V was already written" : ""));
+        return false;
+    }
+    ++stats_.disk_hits;
+    ++stats_.streamed_reads;
+    stats_.bytes_read += bytes;
+    stats_.read_ms += ms;
+    stats_.tokens_back += (uint64_t) std::max<int64_t>(tokens, 0);
+    lock.unlock();
+    log(fmt("disk hit, streamed to the GPU (no RAM copy): %lld tokens, %.0f MiB, %.0f ms (%.0f MB/s)%s",
+            (long long) tokens, mib(bytes), ms, mbps(bytes, ms),
+            waited > 0 ? fmt(", after %.0f ms waiting for its write", waited).c_str() : ""));
+    log(summary());
+    return true;
 }
 
 bool ConversationDiskTier::take(uint64_t id, int64_t tokens, SavedConversation& out, std::string& error,
@@ -473,6 +631,7 @@ bool ConversationDiskTier::take(uint64_t id, int64_t tokens, SavedConversation& 
     const Entry want = entries_[index];
     const std::vector<std::string>& files = want.files;
     remove_locked(index, false);   // the entry goes now; its files are deleted after the read, whatever it gives
+    if (guarded_ == id) guarded_ = 0;
     lock.unlock();
     const SessionFileIdentity fid = file_identity();
     SessionReadLimits limits;
@@ -563,10 +722,11 @@ size_t ConversationDiskTier::clear() {
 std::string ConversationDiskTier::summary() const {
     std::lock_guard<std::mutex> lock(m_);
     const auto& s = stats_;
-    return fmt("totals: %zu queued, %zu written (%.0f MiB, %.0f MB/s), %zu RAM hits, %zu disk hits (%.0f MiB, "
-               "%.0f MB/s), %llu prompt tokens given back, %zu waits for RAM (%.0f ms), "
+    return fmt("totals: %zu queued, %zu written (%zu streamed; %.0f MiB, %.0f MB/s), %zu RAM hits, %zu disk hits "
+               "(%zu streamed; %.0f MiB, %.0f MB/s), %llu prompt tokens given back, %zu waits for RAM (%.0f ms), "
                "%zu removed for the budget, %zu/%zu writes/reads failed; on disk %zu (%.0f MiB), queue %zu",
-               s.queued, s.written, mib(s.bytes_written), mbps(s.bytes_written, s.write_ms), s.ram_hits, s.disk_hits,
+               s.queued, s.written, s.streamed_writes, mib(s.bytes_written), mbps(s.bytes_written, s.write_ms),
+               s.ram_hits, s.disk_hits, s.streamed_reads,
                mib(s.bytes_read), mbps(s.bytes_read, s.read_ms), (unsigned long long) s.tokens_back, s.waits,
                s.wait_ms, s.evicted, s.write_failed, s.read_failed, entries_.size(), mib(bytes_),
                queue_.size() + (writing_ ? 1 : 0));

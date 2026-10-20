@@ -37,6 +37,7 @@ struct ConversationDiskOptions {
 /// What the tier did since it started (diagnostics).
 struct ConversationDiskStats {
     size_t queued = 0, written = 0, write_failed = 0, ram_hits = 0, disk_hits = 0, read_failed = 0;
+    size_t streamed_writes = 0, streamed_reads = 0;   ///< write_now / take_stream (no RAM image)
     size_t evicted = 0, waits = 0;
     uint64_t bytes_written = 0, bytes_read = 0;
     uint64_t tokens_back = 0;                 ///< prompt tokens given back (not read again) by ram or disk hits
@@ -68,6 +69,8 @@ public:
         bool live = false;
         uint64_t bytes = 0;     ///< the entry's files (queued: the image's estimate)
         bool queued = false;    ///< still in RAM: take() hands it back without reading a file
+        int64_t length = 0;     ///< the entry's live tokens (a checkpoint match restores the whole entry)
+        size_t checkpoints = 0; ///< how many checkpoints it holds (a streamed read keeps them and the live state in RAM)
     };
     /// The longest prefix of `prompt` an entry holds (its live state or its checkpoint), queued or on the disk, as
     /// ConversationCache::best; ties prefer the newest entry.
@@ -79,7 +82,8 @@ public:
             if (e.cvec != cvec) return;
             auto consider = [&](const ConversationCheckpoint& c, bool live) {
                 const int64_t n = conversation_prefix(c, prompt, images);
-                if (n > best.tokens || (n == best.tokens && n > 0 && e.id > best.id)) best = {e.id, n, live, e.bytes, queued};
+                if (n > best.tokens || (n == best.tokens && n > 0 && e.id > best.id))
+                    best = {e.id, n, live, e.bytes, queued, (int64_t) e.live.ids.size(), e.checkpoints.size()};
             };
             consider(e.live, true);
             for (const auto& c : e.checkpoints) consider(c, false);
@@ -96,6 +100,25 @@ public:
     /// the request reuses (diagnostics).  On failure `out` is empty and `error` says why.
     bool take(uint64_t id, int64_t tokens, SavedConversation& out, std::string& error,
               const std::function<bool(uint64_t need_bytes, std::string& why)>& admit = {});
+
+    /// Streamed park (when RAM cannot hold the image): writes `meta` (everything but the K/V) with its K/V pulled
+    /// from `kv` straight into the file, on the caller's thread, and adds the entry.  `estimate` (the file's size,
+    /// about) makes room under the budget first.  A single-stage image only.  False when the tier is off, the image
+    /// is over the budget or the write failed (`error`); nothing is left on the disk then.
+    bool write_now(const SavedConversation& meta, const std::vector<SessionKvSource>& kv, uint64_t estimate,
+                   std::string& error);
+    /// Streamed read (when RAM cannot hold the image): as take(), but the K/V goes to `sink` as it is read and `meta`
+    /// gets the rest (meta.kv: headers only).  A single-stage entry on the disk only (not queued: take() hands those
+    /// back from RAM).  The entry leaves the tier either way.  `sink.wrote` says whether the K/V reached the sink.
+    /// `limits`: the reader's bounds (geometry, tokens, checkpoints, state sizes); its kv_sink is set here.
+    bool take_stream(uint64_t id, int64_t tokens, SessionKvSink& sink, SavedConversation& meta, std::string& error,
+                     const SessionReadLimits& limits = {});
+    /// Keeps entry `id` out of the budget's evictions until take()/take_stream() takes it or unguard(): the file a
+    /// request will stream in once the outgoing conversation is parked, which that park's write must not remove.
+    void guard(uint64_t id);
+    void unguard();
+    /// The number of files entry `id` is in (0: not on the disk, or queued / being written).
+    size_t files_of(uint64_t id) const;
 
     /// Whether images wait in the queue or are being written (their RAM is not back yet).
     bool pending() const;
@@ -129,6 +152,9 @@ private:
     };
     void writer();
     void write(Job& job);                                    // without the lock
+    // m_ held: oldest out (not the guarded one) until `incoming` fits beside the files and the writes in flight
+    void make_room_locked(uint64_t incoming, size_t& removed);
+    std::string file_name(uint64_t id, size_t stage) const;
     void remove_locked(size_t index, bool delete_files);     // m_ held
     void log(const std::string& line) const;
     SessionFileIdentity file_identity() const;
@@ -139,6 +165,8 @@ private:
     ConversationDiskOptions options_;
     bool open_ = false;
     uint64_t nonce_ = 0, next_id_ = 0, bytes_ = 0;
+    uint64_t inflight_ = 0;       ///< the writes under way (the writer's and write_now's), counted against the budget
+    uint64_t guarded_ = 0;        ///< guard(): the entry the budget does not evict
     mutable std::mutex m_;
     std::condition_variable cv_;
     std::deque<Entry> entries_;   ///< on the disk, oldest first

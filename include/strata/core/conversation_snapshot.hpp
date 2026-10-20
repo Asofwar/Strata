@@ -5,7 +5,10 @@
 #include "strata/core/layer.hpp"
 #include "strata/core/session.hpp"
 
+#include <array>
+#include <memory>
 #include <string>
+#include <vector>
 
 namespace strata::core {
 
@@ -46,6 +49,16 @@ bool conversation_kv_verify(const ConversationKv& image, const QsaState& state, 
 // conversation_kv_save).  Caller synchronizes the device first and keeps the state untouched while it is read.
 bool conversation_kv_source(SessionKvSource& source, const QsaState& state, const ModelGeometry& g,
                             int64_t upto, bool include_index, std::string& error);
+// Disk restore without a host image (the reverse of conversation_kv_source): `header` - a K/V layer as a session file
+// describes it, buffers empty - checked against this state at `upto` tokens, and the bytes each part must hold.
+bool conversation_kv_sink_check(const ConversationKv& header, const QsaState& state, const ModelGeometry& g,
+                                int64_t upto, bool include_index, std::array<uint64_t, 5>& sizes, std::string& error);
+// Bytes [offset, offset + n) of part `part` (k, v, k_scale, v_scale, pooled) into the authoritative pool, complete on
+// return.  The caller has checked the bounds against conversation_kv_sink_check's sizes and synchronized the device.
+bool conversation_kv_sink_write(const QsaState& state, size_t part, uint64_t offset, const void* data, size_t n,
+                                std::string& error);
+// After the last write: a streamed state's VRAM slots and a draft ring refilled from the pools (as a restore ends).
+bool conversation_kv_sink_finish(const QsaState& state, const ModelGeometry& g, int64_t upto, std::string& error);
 // The bytes of each K/V part (k, v, k_scale, v_scale, pooled) a snapshot of `upto` tokens holds: no state read.
 bool conversation_kv_part_sizes(const QsaState& state, const ModelGeometry& g, int64_t upto, bool include_index,
                                 std::array<uint64_t, 5>& sizes, std::string& error);
@@ -106,6 +119,30 @@ bool conversation_snapshot_sources(SavedConversation& meta, std::vector<SessionK
                                    const ModelGeometry& g, const QsaState& draft, std::string& error);
 bool conversation_snapshot_validate(const SavedConversation& image, const SessionState& session,
                                     const ModelGeometry& g, const QsaState& draft, std::string& error);
+// The same streamed sources with `draft == nullptr`: no draft layer's K/V (no --mtp).
+bool conversation_snapshot_sources(SavedConversation& meta, std::vector<SessionKvSource>& sources,
+                                   const ConversationView& view, const SessionState& session,
+                                   const ModelGeometry& g, const QsaState* draft, std::string& error);
+// Disk restore without the K/V in RAM: `sink` takes a session file's K/V layers straight into this session's pools
+// (and the draft's, unless `draft` is null).  The image's running state, geometry, layer range and layer count are
+// checked before the first byte goes to the device (the device is synchronized first); each later layer's header
+// before its own bytes (the file interleaves them), so a mismatch there is found after earlier layers were written.  `wrote` is set once a K/V byte was
+// written: from then on the session's K/V is the file's, whole or not.  After a read that SUCCEEDED,
+// conversation_snapshot_sink_finish restores the running state (meta.live); after one that failed it must still be
+// called with `restore_state` false once `wrote` is set (the streamed slots are refreshed), and the caller reads
+// the next prompt from token 0.
+struct ConversationSinkState {
+    bool wrote = false;
+    int64_t upto = 0;
+    std::vector<std::array<uint64_t, 5>> sizes;
+};
+bool conversation_snapshot_sink(SessionKvSink& sink, std::shared_ptr<ConversationSinkState>& state,
+                                SessionState& session, const ModelGeometry& g, const QsaState* draft,
+                                std::string& error);
+bool conversation_snapshot_sink_finish(const SavedConversation& meta, const ConversationSinkState& state,
+                                       SessionState& session, const ModelGeometry& g, const QsaState* draft,
+                                       bool restore_state, std::string& error);
+
 enum class ConversationRestore { restored, invalid, transfer_failed };
 // Invalid images are rejected before any CUDA call/write. Transfer failure may
 // leave partial state: caller MUST NOT continue inference from that session.
