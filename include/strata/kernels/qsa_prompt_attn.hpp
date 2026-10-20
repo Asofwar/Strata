@@ -16,6 +16,9 @@
 // Not bitwise equal to `qsa_decode_attn_batch`; `qsa_prompt_attn_parity` bounds the difference and the prompt
 // quality gate (needles, teacher-forced top-1) checks it end to end. Q4_0 KV (mode 4): each block's codes enter
 // exactly as int8 and its scale (one per 32 values) in FP32, as int8 KV's do (STRATA_PROMPT_ATTN_Q4=0: the old kernel).
+// Dense mode (ids null, 8 query heads per KV head: Qwen3.6) with fp16 or int8 KV on sm_80+: a block takes 8
+// neighbouring queries, so each K/V chunk is read once for all 8, with the same accuracy (STRATA_PROMPT_ATTN_DENSE=0:
+// one block per query, as before).
 #pragma once
 
 #include "strata/kernels/qsa_decode_attn.hpp"

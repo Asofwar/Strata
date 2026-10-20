@@ -60,7 +60,12 @@ struct ModelGeometry {
     int64_t n_mtp_layers = 0;       ///< MTP blocks inside the model file, after the trunk (qwen35moe: blk.40)
 
     constexpr bool has_indexer() const { return idx_q_heads > 0; }              ///< false: dense attention only
-    constexpr bool has_hyper_connections() const { return hc > 0; }             ///< false: plain pre-norm residual
+    /// false: a plain pre-norm residual.  hc = 0 (src/qwen35's geometry) or hc = 1 (Flash-Next's engine path running a
+    /// qwen35moe pack: one residual stream, so hc_dim() is n_embd and every buffer sized hc * n_embd keeps its formula)
+    constexpr bool has_hyper_connections() const { return hc > 1; }
+    constexpr bool has_ple() const { return family == ModelFamily::Qwen4Exp; }       ///< the per-layer embedding block
+    /// the GDN output gate: sigmoid(z) (qwen4exp) or silu(z) (qwen35moe)
+    constexpr bool gdn_gate_silu() const { return family == ModelFamily::Qwen35Moe; }
     constexpr int64_t hc_dim() const { return hc * n_embd; }
     /// `layer % qsa_interval == qsa_interval - 1` is full attention.  Derived, not a second list.
     constexpr int64_t n_qsa_layers() const { return n_layers / qsa_interval; }

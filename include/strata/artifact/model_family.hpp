@@ -49,9 +49,16 @@ inline const char* model_family_title(ModelFamily f) {
 }
 
 /// Whether Flash-Next's engine path runs the family.  Qwen3.6 has an engine path of its own (src/qwen35), which the
-/// CUDA and HIP builds of `strata` switch to at the top of main(); the Intel Arc (SYCL) build has none yet, so there
-/// (and on Flash-Next's path) the family is refused with `model_family_not_supported`.
-inline bool model_family_runs(ModelFamily f) { return f == ModelFamily::Qwen4Exp; }
+/// CUDA and HIP builds of `strata` switch to at the top of main() for a file given without --pack; from a Strata pack
+/// (--pack) the CUDA and HIP builds run it on Flash-Next's path too (STRATA_MAIN_QWEN35, docs/QWEN36_PACK.md).  The
+/// Intel Arc (SYCL) build has neither, so there the family is refused with `model_family_not_supported`.
+inline bool model_family_runs(ModelFamily f) {
+#if defined(STRATA_MAIN_QWEN35)
+    return f == ModelFamily::Qwen4Exp || f == ModelFamily::Qwen35Moe;
+#else
+    return f == ModelFamily::Qwen4Exp;
+#endif
+}
 
 /// The refusal for a recognised family the engine does not run (empty when it runs it).
 inline std::string model_family_not_supported(ModelFamily f) {

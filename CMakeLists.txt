@@ -96,6 +96,11 @@ option(STRATA_Q6K_EXPERTS "Build the Q6_K gate/up grouped expert kernels (UD-Q6_
 if(STRATA_Q6K_EXPERTS)
   add_compile_definitions(STRATA_Q6K_EXPERTS=1)
 endif()
+# Qwen3.6-35B-A3B / Ornith-1.5 (qwen35moe) on Flash-Next's engine path, from a Strata pack (`--pack`: int8 KV, the expert
+# cache, MTP drafts; docs/QWEN36_PACK.md).  CUDA and HIP builds; a qwen35moe file without --pack runs on src/qwen35.
+if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
+  add_compile_definitions(STRATA_MAIN_QWEN35=1)
+endif()
 option(STRATA_ORCA_Q4KS_MMQ "Build the GGML Q5_0 MMQ instance for OrcaRouter Q4_K_S" OFF)
 # CUDA: the pointer-table MMQ behind STRATA_MMQ_DIRECT=1 (the prompt path's MMQ reads resident experts in their cache
 # slots through a Strata-side copy of llama.cpp's MMQ scheduler, src/prefill/moe_mmq_tab.cuh).  Off by default, like
@@ -413,6 +418,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
                           src/kernels/cuda/fused_gr.cu
                           src/kernels/cuda/cvec.cu
                           src/kernels/cuda/qsa_decode_attn.cu
+                          src/kernels/cuda/qsa_decode_attn_g8.cu
                           src/kernels/cuda/qsa_prompt_attn.cu
                           src/kernels/cuda/fused_gdn.cu
                           src/kernels/cuda/dequant_bf16.cu

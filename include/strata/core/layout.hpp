@@ -22,7 +22,15 @@
 #include <cstdint>
 #include <string>
 
+namespace strata { class GgufFile; }
+
 namespace strata::core {
+
+/// Flash-Next's engine path takes `g` (core::geometry_from_gguf of the metadata shard `f`): "" when it runs it, else
+/// the first field it cannot.  qwen4exp: the shape its kernels are compiled for (compiled_geometry_mismatch).
+/// qwen35moe (from a Strata pack): within Flash-Next's sizes, with the widths the kernels are written for; sets hc = 1
+/// (one residual stream) for the engine's buffers.
+std::string main_engine_geometry(const GgufFile& f, ModelGeometry& g);
 
 /// The shapes the QSA kernels want, every one from the model's geometry; only the KV page size is the
 /// kernels' own choice (`qsa_real_shapes`).
@@ -36,6 +44,7 @@ inline strata::kernels::QsaShapes qsa_shapes(const ModelGeometry& g) {
     s.idx_dim = g.idx_key_dim;
     s.idx_block = g.idx_block;
     s.idx_top_k = g.idx_top_k;
+    if (!g.has_indexer()) s.idx_top_k = strata::kernels::kDenseTopK;   // dense attention (qwen35moe): every cell
     return s;
 }
 

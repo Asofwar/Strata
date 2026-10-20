@@ -1,6 +1,9 @@
 // src/core/layout.cpp - the shape checks.  See the header for why this exists.
 #include "strata/core/layout.hpp"
 
+#include "strata/artifact/gguf_reader.hpp"
+#include "strata/core/family_layout.hpp"
+
 #include <cstdio>
 
 namespace strata::core {
@@ -133,6 +136,46 @@ bool check_one(const WeightTable& t, const ModelGeometry& g, int64_t layer, std:
 }
 
 }  // namespace
+
+std::string main_engine_geometry(const GgufFile& f, ModelGeometry& g) {
+    if (g.family != strata::ModelFamily::Qwen35Moe) return compiled_geometry_mismatch(g);
+    // Qwen3.6-35B-A3B / Ornith (qwen35moe) from a Strata pack: one residual stream (hc = 1: hc_dim() is n_embd, so every
+    // buffer sized hc * n_embd keeps its formula), no PLE block, no indexer (every cached cell is attended), the GDN
+    // output gate silu(z).  The widths must be the ones the kernels are written for (head 256 with 64 rotated dims, GDN
+    // state 128 and conv 4), and every count at most Flash-Next's: buffers sized by its compile-time numbers then hold
+    // the smaller model unchanged.
+    int64_t n_rot = 0;
+    if (const MetaValue* v = f.get("qwen35moe.rope.dimension_count"))
+        if (v->is_num()) n_rot = (int64_t) v->u;
+    g.hc = 1;
+    g.hc_lr = 0;
+    const ModelGeometry& cap = kCompiledGeometry;
+    char buf[256];
+    auto bad = [&](const char* what, int64_t got, const char* want) {
+        std::snprintf(buf, sizeof buf, "qwen35moe: %s is %lld; this engine supports %s", what, (long long) got, want);
+        return std::string(buf);
+    };
+    if (g.head_dim != cap.head_dim) return bad("attention.key_length", g.head_dim, "256");
+    if (n_rot != 64) return bad("rope.dimension_count", n_rot, "64");
+    if (g.ssm_state_size != cap.ssm_state_size) return bad("ssm.state_size", g.ssm_state_size, "128");
+    if (g.ssm_d_conv != cap.ssm_d_conv) return bad("ssm.conv_kernel", g.ssm_d_conv, "4");
+    if (g.qsa_interval != cap.qsa_interval) return bad("full_attention_interval", g.qsa_interval, "4");
+    if (g.n_layers <= 0 || g.n_layers > cap.n_layers || g.n_layers % g.qsa_interval != 0)
+        return bad("block_count - nextn_predict_layers", g.n_layers, "a multiple of 4, at most 48");
+    if (g.n_mtp_layers < 0 || g.n_mtp_layers > 1) return bad("nextn_predict_layers", g.n_mtp_layers, "0 or 1");
+    if (g.n_embd <= 0 || g.n_embd > cap.n_embd || g.n_embd % 256 != 0)
+        return bad("embedding_length", g.n_embd, "a multiple of 256, at most 2560");
+    if (g.n_head > cap.n_head) return bad("attention.head_count", g.n_head, "at most 24");
+    if (g.n_head_kv != cap.n_head_kv) return bad("attention.head_count_kv", g.n_head_kv, "2");
+    if (g.ssm_k_heads > cap.ssm_k_heads) return bad("ssm.group_count", g.ssm_k_heads, "at most 16");
+    if (g.ssm_v_heads > cap.ssm_v_heads) return bad("ssm.time_step_rank", g.ssm_v_heads, "at most 48");
+    if (g.n_expert > cap.n_expert) return bad("expert_count", g.n_expert, "at most 512");
+    if (g.n_expert_used > cap.n_expert_used) return bad("expert_used_count", g.n_expert_used, "at most 10");
+    if (g.n_ff > cap.n_ff || g.n_ff % 256 != 0)
+        return bad("expert_feed_forward_length", g.n_ff, "a multiple of 256, at most 640");
+    if (g.n_ff_shexp != g.n_ff) return bad("expert_shared_feed_forward_length", g.n_ff_shexp, "expert_feed_forward_length");
+    return {};
+}
 
 std::string LayerView::name(const char* suffix) const {
     return "blk." + std::to_string(layer_) + "." + suffix;

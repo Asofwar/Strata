@@ -206,8 +206,12 @@ int main(int argc, char** argv) {
         check(strata::check_architecture(b).empty(), "the architecture guard accepts qwen4exp");
         check(strata::check_architecture(c).find("'llama'") != std::string::npos, "and refuses llama, naming it");
         const std::string e = strata::check_engine_architecture(a);
+#if defined(STRATA_MAIN_QWEN35)
+        check(e.empty(), "the engine guard runs Qwen3.6 (Flash-Next's engine path from a pack, STRATA_MAIN_QWEN35)");
+#else
         check(e.find("Qwen3.6-35B-A3B") != std::string::npos && e.find("does not run it yet") != std::string::npos,
               "the engine guard refuses Qwen3.6: recognised, not supported yet");
+#endif
         check(strata::check_engine_architecture(b).empty(), "the engine guard runs qwen4exp");
         std::vector<Kv> kv = metadata("qwen35moe", kQwen36, 8);
         for (auto it = kv.begin(); it != kv.end(); ++it)

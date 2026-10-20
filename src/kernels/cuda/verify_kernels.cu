@@ -282,6 +282,13 @@ __device__ __forceinline__ void gdn_q8_1_store(GdnQ81* __restrict__ xq, size_t i
     if (idx % 32 == 0) xq[idx / 32].ds = q8_1_ds(d, sum);   // #606: clamped (the QFUSE path bypassed the finite helper)
 }
 
+// The GDN output gate on z: sigmoid (qwen4exp) or silu = z * sigmoid(z) (qwen35moe, llama.cpp's build_norm_gated).
+// The sigmoid branch is the expression the kernels always used.
+__device__ __forceinline__ float gdn_out_gate(float zz, int silu) {
+    const float sg = 1.0f / (1.0f + __expf(-zz));
+    return silu ? zz * sg : sg;
+}
+
 template <bool ALL_OUT, bool Q>
 __global__ void __launch_bounds__(S * RG) gdn_step_norm_multi_kernel(float* __restrict__ state,
                                                                      const float* __restrict__ hbuf, int C,
@@ -291,7 +298,7 @@ __global__ void __launch_bounds__(S * RG) gdn_step_norm_multi_kernel(float* __re
                                                                      const float* __restrict__ gamma, float eps,
                                                                      float* __restrict__ y, int h_k, int h_v, int T,
                                                                      const int32_t* __restrict__ n_keep, int t_out_begin,
-                                                                     GdnQ81* __restrict__ xq, GdnGroups grp = {}) {
+                                                                     GdnQ81* __restrict__ xq, int silu, GdnGroups grp = {}) {
     if (grp.n > 0) {   // group blockIdx.y - its slot's state and its rows of the window's buffers
         const int gi = blockIdx.y, f = grp.first[gi];
         state = grp.state[gi];
@@ -370,7 +377,7 @@ __global__ void __launch_bounds__(S * RG) gdn_step_norm_multi_kernel(float* __re
             const float ss = wsum[0] + wsum[1] + wsum[2] + wsum[3];
             const float scale = rsqrtf(ss / (float) S + eps);
             const float zz = z[(size_t) t * value_dim + head * S + col];
-            const float yv = oc * scale * gam * (1.0f / (1.0f + __expf(-zz)));
+            const float yv = oc * scale * gam * gdn_out_gate(zz, silu);
             y[(size_t) t * value_dim + head * S + col] = yv;
             if constexpr (Q) gdn_q8_1_store(xq, (size_t) (t - t_out_begin) * value_dim + head * S + col, yv);
         }
@@ -524,7 +531,7 @@ template<bool Q>
 __global__ void __launch_bounds__(S * RG) gdn_out_norm_kernel(const float* __restrict__ z, const float* __restrict__ gamma,
                                                              float eps, float* __restrict__ y, int h_v, int T,
                                                              const int32_t* __restrict__ n_keep, int t_out_begin,
-                                                             GdnQ81* __restrict__ xq) {
+                                                             GdnQ81* __restrict__ xq, int silu) {
     __shared__ float wsum[S * RG / 32];
     const int head = blockIdx.x, t = blockIdx.y + t_out_begin, col = threadIdx.x, rg = threadIdx.y;
     const int tid = rg * S + col;
@@ -544,11 +551,11 @@ __global__ void __launch_bounds__(S * RG) gdn_out_norm_kernel(const float* __res
         const float scale = rsqrtf(ss / (float) S + eps);
         const float zz = z[(size_t) t * value_dim + head * S + col];
         if constexpr (Q) {
-            const float yv = oc * scale * gamma[col] * (1.0f / (1.0f + __expf(-zz)));
+            const float yv = oc * scale * gamma[col] * gdn_out_gate(zz, silu);
             y[(size_t) t * value_dim + head * S + col] = yv;
             gdn_q8_1_store(xq, (size_t) (t - t_out_begin) * value_dim + head * S + col, yv);
         } else {
-            y[(size_t) t * value_dim + head * S + col] = oc * scale * gamma[col] * (1.0f / (1.0f + __expf(-zz)));
+            y[(size_t) t * value_dim + head * S + col] = oc * scale * gamma[col] * gdn_out_gate(zz, silu);
         }
     }
 }
@@ -1084,6 +1091,9 @@ void gdn_ab_multi(const float* x, const uint16_t* w_alpha, const uint16_t* w_bet
     check("gdn_ab_multi");
 }
 
+namespace { int g_gdn_silu = 0; }
+void gdn_set_out_gate_silu(bool silu) { g_gdn_silu = silu ? 1 : 0; }
+
 void gdn_step_norm_groups(const GdnGroups& groups, const float* h, int conv_channels, const float* gate, const float* beta,
                           const float* z, const float* gamma, float eps, float* y, int h_k, int h_v, bool commit,
                           void* stream) {
@@ -1101,10 +1111,10 @@ void gdn_step_norm_groups(const GdnGroups& groups, const float* h, int conv_chan
     // one-row groups (keep, t_out_begin 0)
     if (commit)
         gdn_step_norm_multi_kernel<false, false><<<g1, b1, 0, (cudaStream_t) stream>>>(
-            nullptr, h, conv_channels, gate, beta, z, gamma, eps, y, h_k, h_v, 0, nullptr, 0, nullptr, groups);
+            nullptr, h, conv_channels, gate, beta, z, gamma, eps, y, h_k, h_v, 0, nullptr, 0, nullptr, g_gdn_silu, groups);
     else
         gdn_step_norm_multi_kernel<true, false><<<g1, b1, 0, (cudaStream_t) stream>>>(
-            nullptr, h, conv_channels, gate, beta, z, gamma, eps, y, h_k, h_v, 0, nullptr, 0, nullptr, groups);
+            nullptr, h, conv_channels, gate, beta, z, gamma, eps, y, h_k, h_v, 0, nullptr, 0, nullptr, g_gdn_silu, groups);
     check("gdn_step_norm_groups");
 }
 
@@ -1129,8 +1139,8 @@ void gdn_step_norm_multi(float* state, const float* h, int conv_channels, const 
             gdn_step_split_kernel<true><<<grid, block, 0, (cudaStream_t) stream>>>(
                 state, h, conv_channels, gate, beta, y, h_k, h_v, n_tok, n_keep, t_out_begin);
             const dim3 ng((unsigned) h_v, (unsigned) (n_tok - t_out_begin));
-            if (xq) gdn_out_norm_kernel<true><<<ng, dim3(S, RG), 0, (cudaStream_t) stream>>>(z, gamma, eps, y, h_v, n_tok, n_keep, t_out_begin, xq);
-            else gdn_out_norm_kernel<false><<<ng, dim3(S, RG), 0, (cudaStream_t) stream>>>(z, gamma, eps, y, h_v, n_tok, n_keep, t_out_begin, nullptr);
+            if (xq) gdn_out_norm_kernel<true><<<ng, dim3(S, RG), 0, (cudaStream_t) stream>>>(z, gamma, eps, y, h_v, n_tok, n_keep, t_out_begin, xq, g_gdn_silu);
+            else gdn_out_norm_kernel<false><<<ng, dim3(S, RG), 0, (cudaStream_t) stream>>>(z, gamma, eps, y, h_v, n_tok, n_keep, t_out_begin, nullptr, g_gdn_silu);
         }
         check("gdn_step_norm_multi (split)");
         return;
@@ -1152,15 +1162,15 @@ void gdn_step_norm_multi(float* state, const float* h, int conv_channels, const 
     const bool all_out = n_keep == nullptr && t_out_begin <= 0;
     if (xq && t_out_begin < n_tok) {
         if (all_out) gdn_step_norm_multi_kernel<true, true><<<g1, b1, 0, (cudaStream_t) stream>>>(
-            state, h, conv_channels, gate, beta, z, gamma, eps, y, h_k, h_v, n_tok, nullptr, 0, xq);
+            state, h, conv_channels, gate, beta, z, gamma, eps, y, h_k, h_v, n_tok, nullptr, 0, xq, g_gdn_silu);
         else gdn_step_norm_multi_kernel<false, true><<<g1, b1, 0, (cudaStream_t) stream>>>(
-            state, h, conv_channels, gate, beta, z, gamma, eps, y, h_k, h_v, n_tok, n_keep, t_out_begin, xq);
+            state, h, conv_channels, gate, beta, z, gamma, eps, y, h_k, h_v, n_tok, n_keep, t_out_begin, xq, g_gdn_silu);
     } else if (all_out) {
         gdn_step_norm_multi_kernel<true, false><<<g1, b1, 0, (cudaStream_t) stream>>>(
-            state, h, conv_channels, gate, beta, z, gamma, eps, y, h_k, h_v, n_tok, nullptr, 0, nullptr);
+            state, h, conv_channels, gate, beta, z, gamma, eps, y, h_k, h_v, n_tok, nullptr, 0, nullptr, g_gdn_silu);
     } else {
         gdn_step_norm_multi_kernel<false, false><<<g1, b1, 0, (cudaStream_t) stream>>>(
-            state, h, conv_channels, gate, beta, z, gamma, eps, y, h_k, h_v, n_tok, n_keep, t_out_begin, nullptr);
+            state, h, conv_channels, gate, beta, z, gamma, eps, y, h_k, h_v, n_tok, n_keep, t_out_begin, nullptr, g_gdn_silu);
     }
     check("gdn_step_norm_multi");
 }

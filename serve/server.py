@@ -3480,6 +3480,7 @@ class Service:
         self.shared = {}                              # the web app's Chat settings for every client (POST /settings)
         self.shared_path = None                       # where they are kept between starts (next to the config)
         self.config_effort = None                     # #1641: the config's "reasoning_effort": the level for requests with none
+        self.config_preserve = None                   # the config's "preserve_thinking": true/false, or None (the template's)
         self.keep_awake = None                        # #1727 (opt-in): serve.keepawake.KeepAwake, the config's "prevent_sleep"
         self.fifo = threading.Lock()
         self.slot_save_path = None                    # --slot-save-path: /slots/0?action=save|restore (off when None)
@@ -4110,7 +4111,8 @@ class Service:
         """The request with the shared thinking level and max tokens filled in where it has none of its own."""
         s = self.shared
         effort = self.effort_default()
-        if not s and not effort:
+        preserve = s.get("preserve_thinking", self.config_preserve)  # the Chat settings first, then the config's
+        if not s and not effort and preserve is None:
             return req
         req = dict(req)
         if "max_tokens" in s and not req.get("max_tokens") and not req.get("max_completion_tokens"):
@@ -4126,6 +4128,12 @@ class Service:
                     req["thinking"] = {"type": "disabled"}
                 else:
                     req["output_config"] = {"effort": effort}
+        if preserve is not None:
+            # The template's preserve_thinking (keep the reasoning of turns before the latest user message), for both
+            # APIs: openai_to_messages and anthropic_to_messages read chat_template_kwargs; the request's own value wins.
+            ctk = req.get("chat_template_kwargs") if isinstance(req.get("chat_template_kwargs"), dict) else {}
+            if "preserve_thinking" not in ctk:
+                req["chat_template_kwargs"] = {**ctk, "preserve_thinking": bool(preserve)}
         return req
 
     def start_telemetry(self):
@@ -7323,6 +7331,9 @@ def clean_shared_defaults(d) -> dict:
         elif key == "experimental_speed_projection":
             if not isinstance(value, bool):
                 raise ValueError("experimental_speed_projection: true or false")
+        elif key == "preserve_thinking":
+            if not isinstance(value, bool):
+                raise ValueError("preserve_thinking: true or false")
         else:
             raise ValueError(f"unknown setting {key!r}")
         out[key] = float(value) if key in ("temperature", "top_p") else value
@@ -7975,6 +7986,12 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         if svc.config_effort:
             print(f"[strata] thinking level: {svc.config_effort} (reasoning_effort in the config; a request, or the "
                   "Chat settings shared with other apps, can set its own)", flush=True)
+    if cfg.get("preserve_thinking") is not None:        # like llama.cpp's --reasoning-preserve: opt-in
+        if not isinstance(cfg["preserve_thinking"], bool):
+            raise SystemExit(f"[strata] config \"preserve_thinking\" must be true or false, not {cfg['preserve_thinking']!r}")
+        svc.config_preserve = cfg["preserve_thinking"]
+        print(f"[strata] earlier turns' reasoning: {'kept' if svc.config_preserve else 'dropped'} (preserve_thinking in "
+              "the config; a request's chat_template_kwargs can set its own)", flush=True)
     svc.codex_thread_titles = cfg.get("codex_thread_titles") is True    # #923: opt-in, off by default
     svc.codex_compaction_cache = cfg.get("codex_compaction_cache") is True   # #924: opt-in, off by default
     try:
