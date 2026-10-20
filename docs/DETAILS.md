@@ -2138,6 +2138,13 @@ that value with `--pcie-frac`. Likewise on a machine where the prompt CPU share 
 `STRATA_PREFILL_CPU_SHARE=x` keeps part of it. Not tested: HIP and SYCL builds, layer splits, batch slots, sampled
 requests.
 
+On the 0.1.46 port (Cyber-Tiel-Coder-35B-A3B UD-IQ4_XS from a pack, the same RTX 5080, 262K context, `--kv int8`,
+`--spec 4`, the config's switches; one-shot generate, 256 greedy tokens): three starts with the mode gave the same
+tokens for a 300-token and a 2,048-token prompt (3/3 each), where runs without it differ after 12-90 tokens. The mode
+also keeps 0.1.46's `STRATA_PCIE_BALANCE=1` off (its counts come from measured round times). Speed, one run per arm:
+decode 189-215 tok/s with the mode against 234 without at 300 tokens, 172-194 against 205 at 2,048 - not a paired
+measurement.
+
 ## More opt-in switches measured for 0.1.41 (all off unless you set them)
 
 None of these changes the default answers; each was measured against the default with interleaved off/on pairs of whole
