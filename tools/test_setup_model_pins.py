@@ -80,6 +80,8 @@ class EveryFileIsPinned(unittest.TestCase):
 
     def test_the_picture_reader_of_every_family(self):
         for name, fam in {**setup.FAMILIES, **setup.OWN_PATH_FAMILIES}.items():
+            if fam.get("mmproj", "") is None:           # no image encoder offered (the pack families)
+                continue
             with self.subTest(family=name):
                 self.pinned(fam["mmproj_hf"] + fam["mmproj"])
 

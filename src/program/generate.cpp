@@ -2364,7 +2364,10 @@ int main(int argc, char** argv) {
         }
         // `strata --families`: the GGUF architectures this build runs (setup asks before it installs one)
         if (std::strcmp(argv[i], "--families") == 0) {
-#if defined(STRATA_HAVE_QWEN35)
+            // qwen35moe-pack: a qwen35moe file from a Strata pack on this engine path (STRATA_MAIN_QWEN35)
+#if defined(STRATA_MAIN_QWEN35)
+            std::printf("qwen4exp qwen35moe qwen35moe-pack\n");
+#elif defined(STRATA_HAVE_QWEN35)
             std::printf("qwen4exp qwen35moe\n");
 #else
             std::printf("qwen4exp\n");

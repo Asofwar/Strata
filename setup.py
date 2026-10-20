@@ -92,6 +92,8 @@ HF_REVISIONS = {
     "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF": "5348543e0147355ac9cbcb031184a3546350988e",  # 2026-09-29
     "unsloth/Qwen3.8-Flash-Next-GGUF": "38bb39ee97821de2c9009abb7e93950eec396e66",                   # 2026-09-30
     "unsloth/Qwen3.6-35B-A3B-MTP-GGUF": "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d",                  # 2026-10-12
+    "mradermacher/Huihui-Ornith-1.5-35B-A3B-abliterated-i1-GGUF": "bb7ed149cb070175c6b130fa8827672550abda86",
+    "peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP": "fa19d4f33561dc0d107c2a2f8943f1ca2e288109",
     "agentionai/Qwen3.8-Flash-Next-Gyro-GGUF": "1ada08422e404aca51ab9df665f089f34c419c6b",           # 2026-10-13
 }
 
@@ -646,6 +648,63 @@ OWN_PATH_FAMILIES = {
                # the 30 GDN layers (state_gb)
                "vision": True, "state_gb": 0.07}
 }
+# Two fine-tunes of the same architecture (qwen35moe) that run on Flash-Next's engine path from a Strata pack ("pack":
+# True; docs/QWEN36_PACK.md): int8 KV, the expert cache with the Qwen3.6 expert profile, MTP drafts from the file's own
+# draft layer (--spec 4, --mtp the GGUF, --mtp-draft-vocab), so long contexts (100K-262K) fit a 16 GB card.  The same
+# menu and installer as qwen36 (install_own_path, its pack branch); no images (their mmproj is untested here).
+# Huihui-Ornith-1.5-35B-A3B-abliterated (mradermacher's weighted i1 single-file GGUFs) at the pinned revision
+ORNITH_ABL_FILES = {
+    "Huihui-Ornith-1.5-35B-A3B-abliterated.i1-IQ4_XS.gguf":
+        (19179522560, "00d64f25fc2a86148b00425c5852f7dfbaf4fad94d54d8eb53d92a0c2a925f79"),
+    "Huihui-Ornith-1.5-35B-A3B-abliterated.i1-IQ3_S.gguf":
+        (15615414784, "74e986115c3621f40a0825dcbf00c62c633fc963dc0ca7798557e215ef52e795"),
+}
+# Cyber-Tiel-Coder-35B-A3B's files at the pinned revision.  Its repository also has mmproj-BF16.gguf (902,822,016 bytes,
+# d9ce31026d1cb1f3f8d5152e2e2a014d9d2b302b6c93a7dc07bb0a0487f52837): untested here, so no images
+CYBER_TIEL_FILES = {
+    "Cyber-Tiel-Coder-35B-A3B-MTP-UD-IQ4_XS.gguf":
+        (18119934272, "33492edef3744830f3f45d8b1e1be2444c54c82945c6875df055e9440a44b4fc"),
+    "Cyber-Tiel-Coder-35B-A3B-MTP-UD-IQ3_XXS.gguf":
+        (13600579904, "d60adb32312166b49ceffbd10aed297aee69626b45ec4e720700450ee048bd0e"),
+}
+# The pack path's KV cache per context token: int8 K and V with one fp16 scale per 64 values, 10 attention layers and
+# the MTP block, 2 KV heads x 256
+PACK_KV_BYTES_PER_TOKEN = 11 * 2 * 2 * (256 + 256 // 64 * 2)
+# RAM: the experts (arena_gb, measured where said) + ~10.7 GB, as the 35B-A3B sizes measured on the pack path
+OWN_PATH_FAMILIES.update({
+    "ornith-abl": {"title": "Huihui-Ornith-1.5-35B-A3B-abliterated", "pack": True, "arch": "qwen35moe",
+                   "by": "huihui-ai's abliterated Ornith-1.5; mradermacher's i1 GGUFs",
+                   "about": "Ornith-1.5 (an agentic-coding fine-tune of Qwen3.6-35B-A3B) with its refusals removed; "
+                            "long contexts on 16 GB cards (int8 KV, a Strata pack); no images",
+                   "hf": hf("mradermacher/Huihui-Ornith-1.5-35B-A3B-abliterated-i1-GGUF"),
+                   "file": "Huihui-Ornith-1.5-35B-A3B-abliterated.i1-{q}.gguf", "tag": "ornithabl-",
+                   "mmproj": None, "vision": False, "name": "huihui-ornith-1.5-35b-a3b-abliterated",
+                   "license": "MIT: https://huggingface.co/huihui-ai/Huihui-Ornith-1.5-35B-A3B-abliterated",
+                   # IQ4_XS: experts 15.94 GiB = 17.1 GB (measured); IQ3_S: ~13.6 GB (estimated: the file less the
+                   # ~2.1 GB that is not experts in the IQ4_XS file)
+                   "models": {"IQ4_XS": {"about": "~4-bit i-quant (mradermacher i1), the recommended size: ~16 GiB of "
+                                                  "experts in RAM, comfortable on 32 GB", "ram_gb": 28, "arena_gb": 17.1},
+                              "IQ3_S": {"about": "~3.5-bit i-quant (mradermacher i1), smaller (~13.6 GB of experts, "
+                                                 "estimated)", "ram_gb": 26, "arena_gb": 13.6}},
+                   "sha256": ORNITH_ABL_FILES, "pack_args": ["--compat-bf16"], "profile": "expert-profile-qwen36.bin",
+                   "kv_bytes_per_token": PACK_KV_BYTES_PER_TOKEN, "spec": 4},
+    "cyber-tiel": {"title": "Cyber-Tiel-Coder-35B-A3B", "pack": True, "arch": "qwen35moe",
+                   "by": "peculiar-ragdoll's coding fine-tune of the abliterated Ornith-1.5",
+                   "about": "the abliterated Ornith tuned for coding, with the \"Sharp\" chat template (it thinks "
+                            "shorter); long contexts on 16 GB cards (int8 KV, a Strata pack); no images",
+                   "hf": hf("peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP"),
+                   "file": "Cyber-Tiel-Coder-35B-A3B-MTP-{q}.gguf", "tag": "cybertiel-",
+                   "mmproj": None, "vision": False, "name": "cyber-tiel-coder-35b-a3b",
+                   "license": "MIT: https://huggingface.co/peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP",
+                   # UD-IQ4_XS: experts 14.13 GiB = 15.2 GB (measured); UD-IQ3_XXS: ~11.2 GB (estimated), not run yet
+                   "models": {"UD-IQ4_XS": {"about": "~4-bit i-quant (Unsloth Dynamic style), the recommended size: "
+                                                     "~14 GiB of experts in RAM, comfortable on 32 GB",
+                                            "ram_gb": 26, "arena_gb": 15.2},
+                              "UD-IQ3_XXS": {"about": "~3-bit i-quant (Unsloth Dynamic style), smaller; not run yet",
+                                             "ram_gb": 22, "arena_gb": 11.2}},
+                   "sha256": CYBER_TIEL_FILES, "pack_args": ["--compat-bf16"], "profile": "expert-profile-qwen36.bin",
+                   "kv_bytes_per_token": PACK_KV_BYTES_PER_TOKEN, "spec": 4},
+})
 PREVIEW_FAMILIES = OWN_PATH_FAMILIES             # the earlier name (tools and tests that import it)
 
 # Every model file Strata downloads has a fixed size and SHA-256: (repository, file name) -> (bytes, sha256).  download()
@@ -657,6 +716,8 @@ REPO_PINS = {
     "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF": CODER_FILES,
     "unsloth/Qwen3.8-Flash-Next-GGUF": {**UNSLOTH_SHARDS, **UNSLOTH_IQ4_XS_SHARDS, **UNSLOTH_BIG_SHARDS},
     "unsloth/Qwen3.6-35B-A3B-MTP-GGUF": QWEN36_FILES,
+    "mradermacher/Huihui-Ornith-1.5-35B-A3B-abliterated-i1-GGUF": ORNITH_ABL_FILES,
+    "peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP": CYBER_TIEL_FILES,
     "agentionai/Qwen3.8-Flash-Next-Gyro-GGUF": GYRO_FILES,
 }
 # EXPERIMENTAL, off by default (setup asks): a control vector shipped with the repository, see its README
@@ -5784,7 +5845,8 @@ def previous_config(elsewhere_first: list, settings: dict):
 
 
 def own_path_config(cfg: dict) -> bool:
-    """A config for a family with its own engine path (Qwen3.6): its --mtp is a draft count, not a draft layer."""
+    """A config for a qwen35moe family (Qwen3.6, and the pack families): its --mtp is a draft count, or the model file's
+    own draft layer - never an MTP folder whose token subset setup refreshes."""
     return cfg.get("arch") in {d["arch"] for d in OWN_PATH_FAMILIES.values()}
 
 
@@ -5827,12 +5889,13 @@ def choices_from_config(cfg_path: Path) -> dict:
 def calibration_targets(have: list, model: str | None, family: str | None) -> list:
     """#2036: the installed configs `--calibrate --model X` (and/or --family) means; every config with neither."""
     if not (model or family):
-        return [c for c in have if choices_from_config(c)["family"] not in OWN_PATH_FAMILIES]
+        return [c for c in have if choices_from_config(c)["family"] not in OWN_PATH_FAMILIES or
+                OWN_PATH_FAMILIES[choices_from_config(c)["family"]].get("pack")]
     out = []
     for c in have:
         ch = choices_from_config(c)
-        if ch["family"] in OWN_PATH_FAMILIES:          # the tuning measures Flash-Next's engine settings
-            continue
+        if ch["family"] in OWN_PATH_FAMILIES and not OWN_PATH_FAMILIES[ch["family"]].get("pack"):
+            continue                                   # the tuning measures Flash-Next's engine settings
         if (not model or ch["model"] == model) and (not family or ch["family"] == family):
             out.append(c)
     return out
@@ -6971,8 +7034,11 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
     """Steps 2-7 for a family with its own engine path (OWN_PATH_FAMILIES: Qwen3.6-35B-A3B): the size, the context, the
     engine, the GGUF (pinned revision, size and SHA-256), the tokenizer from the GGUF, the config and the start
     script.  The engine places the experts itself (every one in VRAM when they fit, else the most-used ones there and
-    the rest on the CPU), so there is no pack, profile or RAM budget to choose."""
+    the rest on the CPU), so there is no pack, profile or RAM budget to choose.  A "pack" family (Huihui-Ornith-1.5
+    abliterated, Cyber-Tiel-Coder) runs on Flash-Next's engine path instead: a Strata pack of the GGUF, int8 KV, the expert
+    cache with the Qwen3.6 profile and MTP drafts from the file's own draft layer (docs/QWEN36_PACK.md)."""
     fam = OWN_PATH_FAMILIES[family]
+    pack_path = bool(fam.get("pack"))
     say()
     say(f"  {fam['title']} - {fam['by']}: {fam['about']}")
     ok(f"model: {fam['title']}")
@@ -7007,6 +7073,8 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
         ctx = a.context
     else:
         ctxs = [c for c in CONTEXTS if c <= 262144]   # the model's trained length; no rope scaling on this path yet
+        if pack_path:                                  # int8 KV: the whole trained length fits beside the expert cache
+            rec_ctx = 262144 if gpu.get("vram_gb", 0.0) >= 15.5 else 131072
         say()
         say("  Context length = how much text the model can see at once. Its cache takes "
             f"{fam['kv_bytes_per_token'] * 32768 / 2**30:.1f} GB of VRAM per 32K tokens, room the experts would use:")
@@ -7018,12 +7086,19 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
         warn(f"{ctx // 1024}K is past {fam['title']}'s trained 262,144 positions and this engine path has no rope "
              "scaling yet: kept as you chose, but answers past 256K are untested")
     ok(f"context: {ctx} tokens")
-    vision = own_path_vision(a, fam, gpu, hip)
+    if fam.get("vision", True):
+        vision = own_path_vision(a, fam, gpu, hip)
+    else:                                              # its encoder is untested here: no images
+        if a.vision in ("yes", "gpu", "cpu"):
+            warn(f"--vision {a.vision}: {fam['title']} has no image encoder setup offers yet: images off")
+        vision = "none"
     ok("images: " + {"none": "off", "gpu": "on", "cpu": "on (encoder on the CPU)"}[vision])
     vram_gb = float(gpu.get("vram_gb", 0.0))
     par = getattr(a, "parallel", None)
     par_said = False
-    if par is None and not a.yes:                      # offered, with its price; Enter keeps one at a time (never forced)
+    if pack_path:                                      # one request at a time: --batch is not measured on the pack path
+        par_said = True
+    elif par is None and not a.yes:                    # offered, with its price; Enter keeps one at a time (never forced)
         say()
         for line in own_path_parallel_note(None, fam, model, vram_gb, ctx):
             say("  " + line)
@@ -7032,7 +7107,11 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
             n = int(ask("How many requests at once (1 = one at a time)?", [str(i) for i in range(1, PARALLEL_MAX + 1)],
                         "1", a.yes))
             par = n if n > 1 else None
-    if a.rope_scaling or a.rope_scale or a.kv or a.resident_budget_gib is not None or a.low_ram not in (None, "auto"):
+    if pack_path and (a.rope_scaling or a.rope_scale or a.resident_budget_gib is not None or
+                      a.low_ram not in (None, "auto")):
+        warn(f"--rope-scaling / --resident-budget-gib / --low-ram are not used for {fam['title']} yet")
+    elif not pack_path and (a.rope_scaling or a.rope_scale or a.kv or a.resident_budget_gib is not None or
+                            a.low_ram not in (None, "auto")):
         warn(f"--rope-scaling / --kv / --resident-budget-gib / --low-ram are Flash-Next settings: {fam['title']} "
              "does not use them")
     folder = Path(a.gguf_dir) if a.gguf_dir else Path(a.models_dir) / tag
@@ -7055,7 +7134,17 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
     elif vision != "none" and not (eng / VEXE).exists():
         warn("this engine has no image encoder: images off (run setup again with --build to compile it)")
         vision = "none"
-    if fam["arch"] not in engine_families(eng):
+    if pack_path and "qwen35moe-pack" not in engine_families(eng) and not CONTROL:
+        # a ready-made engine runs qwen35moe on src/qwen35 only: Flash-Next's path with a pack is this checkout's
+        if hip and WIN:
+            fail(f"the ready-made AMD engine ({meta.get('version')}) does not run {fam['title']} from a pack",
+                 "compiling it on Windows: tools\\hip\\build_windows.bat (docs/AMD_HIP.md), or choose another model")
+        say(f"  The ready-made engine ({meta.get('version')}) does not run {fam['title']} from a pack: compiling the "
+            "engine on this PC instead")
+        eng = build_engine_hip(gpu, llama, vision) if hip else build_engine(gpu, vision, a.yes, llama, toolkit=cuda_tk)
+        meta = json.loads((eng / "BUILD.json").read_text(encoding="utf-8"))
+        lib_dirs = meta.get("lib_dirs") or meta.get("cuda_dirs") or cuda_lib_dirs(cuda_tk)
+    if (("qwen35moe-pack" if pack_path else fam["arch"]) not in engine_families(eng)):
         fail(f"this engine ({meta.get('version')}) does not run {fam['title']} yet",
              "update Strata, or compile the engine with --build, and run setup again")
     ok("engine: the engine component (looked up when the model loads)" if CONTROL else f"engine: {eng / EXE}")
@@ -7069,7 +7158,7 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
         download(fam["hf"] + gguf.name, gguf)
     verify_sha256(gguf, *fam["sha256"][gguf.name])
     ok(f"model file: {gguf}")
-    mmproj = folder / fam["mmproj"]
+    mmproj = folder / (fam["mmproj"] or "none")
     if vision != "none":                               # the image encoder: Unsloth's mmproj, pinned, size + SHA-256 checked
         if mmproj.exists() and done(mmproj):
             ok(f"{mmproj.name} already downloaded")
@@ -7083,14 +7172,33 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
     step(6, "preparing the model for Strata")
     data, _ = data_folder_for(a)
     pack = data / "packs" / tag.lower()            # only the tokenizer: the engine reads the GGUF itself
-    if not (pack / "tokenizer" / "vocab.json").exists():
+    if pack_path:
+        # every tensor as the GGUF stores it, the experts read from the GGUF at start (seconds to build); its tokenizer too
+        if not (pack / "native_experts.txt").exists() or not (pack / "tokenizer" / "vocab.json").exists():
+            run([sys.executable, str(ROOT / "tools" / "iq_pack.py"), "--gguf", str(gguf), "--out", str(pack),
+                 *fam.get("pack_args", [])], env=dict(os.environ, STRATA_GGUF_PY=str(llama / "gguf-py")))
+        ok(f"model prepared: {pack}")
+    elif not (pack / "tokenizer" / "vocab.json").exists():
         run([sys.executable, str(ROOT / "tools" / "strata_tokenizer.py"), "--gguf", str(gguf), "--out", str(pack)],
             env=dict(os.environ, STRATA_GGUF_PY=str(llama / "gguf-py")))
     ok(f"tokenizer: {pack / 'tokenizer'}")
 
     step(7, "writing the start script")
-    args = ["--native", str(gguf), "--max-context", str(ctx), "--prefill", "auto", "--mtp", str(fam["mtp"])]
-    if a.vram_reserve_mib is not None:             # VRAM left free for other programs: the experts take that much less
+    if pack_path:
+        # Flash-Next's engine path: the pack, the Qwen3.6 expert profile, int8 KV, MTP drafts from the file's own draft
+        # layer with the chosen token subset (the same tokenizer as Flash-Next's: data/'s subsets apply)
+        draft_vocab = getattr(a, "draft_vocab", None) or saved_draft_vocab(home() / f"strata-{tag.lower()}.json") or "cjk"
+        args = ["--pack", str(pack), "--native", str(gguf), "--expert-profile", str(ROOT / "data" / fam["profile"]),
+                "--expert-cache", "auto", "--prefill", "auto", "--spec", str(fam["spec"]), "--mtp", str(gguf),
+                "--mtp-draft-vocab", str(ROOT / "data" / DRAFT_VOCABS.get(draft_vocab, "draft_vocab.bin")),
+                "--max-context", str(ctx), "--kv", a.kv or "int8"]
+        ok(f"KV cache: {a.kv or 'int8'}; MTP draft layer: the model file's own (token subset: {draft_vocab})")
+    else:
+        args = ["--native", str(gguf), "--max-context", str(ctx), "--prefill", "auto", "--mtp", str(fam["mtp"])]
+    if a.vram_reserve_mib is not None and pack_path:   # the pack path keeps it free itself
+        args += ["--vram-reserve-mib", str(a.vram_reserve_mib)]
+        ok(f"VRAM kept free for other programs: {a.vram_reserve_mib} MiB")
+    elif a.vram_reserve_mib is not None:           # VRAM left free for other programs: the experts take that much less
         vram = gpu.get("vram_gb", 0.0)
         if vram > 0:
             args += ["--expert-vram", f"{max(vram - 3.0 - a.vram_reserve_mib / 1024, 0):.1f}"]

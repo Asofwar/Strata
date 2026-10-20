@@ -181,6 +181,7 @@ More choices:
 - **[Swift 1.5](docs/MODELS.md#swift-15)** is a fine-tune that thinks for a shorter time before it answers, at about the same quality and RAM.
 - **[NVFP4](docs/NVFP4.md)** is NVIDIA's 4-bit version for NVIDIA cards. It needs about 80 GB of RAM to keep every expert in RAM.
 - **[Qwen3.6-35B-A3B](docs/QWEN36.md)** is a smaller, different model that reads pictures and can answer several requests at once.
+- **[Huihui-Ornith-1.5-35B-A3B-abliterated](docs/QWEN36_PACK.md#huihui-ornith-15-35b-a3b-abliterated)** and **[Cyber-Tiel-Coder-35B-A3B](docs/QWEN36_PACK.md#cyber-tiel-coder-35b-a3b)** are fine-tunes of the same architecture that run from a Strata pack with int8 KV, for long contexts (100K-262K) on a 16 GB card.
 - **[OrcaRouter's Uncensored IQ3_XXS](docs/MODELS.md#orcarouter-uncensored-iq3_xxs)** is set up by hand.
 
 Every size, download and what fits where: [docs/MODELS.md](docs/MODELS.md).

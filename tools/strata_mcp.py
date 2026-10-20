@@ -554,8 +554,9 @@ class Strata:
             return None
         size_gb = d["sha256"][d["file"].format(q=model)][0] / 1e9
         return {"about": d["models"][model]["about"], "download_gb": round(size_gb, 1), "ram_gb": d["models"][model]["ram_gb"],
-                # the routed experts are ~93% of the file (setup.own_path_parallel_fits_all); the dense part and buffers ~1 GB more
-                "arena_gb": round(size_gb * 0.93, 1), "vision": bool(d.get("vision", True)),
+                # the routed experts are ~93% of the file (setup.own_path_parallel_fits_all); the dense part and buffers ~1 GB
+                # more - or the measured figure where setup has one (the pack families)
+                "arena_gb": d["models"][model].get("arena_gb", round(size_gb * 0.93, 1)), "vision": bool(d.get("vision", True)),
                 "engine": OWN_PATH_ENGINE, "families": (family,)}
 
     def sizes_of(self, models, family) -> list:

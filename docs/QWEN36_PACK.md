@@ -1,5 +1,7 @@
 # Qwen3.6-35B-A3B
 
+> **This fork's pack path (0.1.46).** Upstream 0.1.46 runs Qwen3.6-35B-A3B on an engine of its own (`src/qwen35`, [QWEN36.md](QWEN36.md)): no pack, fp32 KV. This page is the other path, Flash-Next's engine running a qwen35moe GGUF from a Strata pack (`--pack`: int8 KV, the expert cache, MTP drafts from the file), which holds 100K-262K contexts on a 16 GB card. `strata` takes it whenever `--pack` is given. Setup installs two families on it, [Huihui-Ornith-1.5-35B-A3B-abliterated](#huihui-ornith-15-35b-a3b-abliterated) (`--family ornith-abl`) and [Cyber-Tiel-Coder-35B-A3B](#cyber-tiel-coder-35b-a3b) (`--family cyber-tiel`). The `qwen36` / `ornith` setup families described below came with the original port and are not in 0.1.46's setup (its `--family qwen36` installs the `src/qwen35` path); a config written by hand with `--pack` still runs them.
+
 A second, smaller model next to Qwen3.8-Flash-Next: [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B)
 (35B parameters, 3B active per token), in Unsloth's GGUFs with the MTP draft layer
 ([unsloth/Qwen3.6-35B-A3B-MTP-GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF), Apache 2.0). It is the
@@ -191,3 +193,90 @@ added (Coder, three short prompts and an 8K prompt, back to back on the same PC)
   images, the encoder on the CPU beyond one test, AMD.
 - The low-RAM mode (`--resident-experts`) gives the same tokens as the normal mode on this PC (UD-IQ3_S: 9.0 GiB of
   experts held in RAM); it has not been measured on a 16 GB PC.
+
+## Huihui-Ornith-1.5-35B-A3B-abliterated
+
+[Huihui-Ornith-1.5-35B-A3B-abliterated](https://huggingface.co/huihui-ai/Huihui-Ornith-1.5-35B-A3B-abliterated)
+(huihui-ai, MIT) is Ornith-1.5 with its refusals removed (abliteration). It has the same architecture, tokenizer and
+sizes, so it runs on this engine path from a pack with Qwen3.6's expert profile and draft vocabularies. Setup uses
+mradermacher's weighted (i1) single-file GGUFs
+([mradermacher/Huihui-Ornith-1.5-35B-A3B-abliterated-i1-GGUF](https://huggingface.co/mradermacher/Huihui-Ornith-1.5-35B-A3B-abliterated-i1-GGUF),
+pinned revision, size and SHA-256 checked). They keep the MTP draft layer:
+
+```
+./setup.sh --setup --family ornith-abl                  (Linux)
+START-HERE.bat --setup --family ornith-abl              (Windows)
+```
+
+| Size | Download | Experts in RAM | RAM it asks for |
+| --- | ---: | ---: | ---: |
+| **IQ4_XS** (recommended, ~4-bit) | 19.2 GB | 15.9 GiB (measured) | 28 GB |
+| **IQ3_S** (smaller) | 15.6 GB | ~12.7 GiB (estimated from the file, not run) | 26 GB |
+
+That repository has no image encoder (mmproj), so setup installs this model without images.
+
+Measured with IQ4_XS on an RTX 5080 (16 GB, PCIe 5.0 x8), i9-14900K, 48 GB of RAM, Windows 11, CUDA 13.4: 262K
+context, `--kv int8`, MTP with the Cyrillic draft vocabulary, `--spec 4 --spec-min-p 0.5`, served to Codex as a coding
+agent. These numbers are from the engine branch `asofwar/integrate-perf` (before 0.1.46):
+
+| What | Result |
+| --- | ---: |
+| Expert cache | 5,277 slots |
+| 22-token prompt, writes | 248 tokens/s |
+| 2,030-token prompt, reads / writes | 2,365 / 254 tokens/s |
+| 73K-token prompt, reads / writes | 2,731 / 110 tokens/s |
+| At 141-147K of context, writes | 87-111 tokens/s, ~75% of MTP drafts accepted |
+| At 241K of context, writes | 62 tokens/s |
+
+Codex's prefix reuse works (for example 136,468 of 136,581 tokens reused). In long agent runs it sometimes looped in
+its reasoning. The server's opt-in `"reasoning_loop_recovery": "resample"` is the remedy for agents whose system prompt
+lacks Strata's effort sentence. Not measured: IQ3_S, Russian answer quality, smaller cards.
+
+## Cyber-Tiel-Coder-35B-A3B
+
+[Cyber-Tiel-Coder-35B-A3B](https://huggingface.co/peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP)
+(peculiar-ragdoll, MIT) is a coding fine-tune of the abliterated Ornith above
+(base `huihui-ai/Huihui-Ornith-1.5-35B-A3B-abliterated`). Its "Sharp" chat template makes it think shorter. It runs on
+the same engine path; its single-file GGUFs keep the MTP draft layer:
+
+```
+./setup.sh --setup --family cyber-tiel                  (Linux)
+START-HERE.bat --setup --family cyber-tiel              (Windows)
+```
+
+| Size | Download | Experts in RAM | RAM it asks for |
+| --- | ---: | ---: | ---: |
+| **UD-IQ4_XS** (recommended, ~4-bit) | 18.1 GB | 14.1 GiB (measured) | 26 GB |
+| **UD-IQ3_XXS** (smaller) | 13.6 GB | ~10.4 GiB (estimated from the file, not run) | 22 GB |
+
+Its repository also has an image encoder, `mmproj-BF16.gguf` (0.9 GB). Images with it are untested, so setup installs
+this model without images.
+
+Measured with UD-IQ4_XS on the same PC and settings as above (engine branch `asofwar/integrate-perf`):
+
+| What | Result |
+| --- | ---: |
+| Expert cache | 5,785 slots; the MTP layer from the file takes 642 MiB of VRAM |
+| 148,874-token prompt from scratch, reads | 76.9 s (1,935 tokens/s) |
+| At 119K of context, writes | 100-113 tokens/s |
+| At 149-159K of context, writes | 84-98 tokens/s, ~80% of MTP drafts accepted |
+| At 205-208K of context, writes | 68-81 tokens/s |
+| 260,498-token prompt, reads / writes | 215 s (1,209 tokens/s) / 60 tokens/s |
+
+Codex's prefix reuse works. No reasoning loops were seen in about an hour of Codex use. Not measured: short-chat
+speed, Russian answer quality, images, UD-IQ3_XXS, smaller cards.
+
+## What setup writes for these two
+
+Both are `OWN_PATH_FAMILIES` entries with `"pack": True` in `setup.py`, installed by `install_own_path`'s pack branch:
+
+- the GGUF at the pinned revision, its size and SHA-256 checked;
+- a pack built from it with `tools/iq_pack.py --compat-bf16`;
+- a config that names the family (`"arch": "qwen35moe"`) and starts the engine with `--pack`, `--native` and `--mtp`
+  (the GGUF), `--expert-profile data/expert-profile-qwen36.bin`, `--expert-cache auto`, `--prefill auto`, `--spec 4`,
+  `--mtp-draft-vocab` (the chosen subset, `--draft-vocab`), `--kv int8` (or `--kv`), and a 262K context on a 16 GB card
+  (128K below).
+
+A ready-made engine from the upstream releases runs qwen35moe on `src/qwen35` only. Its `strata --families` has no
+`qwen35moe-pack`, so setup compiles the engine from this checkout instead. One request at a time; `--parallel` is not
+offered on this path.
