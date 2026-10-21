@@ -2580,6 +2580,60 @@ the error of `FP16ACC=2`); the I2F conversions replaced by exact magic-number ad
 change - kept). Switching off parts of the kernel showed the p.v products ~35%, the q.k products ~23%, the K/V loads
 ~18% of its time; the issue slots are far from full, so it waits on latency and barriers rather than on any one unit.
 
+### `STRATA_PROMPT_ATTN_DENSE_IMMA=3`: the INT8 prompt kernel in fewer instructions (opt-in, measured 2026-10-21)
+
+The same block as `=2` (8 queries x 8 heads, a 32-cell chunk, two blocks an SM) and the same quantization (q and
+p * v_scale in 16-bit high/low byte parts against the same bounds, int8 K/V codes, exact int32 sums), so the outputs
+match `=2`'s error to the digit. What changed is the work around the MMAs, which `=2` waits on:
+
+- a pair of int32 part sums (h, l) joins as one integer 256 h + l (one IMAD; exact, below 2^31) and one I2F instead of
+  two magic-number conversions and an FMA; in p.v the high part's MMA result, shifted by 8 bits, is the low part's MMA
+  accumulator, so the join is a shift;
+- p * v_scale is rounded by one FMA with the magic number: p is taken against the chunk's own max (exp2(s - chunk max)
+  times 32766), so only 1 / the group's largest V scale is left to multiply;
+- two barriers a chunk instead of four: K(c) and the end of p.v(c - 1) meet at one, after which V(c) loads during
+  q.k(c) and the softmax; V(c) and the end of q.k(c) at the other, after which K(c + 1) loads during p.v(c);
+- the swizzled shared-memory addresses are four offsets per thread plus constants;
+- the blocks start with the latest queries (the widest rows).
+
+It takes precedence over `FP16ACC` as `=2` does; FP16 K/V ignore it. Unset, the other 25 kernels of
+`qsa_prompt_attn.cu` compile to the same SASS as before (sm_120, `cuobjdump -sass`). `qsa_prompt_attn_parity` (RTX 5080,
+int8 K/V; page sizes 4, 3 and 512 checked; two runs each):
+
+| | 64K cells, 8192 queries | 64K, peaked attention | 16K, 2048 queries | 1,000 cells, 37 queries | row error vs FP32 (rel. L2, mean / max) | max error vs FP64 |
+|---|---|---|---|---|---|---|
+| `DENSE_IMMA=2` | 96.6 / 97.0 ms | 96.8 / 97.2 ms | 6.6-8.6 ms | 0.121 ms | 8.9e-5 / 3.2e-4 | 2.0e-4 |
+| `DENSE_IMMA=3` | 84.3 / 85.1 ms | 83.9 / 84.5 ms | 5.7-7.5 ms | 0.090 ms | 8.9e-5 / 3.2e-4 | 2.0e-4 |
+
+So 1.14-1.16x on long chunks (8.25 TFLOP of attention per 64K chunk: 85 -> 98 TFLOP/s) and 1.34x on short ones.
+Whole engine, the setup of the `DENSE_IMMA=2` measurement above (Cyber-Tiel-Coder UD-IQ4_XS, RTX 5080 + i9-14900K,
+Windows 11, CUDA 13.4, the server's settings, which include `DENSE_IMMA=2`, plus `--vram-reserve-mib 1472`), one
+downtime, a fresh engine per arm, three prompts of each size (medians, s):
+
+| | 64K | 130K | 200K | 200K after 115K |
+|---|---|---|---|---|
+| the server's settings (`DENSE_IMMA=2`) | 12.87 | 32.32 | 63.28 | 36.57 |
+| + `STRATA_PROMPT_ATTN_DENSE_IMMA=3` (and `STRATA_ATTN_WINDOW_SMALL=1`) | 12.34 | 30.72 | 58.77 | 33.82 |
+| speed-up | 1.04x | 1.05x | 1.08x | 1.08x |
+
+A third arm with the server's settings (one prompt of each size) read 12.82 / 33.57 / 65.97 / 38.12 s, so the run-to-run
+spread is 2-4%. The gain follows the attention's share of the prompt (39% at 64K, 66% at 200K, above). Greedy 128 tokens
+after the 13 prompts: the server's settings against the new arm first differ at 31.4 tokens on average, the two arms of
+the server's settings at 40.8 (5 prompts) - inside the noise (a 130K prompt differs at token 0 in both). Not measured:
+KL (the parity tool's outputs match `=2`'s error exactly), other cards, Linux.
+
+What was tried and not kept (same tool and size, against `=2` in the same run): 16 queries and 8 warps a block with
+64-cell chunks (99 KB, one block an SM; K/V rows padded to 272 bytes): 1.12-1.16x, the same as the kept kernel but
+spilling 250-370 bytes; the same with 32-cell chunks and K/V double-buffered: 1.03-1.07x; 4 warps with padded K/V rows
+(50.7 KB, one block an SM): 0.73x. Switching parts off in the 8-warp version (73 ms in that run): without p.v 54 ms,
+without q.k 58.5 ms, without both 27 ms, without the K/V loads 71 ms, nothing but the loop 5.6 ms. So no single part
+dominates; the loads are hidden. The time goes to dependent chains inside a warp (ldmatrix -> MMA -> join -> softmax ->
+quantize -> MMA) with 255 registers a thread (the 16 x 256 FP32 accumulator alone is 128), which leaves no room for a
+second tile in flight; FlashAttention-3's overlap needs wgmma / setmaxnreg, which sm_120 does not have. Nsight Compute
+could not be used (`ERR_NVGPUCTRPERM`: GPU performance counters need administrator rights on this PC). A split of the
+cells over two blocks for the last wave (about 6% of a chunk's blocks idle in its last wave at 8192 queries) needs a
+scratch buffer in the prompt path's API and was not done.
+
 ## Thread placement: `--aux-cpus` (Linux, off by default)
 
 The CPU pool pins its workers (one logical CPU per physical core) and the host thread pins itself to the pool's reserved
@@ -2976,6 +3030,56 @@ stay inside the noise.
 With the window cheaper, longer drafts pay off sooner: at 200K with precision 2, `--spec-min-p 0.30` gave 115.0 and
 140.3 tok/s (2 answers) and 0.40 gave 75.2 and 102.0, against 88.9 at 0.50. Not measured: shorter contexts with a lower
 `--spec-min-p`, other cards, FP16 or Q4 KV (not covered), Linux.
+
+### `STRATA_ATTN_WINDOW_SMALL=1`: short windows on a streaming INT8 kernel (opt-in, measured 2026-10-21)
+
+At long context most verify windows are 1-2 tokens, and the window kernel's block is still 64 tensor-core rows (8
+queries x 8 heads), 3/4 of them empty; it runs at about 420 GB/s. `STRATA_ATTN_WINDOW_SMALL=1` (with `STRATA_ATTN_WINDOW=1`)
+sends windows of up to 4 queries to `decode_attn_window_small_kernel` instead, at any `STRATA_ATTN_WINDOW_PREC`
+(`=N`, 2-8: windows of up to N queries):
+
+- the rows are only the window's: NT = ceil(T / 2) MMA tiles of 16 rows (the 8 heads of two queries);
+- the arithmetic is `DENSE_IMMA`'s: K and V enter as their int8 codes, q and p * v_scale as 16-bit high/low byte parts,
+  int32 sums (the joins as in `DENSE_IMMA=3`);
+- a block streams one range of the cells with K and V of 32 cells double-buffered by cp.async, read once for the
+  window; its four warps share the stream: warp w scores the chunk's cells 8w .. 8w + 7 for every row, the scores meet
+  in shared memory, every warp runs the softmax of the 32 cells and warp w sums p.v for the 64 dims of V group w. So a
+  thread holds 32 accumulators per row tile instead of 128: 119 registers at T <= 2, two blocks (8 warps) an SM, one
+  wave of blocks over the cells, merged by `decode_attn_merge_kernel` as before;
+- cells on pages that are not resident are masked, as in the window kernel.
+
+`attn_window_parity` (synthetic int8 KV, page size 4 with a shuffled page table, flat and peaked attention, holes; max
+error relative to the largest output against FP64): the new kernel 4.7e-5 to 1.7e-4 (mean ~1e-5) at every T and size,
+against 2.5e-4 to 1.7e-3 for the window kernel at precision 2 and 1e-6 at precision 0; the decode kernel 1e-6 to 2e-5.
+Time per call including the merge, RTX 5080, 200,000 cells (µs; the precision-2 column from a run with the GPU otherwise
+idle, the precision-0 run separately):
+
+| T (queries) | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|
+| decode kernel | 909 | 1,618 | 2,343 | 3,069 | 3,810 | 4,559 | 5,915 | 6,806 |
+| window, precision 0 | - | 1,104 | 1,123 | 1,096 | 1,084 | 1,102 | 1,117 | 1,106 |
+| window, precision 2 | 465 | 469 | 472 | 474 | 476 | 478 | - | - |
+| `STRATA_ATTN_WINDOW_SMALL` | 267 | 270 | 341 | 342 | 429 | 432 | 555 | 544 |
+
+At T = 1-2 that is 211 MB of K/V in 267 µs, about 790 GB/s of the card's ~960. At 66,000 cells: 76-84 µs against 175-197
+for precision 2 (T = 1-2), 121-141 against 181-197 (T = 3-4). At 2,048 cells all are 15-40 µs (launch-bound). Beyond 4
+queries the gain over precision 2 is small (T = 5-6) or negative (T = 7-8), hence the default limit of 4.
+
+Decode in the engine, the same downtime as the `DENSE_IMMA=3` measurement above (the server's settings: `--spec 4` with
+MTP, `--spec-min-p 0.50`, `STRATA_ATTN_WINDOW=1 STRATA_ATTN_WINDOW_PREC=2`; `--vram-reserve-mib 1472`): 128 greedy
+tokens after each prompt, tok/s (each of the 3 answers, and their mean):
+
+| context | the server's settings | + `STRATA_ATTN_WINDOW_SMALL=1` (and `DENSE_IMMA=3`) |
+|---|---|---|
+| 130K from scratch | 91.4, 125.5, 120.8: 112.6 | 119.8, 150.9, 168.5: 146.4 (+30%) |
+| 200K from scratch | 126.5, 117.8, 138.5: 127.6 | 184.7, 156.0, 141.5: 160.7 (+26%) |
+| 200K after 115K reused | 124.7, 111.8, 111.6: 116.0 | 153.8, 161.6, 147.5: 154.3 (+33%) |
+| 64K | 197.1, 266.5, 271.0: 244.9 | 235.6, 245.1, 266.3: 249.0 |
+
+The draft acceptance differs from answer to answer in both arms (each answer is one sample of the adaptive tier and the
+drafts), so single answers spread by ~25%; the means at 130K and 200K moved together by 26-33%. The prompt kernel does
+not run in decode, so this is the small window's. Greedy text: see the `DENSE_IMMA=3` measurement (the same runs).
+Not measured: other cards, Linux, the window's T distribution in the engine (nsys).
 
 ## CUDA opt-in switches measured for 0.1.45 (RTX 3060 and RTX A4000, sm_86; all off unless you set them)
 

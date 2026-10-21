@@ -6,7 +6,8 @@
 // size 4 with a shuffled page table (and, in one case, pages that are not resident: those cells are masked). A window of
 // T queries attends causally: query i sees cells [0, n - T + 1 + i). For each context and T it prints the max and mean
 // error of both kernels against FP64 (relative to the largest output value) and the window kernel against the default.
-// Usage: attn_window_parity [prec 0..3] [cells,cells,...]   (STRATA_ATTN_WINDOW_PREC; default 0, and 2048,66000,200000)
+// Usage: attn_window_parity [prec 0..3] [cells,cells,...] [small]   (STRATA_ATTN_WINDOW_PREC; default 0, and
+// 2048,66000,200000; small: the windows also through STRATA_ATTN_WINDOW_SMALL's kernel)
 #include "strata/kernels/f16_bits.hpp"
 #include "strata/kernels/kv_q8.hpp"
 #include "strata/kernels/qsa.hpp"
@@ -59,6 +60,111 @@ struct Case {
     bool holes;      // some pages not resident (masked)
     float q_mul;     // q's scale: 1 = flat attention, 4 = peaked
 };
+bool g_small = false;   // argv[3] == "small": the windows also through STRATA_ATTN_WINDOW_SMALL's kernel
+
+// FP64 reference of a window: a thread per (query, head)
+std::vector<double> reference(int T, const std::vector<int>& width, const std::vector<int32_t>& table, const std::vector<int8_t>& kq,
+                              const std::vector<int8_t>& vq, const std::vector<uint16_t>& ks, const std::vector<uint16_t>& vs,
+                              const std::vector<float>& q) {
+    std::vector<double> ref((size_t) T * NH * D);
+    std::vector<std::thread> th;
+    for (int qi = 0; qi < T; ++qi)
+        for (int h = 0; h < NH; ++h)
+            th.emplace_back([&, qi, h] {
+                const int kvh = h / PER;
+                const float* qq = &q[((size_t) qi * NH + h) * D];
+                std::vector<double> sc(width[qi]);
+                double m = -1e300;
+                for (int x = 0; x < width[qi]; ++x) {
+                    const int pg = table[x / PS];
+                    if (pg < 0) { sc[x] = -1e300; continue; }
+                    const size_t row = ((size_t) pg * NKV + kvh) * PS + x % PS;
+                    double acc = 0;
+                    for (int g = 0; g < G64; ++g) {
+                        double part = 0;
+                        for (int d = g * 64; d < g * 64 + 64; ++d) part += (double) qq[d] * kq[row * D + d];
+                        acc += part * h2f(ks[row * G64 + g]);
+                    }
+                    sc[x] = acc / 16.0;
+                    m = std::max(m, sc[x]);
+                }
+                std::vector<double> o(D, 0.0);
+                double l = 0;
+                for (int x = 0; x < width[qi]; ++x) {
+                    if (sc[x] <= -1e299) continue;
+                    const double pr = std::exp(sc[x] - m);
+                    l += pr;
+                    const size_t row = ((size_t) table[x / PS] * NKV + kvh) * PS + x % PS;
+                    for (int d = 0; d < D; ++d) o[d] += pr * vq[row * D + d] * h2f(vs[row * G64 + d / 64]);
+                }
+                for (int d = 0; d < D; ++d) ref[((size_t) qi * NH + h) * D + d] = l > 0 ? o[d] / l : 0.0;
+            });
+    for (auto& t : th) t.join();
+    return ref;
+}
+
+// STRATA_ATTN_WINDOW_SMALL: the default decode kernel (a), the window kernel (b; not for a lone query at
+// PREC 0) and the small kernel (c): errors against FP64 relative to the largest output, timings over 20 launches
+void run_small(int T, int cells, const Case& c, const std::vector<int>& width, const std::vector<int32_t>& table,
+               const std::vector<int8_t>& kq, const std::vector<int8_t>& vq, const std::vector<uint16_t>& ks,
+               const std::vector<uint16_t>& vs, const std::vector<float>& q, const k::QsaAttnPools& pools, const float* d_q,
+               const int32_t* d_ids, const int32_t* d_steps, const k::QsaShapes& s, float* d_scr, uint64_t stride, float* d_a,
+               float* d_b, float* d_c, int prec) {
+    auto launch = [&](int which) -> bool {   // 0 default, 1 window, 2 small
+        if (which == 0) { k::qsa_decode_attn_batch(d_q, pools, d_ids, d_steps, cells, s, d_scr, d_a, T, nullptr); return true; }
+        k::qsa_decode_attn_window_set_small(which == 2 ? 8 : 0);
+        const bool ok = k::qsa_decode_attn_window(d_q, pools, d_steps, s, d_scr, stride * T, which == 2 ? d_c : d_b, T, nullptr);
+        k::qsa_decode_attn_window_set_small(-1);
+        return ok;
+    };
+    const bool has_b = !(prec == 0 && T == 1);
+    launch(0);
+    ck(cudaMemset(d_scr, 0xff, stride * T * 4), "poison");
+    if (has_b && !launch(1)) { std::printf("FAIL window refused\n"); ++g_fail; return; }
+    ck(cudaMemset(d_scr, 0xff, stride * T * 4), "poison");
+    if (!launch(2)) { std::printf("FAIL small window refused\n"); ++g_fail; return; }
+    ck(cudaDeviceSynchronize(), "sync");
+    auto time = [&](int which) {
+        cudaEvent_t e0, e1;
+        cudaEventCreate(&e0); cudaEventCreate(&e1);
+        cudaEventRecord(e0);
+        for (int r = 0; r < 20; ++r) launch(which);
+        cudaEventRecord(e1);
+        cudaEventSynchronize(e1);
+        float ms = 0;
+        cudaEventElapsedTime(&ms, e0, e1);
+        cudaEventDestroy(e0); cudaEventDestroy(e1);
+        return ms * 1000.0f / 20.0f;
+    };
+    const float us_a = time(0), us_b = has_b ? time(1) : 0.0f, us_c = time(2);
+    const size_t n_out = (size_t) T * NH * D;
+    std::vector<float> a(n_out), b(n_out), cc(n_out);
+    ck(cudaMemcpy(a.data(), d_a, n_out * 4, cudaMemcpyDeviceToHost), "a");
+    if (has_b) ck(cudaMemcpy(b.data(), d_b, n_out * 4, cudaMemcpyDeviceToHost), "b");
+    ck(cudaMemcpy(cc.data(), d_c, n_out * 4, cudaMemcpyDeviceToHost), "c");
+    const std::vector<double> ref = reference(T, width, table, kq, vq, ks, vs, q);
+    double max_ref = 0, ea = 0, eb = 0, ec = 0, ec_sum = 0, cb = 0;
+    bool finite = true;
+    for (size_t i = 0; i < n_out; ++i) {
+        finite = finite && std::isfinite(cc[i]);
+        max_ref = std::max(max_ref, std::fabs(ref[i]));
+        ea = std::max(ea, std::fabs(a[i] - ref[i]));
+        if (has_b) { eb = std::max(eb, std::fabs(b[i] - ref[i])); cb = std::max(cb, (double) std::fabs(cc[i] - b[i])); }
+        ec = std::max(ec, std::fabs(cc[i] - ref[i]));
+        ec_sum += std::fabs(cc[i] - ref[i]);
+    }
+    const double nrm = max_ref > 0 ? max_ref : 1.0;
+    // the bar: 1e-3 of the output scale (the INT8 arithmetic: q and p * v_scale in 16 bits; the FP16 window is ~1e-3)
+    const bool ok = finite && ec / nrm <= 1e-3;
+    char wb[32] = "-";
+    if (has_b) std::snprintf(wb, sizeof wb, "%.2e", eb / nrm);
+    std::printf("%s cells %6d%s q x%.0f T=%d | vs fp64 max: default %.2e window %s small %.2e (mean %.2e) | small vs window %.2e | "
+                "%8.1f us default, %7.1f window, %7.1f small\n",
+                ok ? "PASS" : "FAIL", cells, c.holes ? " holes" : "      ", c.q_mul, T, ea / nrm, wb, ec / nrm,
+                ec_sum / n_out / nrm, cb / nrm, us_a, us_b, us_c);
+    std::fflush(stdout);
+    if (!ok) ++g_fail;
+}
 
 void run(const Case& c, int n_q_max, int prec) {
     std::mt19937 rng(777u + (unsigned) c.cells + (c.holes ? 13u : 0u) + (unsigned) (c.q_mul * 10));
@@ -119,7 +225,7 @@ void run(const Case& c, int n_q_max, int prec) {
     ck(cudaMemcpy(d_q, q.data(), q.size() * 4, cudaMemcpyHostToDevice), "q");
     const uint64_t stride = k::qsa_decode_attn_scratch_floats(cells, s);
     float* d_scr = dalloc<float>(stride * n_q_max);
-    float *d_a = dalloc<float>(q.size()), *d_b = dalloc<float>(q.size());
+    float *d_a = dalloc<float>(q.size()), *d_b = dalloc<float>(q.size()), *d_c = dalloc<float>(q.size());
     int32_t* d_steps = dalloc<int32_t>((size_t) n_q_max * k::kStepCount);
 
     for (int T = 1; T <= n_q_max; ++T) {
@@ -131,6 +237,10 @@ void run(const Case& c, int n_q_max, int prec) {
             steps[(size_t) i * k::kStepCount + k::kStepWidth] = width[i];
         }
         ck(cudaMemcpy(d_steps, steps.data(), steps.size() * 4, cudaMemcpyHostToDevice), "steps");
+        if (g_small) {   // STRATA_ATTN_WINDOW_SMALL: the small-window kernel, against the window kernel and FP64
+            run_small(T, cells, c, width, table, kq, vq, ks, vs, q, pools, d_q, d_ids, d_steps, s, d_scr, stride, d_a, d_b, d_c, prec);
+            continue;
+        }
         if (prec == 0 && T == 1) {   // full precision takes windows of 2+ queries only: one query must be refused
             if (k::qsa_decode_attn_window(d_q, pools, d_steps, s, d_scr, stride, d_b, 1, nullptr)) {
                 std::printf("FAIL cells %d T=1: the full-precision window took a lone query\n", cells);
@@ -226,7 +336,7 @@ void run(const Case& c, int n_q_max, int prec) {
         if (!ok) ++g_fail;
     }
     cudaFree(d_table); cudaFree(dkq); cudaFree(dvq); cudaFree(dks); cudaFree(dvs); cudaFree(d_ids); cudaFree(d_q);
-    cudaFree(d_scr); cudaFree(d_a); cudaFree(d_b); cudaFree(d_steps);
+    cudaFree(d_scr); cudaFree(d_a); cudaFree(d_b); cudaFree(d_c); cudaFree(d_steps);
 }
 }  // namespace
 
@@ -254,11 +364,12 @@ int main(int argc, char** argv) {
     setenv("STRATA_ATTN_WINDOW", "1", 1);
     setenv("STRATA_ATTN_WINDOW_PREC", std::to_string(prec).c_str(), 1);
 #endif
-    std::printf("attn_window_parity: STRATA_ATTN_WINDOW_PREC=%d\n", prec);
+    g_small = argc > 3 && std::strcmp(argv[3], "small") == 0;
+    std::printf("attn_window_parity: STRATA_ATTN_WINDOW_PREC=%d%s\n", prec, g_small ? ", small windows" : "");
     for (int cells : sizes) {
-        run({cells, false, 1.0f}, 6, prec);
-        run({cells, false, 4.0f}, 6, prec);
-        if (cells <= 66000) run({cells, true, 4.0f}, 6, prec);
+        run({cells, false, 1.0f}, g_small ? 8 : 6, prec);
+        run({cells, false, 4.0f}, g_small ? 8 : 6, prec);
+        if (cells <= 66000) run({cells, true, 4.0f}, g_small ? 8 : 6, prec);
     }
     std::printf(g_fail == 0 ? "attn_window_parity: PASS\n" : "attn_window_parity: %d FAIL\n", g_fail);
     return g_fail == 0 ? 0 : 1;
