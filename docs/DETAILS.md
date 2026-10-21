@@ -2398,9 +2398,11 @@ the pairs in which the switched arm won). They are here so you can try them on y
   MMQ's outer scheduler (`src/prefill/moe_mmq_tab.cuh`) takes one pointer per expert instead, and a resident expert is
   read where it is; streamed, peer-GPU and other experts are still copied. The launch (tile size, stream-k split,
   fixup) is the one MMQ makes for the copied group and the tile code is llama.cpp's own, so the answers are the same
-  bits (`prefill_mmq_tab_test`: 874 products bitwise equal to the copied path, all nine types - Q2_0, IQ2_XXS, IQ2_XS,
-  IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, Q8_0 - and every tile size; the optional Q5_0 and K-quant experts get no
-  pointer table and keep the copy). Each sized cache slot keeps 256 bytes after its expert, because MMQ reads up to
+  bits (`prefill_mmq_tab_test`: 1,206 products bitwise equal to the copied path, all nine types - Q2_0, IQ2_XXS, IQ2_XS,
+  IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, Q8_0 - and every tile size, at Flash-Next's expert widths and at Qwen3.6's
+  (IQ3_S gate/up [1024, 2048], IQ4_XS down [2048, 512]); the optional Q5_0 and K-quant experts get no pointer table and
+  keep the copy). A layer is read in place at the model's own widths, so a Qwen3.6-35B-A3B pack takes it too (37 of
+  Cyber-Tiel-Coder UD-IQ4_XS's 40 layers; the 3 with Q6_K down experts keep the copy). Each sized cache slot keeps 256 bytes after its expert, because MMQ reads up to
   136 bytes past a 640-wide down matrix; they are zeroed before each group. That is about 2.3 MiB over 9,300 slots (one
   slot fewer out of 6,998 on one RTX 3090). `STRATA_MMQ_DIRECT=2` keeps that layout but copies as before (an A/B
   reference); 0 or unset is the default path, byte for byte. `STRATA_MMQ_DIRECT_LOG=1` adds each stage's count of experts
@@ -2546,9 +2548,29 @@ runs each (medians, s):
 The middle row had a request start with 126 MiB of VRAM free (the WDDM paging warning), which made it a few percent
 slower than the three-run measurement above (12.23 / 30.8 / 60.0 / 34.4); against that, the larger chunk gains 8% at
 64K, 4% at 130K and about 1% at 200K. Decode after these prompts (128 tokens) ran 109-224 tok/s in every arm.
-`STRATA_MMQ_DIRECT=1` (resident experts read in place, no gather) would remove most of the gather, but an engine built
-with `-DSTRATA_MMQ_TAB=ON` does not compile against the llama.cpp tree this fork pins (`moe_mmq_tab.cuh`: "mmq.cuh:
-mul_mat_q_process_tile changed - re-sync"), so it was not measured.
+
+`STRATA_MMQ_DIRECT=1` (resident experts read in place) does not pay here. The copy it removes is only part of the
+gather, and the pointer-table gate/up product is a little slower than the copied one. (Two fixes were needed to try
+it: the build's signature check failed under MSVC, which keeps `__restrict__` in a function's type, and the switch was
+limited to Flash-Next's expert widths, so on this model it read 0 layers in place.) RTX 5080 16 GB, i9-14900K,
+Windows 11, CUDA 13.4, Cyber-Tiel-Coder UD-IQ4_XS with the server's settings (`DENSE_IMMA=2`), one engine run per arm
+with 3 prompts of each size, two downtimes, medians in s:
+
+| | 64K | 130K | 200K | 200K after 115K |
+|---|---|---|---|---|
+| default build (two runs of 3) | 12.71 / 12.58 | 32.76 / 32.70 | 63.68 / 62.42 | 37.20 / 36.99 |
+| `-DSTRATA_MMQ_TAB=ON` + `STRATA_MMQ_DIRECT=1` | 12.49 | 31.99 | 62.90 | 36.76 |
+| default build + `--prefill auto:16384` | 11.88 | 28.95 | 57.24 | 34.08 |
+| TAB + `DIRECT=1` + `--prefill auto:16384` | 11.21 | 29.95 | 58.78 | 34.42 |
+
+The two default runs differ by up to 2%, so every difference in the table is at the noise level. The GPU timeline
+(`STRATA_PREFILL_TIMING=1`) at 200K, mean of 3 runs: the copy phase 5.98 -> 5.73 s and the products 6.41 -> 6.62 s,
+the whole prompt 62.82 -> 62.60 s; with `auto:16384` the copy phase 3.22 -> 3.21 s, the products 5.06 -> 5.20 s,
+the whole prompt 56.95 -> 57.45 s. 92% of the resident experts were read in place (61,819 of 66,904 at 200K), but on
+16 GB most of a long prompt's experts are streamed (107,026 at 200K) and those are still copied. The TAB build also
+had 20-80 fewer expert-cache slots (its kernels take ~37 MiB of VRAM at start, the guards 256 B a slot). The tokens
+generated after these prompts diverged from the default build at the same places as two default runs diverge from
+each other, and decode ran 117-265 tok/s in every arm. So release builds keep the option off.
 
 What was tried in the INT8 kernel and not kept (`qsa_prompt_attn_parity`, 8192 queries at 64K, against the kernel as
 it is): V transposed once per chunk in shared memory by the block (two more barriers a chunk: 108-111 ms against 88);

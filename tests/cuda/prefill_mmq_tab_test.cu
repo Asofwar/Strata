@@ -293,19 +293,21 @@ void sweep(mmq::Context& ctx, const Shape& sh, bool full, std::mt19937& rng, cud
 // Part 3: groups as prefill.cpp's walk builds them, both products
 struct Pair {
     ggml_type gu, d;
+    int64_t ff = 640, ne = 2560;   // the expert widths: Flash-Next's by default, Qwen3.6's 512 / 2048
 };
 void group_case(mmq::Context& ctx, const Pair& pr, const std::vector<int>& cnt, const std::vector<char>& direct,
                 bool group_gather, int flush_at, std::mt19937& rng, cudaStream_t s, const char* label) {
     const int n = (int) cnt.size();
-    const Shape gs{pr.gu, 1280, 2560, "gate/up"}, ds{pr.d, 2560, 640, "down"};
-    const size_t gub = mmq::matrix_bytes((int) pr.gu, 1280, 2560), db = mmq::matrix_bytes((int) pr.d, 2560, 640);
+    const int64_t ff = pr.ff, ne = pr.ne, gur = 2 * pr.ff;
+    const Shape gs{pr.gu, gur, ne, "gate/up"}, ds{pr.d, ne, ff, "down"};
+    const size_t gub = mmq::matrix_bytes((int) pr.gu, gur, ne), db = mmq::matrix_bytes((int) pr.d, ne, ff);
     const size_t up_off = gub / 2, down_off = gub, bytes = gub + db;
-    const size_t over = mmq::overread_bytes((int) pr.d, 640);
+    const size_t over = mmq::overread_bytes((int) pr.d, ff);
     // native blobs, each in its own place: direct ones in "cache slots" with a guard, gathered ones elsewhere
     std::vector<std::vector<uint8_t>> blob((size_t) n, std::vector<uint8_t>(bytes));
     for (auto& b : blob) {
-        fill_matrix(b.data(), pr.gu, 1280, 2560, rng);
-        fill_matrix(b.data() + down_off, pr.d, 2560, 640, rng);
+        fill_matrix(b.data(), pr.gu, gur, ne, rng);
+        fill_matrix(b.data() + down_off, pr.d, ne, ff, rng);
     }
     const size_t stride = (bytes + mmq::kSlotGuard + 255) / 256 * 256;
     Dev arena((size_t) n * (stride + 4 * 256) + 4096);
@@ -318,9 +320,9 @@ void group_case(mmq::Context& ctx, const Pair& pr, const std::vector<int>& cnt, 
         o += stride;
         upload(at[(size_t) z], blob[(size_t) z].data(), bytes, "blob");
     }
-    Acts ag(pr.gu, 2560, cnt, rng, s), ad(pr.d, 640, cnt, rng, s);
+    Acts ag(pr.gu, ne, cnt, rng, s), ad(pr.d, ff, cnt, rng, s);
     const int64_t mr = std::max<int64_t>(1, max_of(cnt));
-    const size_t out_g = (size_t) std::max<int64_t>(1, ag.total) * 1280 * 4, out_d = (size_t) std::max<int64_t>(1, ad.total) * 2560 * 4;
+    const size_t out_g = (size_t) std::max<int64_t>(1, ag.total) * gur * 4, out_d = (size_t) std::max<int64_t>(1, ad.total) * ne * 4;
     // reference: today's walk (gather at q, two tail memsets)
     Dev rgu((size_t) G * gub + TAIL), rd((size_t) G * db + TAIL), ref_g(out_g), ref_d(out_d);
     fill_nan(rgu.b(), rgu.n);
@@ -386,7 +388,8 @@ void group_case(mmq::Context& ctx, const Pair& pr, const std::vector<int>& cnt, 
     ctx.run(p, s);
     ck(cudaStreamSynchronize(s), "group");
     char what[256];
-    std::snprintf(what, sizeof what, "%s+%s group n=%d direct=%d %s (%s)", ggml_type_name(pr.gu), ggml_type_name(pr.d), n,
+    std::snprintf(what, sizeof what, "%s+%s [%lld/%lld] group n=%d direct=%d %s (%s)", ggml_type_name(pr.gu),
+                  ggml_type_name(pr.d), (long long) ff, (long long) ne, n,
                   gd.n, group_gather ? "gather_native_group" : "gather_native", label);
     std::string w1 = std::string(what) + " gate/up", w2 = std::string(what) + " down";
     same_bits(ref_g, got_g, out_g, w1.c_str());
@@ -573,9 +576,22 @@ int main() {
             }
             sweep(ctx, sh, false, rng, s);
         }
+        // Qwen3.6-35B-A3B's widths (n_ff 512, n_embd 2048): a UD-IQ4_XS pack's IQ3_S gate/up and IQ4_XS down, fully
+        const Shape q36[] = {{GGML_TYPE_IQ3_S, 1024, 2048, "gate/up"}, {GGML_TYPE_IQ4_XS, 2048, 512, "down"}};
+        for (const Shape& sh : q36) {
+            if (!mmq::tab_fits((int) sh.t, sh.rows) || mmq::overread_bytes((int) sh.t, sh.cols) > mmq::kSlotGuard) {
+                std::printf("FAIL: no pointer-table MMQ for %s %s at [%lld, %lld]\n", ggml_type_name(sh.t), sh.role,
+                            (long long) sh.rows, (long long) sh.cols);
+                return 1;
+            }
+            std::printf("%-8s %-7s [%lld, %lld] over-read past the matrix: %zu B\n", ggml_type_name(sh.t), sh.role,
+                        (long long) sh.rows, (long long) sh.cols, mmq::overread_bytes((int) sh.t, sh.cols));
+            sweep(ctx, sh, true, rng, s);
+        }
         // Part 3
         const int f0 = g_fail, c0 = g_cases;
-        for (const Pair pr : {Pair{GGML_TYPE_IQ3_S, GGML_TYPE_IQ4_NL}, Pair{GGML_TYPE_IQ3_S, GGML_TYPE_Q8_0}}) {
+        for (const Pair pr : {Pair{GGML_TYPE_IQ3_S, GGML_TYPE_IQ4_NL}, Pair{GGML_TYPE_IQ3_S, GGML_TYPE_Q8_0},
+                              Pair{GGML_TYPE_IQ3_S, GGML_TYPE_IQ4_XS, 512, 2048}}) {
             for (int gg = 0; gg < 2; ++gg) {
                 const bool group_gather = gg == 1;
                 // alternating direct / gathered, last entry direct

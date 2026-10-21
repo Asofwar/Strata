@@ -1219,21 +1219,22 @@ const MmqPlan& mmq_plan() {
         }
         // STRATA_MMQ_DIRECT=1: a native layer's resident experts are read in place when the pointer-table MMQ covers
         // both products, gate/up reads nothing past its matrix, the down over-read fits the slot guard, and the blob
-        // is exactly [gate | up | down] in MMQ's matrix sizes (the bytes a gather would copy)
+        // is exactly [gate | up | down] in MMQ's matrix sizes (the bytes a gather would copy).  At the model's own
+        // widths, like the products (Flash-Next's 640 / N, Qwen3.6's 512 / 2048); not the WMMA-only layers
         p.direct.assign(p.layer.size(), 0);
         p.d_over.assign(p.layer.size(), 0);
-        if (on && lay.native && mmq::direct_mode() == 1 && ff == 640 && ne == N) {   // (Flash-Next's widths)
+        if (on && lay.native && mmq::direct_mode() == 1) {
             int64_t nd = 0;
             for (int64_t l = 0; l < layers; ++l) {
-                if (!p.layer[(size_t) l]) continue;
+                if (!p.layer[(size_t) l] || p.wmma_only[(size_t) l]) continue;
                 const auto& f = lay.fmt[(size_t) l];
                 const int gt = f.gu_type, dt = f.d_type;
-                if (!mmq::tab_fits(gt, 1280) || !mmq::tab_fits(dt, N)) continue;
-                if (mmq::overread_bytes(gt, N) != 0 || mmq::overread_bytes(dt, 640) > mmq::kSlotGuard) continue;
-                if (f.up_off != mmq::matrix_bytes(gt, 1280, N) / 2 || f.down_off != 2 * f.up_off) continue;
-                if (mmq::matrix_bytes(dt, N, 640) != f.bytes - f.down_off) continue;
+                if (!mmq::tab_fits(gt, 2 * ff) || !mmq::tab_fits(dt, ne)) continue;
+                if (mmq::overread_bytes(gt, ne) != 0 || mmq::overread_bytes(dt, ff) > mmq::kSlotGuard) continue;
+                if (f.up_off != mmq::matrix_bytes(gt, 2 * ff, ne) / 2 || f.down_off != 2 * f.up_off) continue;
+                if (mmq::matrix_bytes(dt, ne, ff) != f.bytes - f.down_off) continue;
                 p.direct[(size_t) l] = 1;
-                p.d_over[(size_t) l] = (uint32_t) mmq::overread_bytes(dt, 640);
+                p.d_over[(size_t) l] = (uint32_t) mmq::overread_bytes(dt, ff);
                 ++nd;
             }
             std::fprintf(stderr, "strata: prompt MMQ reads resident experts in place (STRATA_MMQ_DIRECT=1): %lld of %lld "
