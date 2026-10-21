@@ -144,6 +144,13 @@ class InstallPack(unittest.TestCase):
         self.assertNotIn("parallel", self.cfg)
         self.assertNotIn(("build",), self.calls)
         self.assertIn(("config", "strata-cybertiel-ud-iq4_xs.json"), self.calls)
+        # the fork's measured settings for the pack path (setup.PACK_TUNED)
+        self.assertIn("--kv-grow", a)
+        self.assertEqual(self.cfg["env"]["STRATA_ATTN_WINDOW"], "1")
+        self.assertEqual(self.cfg["env"]["STRATA_ATTN_WINDOW_PREC"], "2")
+        self.assertEqual(self.cfg["env"]["STRATA_PROMPT_ATTN_FP16ACC"], "2")
+        self.assertEqual(self.cfg["reasoning_loop_recovery"], "resample")
+        self.assertIs(self.cfg["reasoning_close_retry"], True)
 
     def test_ornith_abl_and_the_draft_subset(self):
         rc, out = self.install(family="ornith-abl", model="IQ3_S", draft_vocab="cyrillic", vram=12.0, kv="q4_0")

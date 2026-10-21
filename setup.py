@@ -671,6 +671,12 @@ CYBER_TIEL_FILES = {
 # the MTP block, 2 KV heads x 256
 PACK_KV_BYTES_PER_TOKEN = 11 * 2 * 2 * (256 + 256 // 64 * 2)
 # RAM: the experts (arena_gb, measured where said) + ~10.7 GB, as the 35B-A3B sizes measured on the pack path
+# The fork's measured settings for the pack path (RTX 5080 16 GB, i9-14900K, Cyber-Tiel UD-IQ4_XS; docs/FORK.ru.md):
+# the window decode attention (200K: 48.6 -> 88.9 tok/s), FP16 prompt attention (64K TTFT 19.07 -> 11.96 s), the K/V
+# growing with the context (7,637 expert slots instead of 5,734), and the server's loop recovery for agents.
+PACK_TUNED = {"env": {"STRATA_ATTN_WINDOW": "1", "STRATA_ATTN_WINDOW_PREC": "2", "STRATA_PROMPT_ATTN_FP16ACC": "2"},
+              "args": ["--kv-grow"],
+              "serve": {"reasoning_loop_recovery": "resample", "reasoning_close_retry": True}}
 OWN_PATH_FAMILIES.update({
     "ornith-abl": {"title": "Huihui-Ornith-1.5-35B-A3B-abliterated", "pack": True, "arch": "qwen35moe",
                    "by": "huihui-ai's abliterated Ornith-1.5; mradermacher's i1 GGUFs",
@@ -687,7 +693,7 @@ OWN_PATH_FAMILIES.update({
                               "IQ3_S": {"about": "~3.5-bit i-quant (mradermacher i1), smaller (~13.6 GB of experts, "
                                                  "estimated)", "ram_gb": 26, "arena_gb": 13.6}},
                    "sha256": ORNITH_ABL_FILES, "pack_args": ["--compat-bf16"], "profile": "expert-profile-qwen36.bin",
-                   "kv_bytes_per_token": PACK_KV_BYTES_PER_TOKEN, "spec": 4},
+                   "kv_bytes_per_token": PACK_KV_BYTES_PER_TOKEN, "spec": 4, "tuned": PACK_TUNED},
     "cyber-tiel": {"title": "Cyber-Tiel-Coder-35B-A3B", "pack": True, "arch": "qwen35moe",
                    "by": "peculiar-ragdoll's coding fine-tune of the abliterated Ornith-1.5",
                    "about": "the abliterated Ornith tuned for coding, with the \"Sharp\" chat template (it thinks "
@@ -703,7 +709,7 @@ OWN_PATH_FAMILIES.update({
                               "UD-IQ3_XXS": {"about": "~3-bit i-quant (Unsloth Dynamic style), smaller; not run yet",
                                              "ram_gb": 22, "arena_gb": 11.2}},
                    "sha256": CYBER_TIEL_FILES, "pack_args": ["--compat-bf16"], "profile": "expert-profile-qwen36.bin",
-                   "kv_bytes_per_token": PACK_KV_BYTES_PER_TOKEN, "spec": 4},
+                   "kv_bytes_per_token": PACK_KV_BYTES_PER_TOKEN, "spec": 4, "tuned": PACK_TUNED},
 })
 PREVIEW_FAMILIES = OWN_PATH_FAMILIES             # the earlier name (tools and tests that import it)
 
@@ -7193,6 +7199,10 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
                 "--mtp-draft-vocab", str(ROOT / "data" / DRAFT_VOCABS.get(draft_vocab, "draft_vocab.bin")),
                 "--max-context", str(ctx), "--kv", a.kv or "int8"]
         ok(f"KV cache: {a.kv or 'int8'}; MTP draft layer: the model file's own (token subset: {draft_vocab})")
+        if fam.get("tuned"):                           # the fork's measured settings (PACK_TUNED)
+            args += fam["tuned"]["args"]
+            ok("fork settings: window decode attention, FP16 prompt attention, K/V grown with the context, "
+               "loop recovery (docs/FORK.ru.md)")
     else:
         args = ["--native", str(gguf), "--max-context", str(ctx), "--prefill", "auto", "--mtp", str(fam["mtp"])]
     if a.vram_reserve_mib is not None and pack_path:   # the pack path keeps it free itself
@@ -7206,6 +7216,9 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
     cfg = {"exe": engine_exe(eng), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            "model_name": f"{fam['name']}-{model.lower()}", "arch": fam["arch"],
            "log": str(home() / f"strata-{tag.lower()}.log"), "lib_dirs": lib_dirs, "port": port}
+    if pack_path and fam.get("tuned"):
+        cfg["env"] = {**fam["tuned"]["env"], **(cfg.get("env") or {})}
+        cfg.update(fam["tuned"]["serve"])
     if cuda_tk == 12:
         cfg["cuda"] = 12
     if hip:

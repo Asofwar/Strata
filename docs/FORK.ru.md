@@ -178,6 +178,28 @@ Ornith IQ4_XS на том же ПК (сборка до 0.1.46, MTP с кирил
 
 ## Установка
 
+### Что setup ставит сам (семейства `cyber-tiel` и `ornith-abl`)
+
+С 0.2.1.1-asofwar.2 setup пишет в конфиг настройки, замеренные на RTX 5080 16 GB + i9-14900K с Cyber-Tiel UD-IQ4_XS:
+
+| Настройка | Что даёт (замер) |
+|---|---|
+| `STRATA_ATTN_WINDOW=1`, `STRATA_ATTN_WINDOW_PREC=2` | внимание окна проверки за один проход по KV: 200K 48.6 → 88.9 tok/s, 130K 54.3 → 107.5 |
+| `STRATA_PROMPT_ATTN_FP16ACC=2` | чтение длинного промпта: 64K TTFT 19.07 → 11.96 с |
+| `--kv-grow` | K/V занимает VRAM по мере роста контекста: 7 637 слотов экспертов вместо 5 734 |
+| `"reasoning_loop_recovery": "resample"`, `"reasoning_close_retry": true` | выход из зацикленных рассуждений у агентов (Codex) |
+
+Не ставятся сами, потому что зависят от ПК (включайте вручную или через `--calibrate-switches`):
+
+| Настройка | Замер на этом ПК |
+|---|---|
+| `STRATA_IQ3S_MT1=1` | вместе с `--kv-grow`: 130K 114 → 164 tok/s, 200K 117 → 140 (i9-14900K) |
+| `STRATA_ADAPT_OVERLAP=1` | decode +13.9% (шум 11%), выбирается `setup.py --calibrate-switches` |
+| `STRATA_ATTN_SPLITS=256` | замерено только на RTX 5080 |
+| `--pcie-frac 0` | на PCIe 5.0 x8 у Coder на 66K +66% decode; для Cyber-Tiel отдельно не замерено |
+| `--conversation-disk-dir D:\Strata-data\conv-disk --conversation-disk-mib 32768 --conversation-disk-persist on` | переключение между разговорами по ~123K токенов 33–34 с → 2.4–2.6 с (NVMe Kingston KC3000) |
+
+
 Из папки репозитория (Windows):
 
 ```
