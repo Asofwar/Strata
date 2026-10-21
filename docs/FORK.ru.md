@@ -187,6 +187,8 @@ Ornith IQ4_XS на том же ПК (сборка до 0.1.46, MTP с кирил
 | `STRATA_ATTN_WINDOW=1`, `STRATA_ATTN_WINDOW_PREC=2` | внимание окна проверки за один проход по KV: 200K 48.6 → 88.9 tok/s, 130K 54.3 → 107.5 |
 | `STRATA_PROMPT_ATTN_FP16ACC=2` | чтение длинного промпта: 64K TTFT 19.07 → 11.96 с |
 | `--kv-grow` | K/V занимает VRAM по мере роста контекста: 7 637 слотов экспертов вместо 5 734 |
+| `STRATA_PROMPT_ATTN_DENSE_IMMA=2` | внимание при чтении промпта на int8-тензорных ядрах: 200K с нуля 76.7 → 60.0 с, 130K 37.2 → 30.8 с |
+| `"sampling": {"temperature": 0.6, "presence_penalty": 0}` | без «испорченных» слов в ответах: 0 из 256 против 16 из 672 при T 1.0 / presence 1.5 ([EVAL.ru.md](EVAL.ru.md)) |
 | `"reasoning_loop_recovery": "resample"`, `"reasoning_close_retry": true` | выход из зацикленных рассуждений у агентов (Codex) |
 
 Не ставятся сами, потому что зависят от ПК (включайте вручную или через `--calibrate-switches`):

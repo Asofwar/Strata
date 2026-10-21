@@ -673,10 +673,13 @@ PACK_KV_BYTES_PER_TOKEN = 11 * 2 * 2 * (256 + 256 // 64 * 2)
 # RAM: the experts (arena_gb, measured where said) + ~10.7 GB, as the 35B-A3B sizes measured on the pack path
 # The fork's measured settings for the pack path (RTX 5080 16 GB, i9-14900K, Cyber-Tiel UD-IQ4_XS; docs/FORK.ru.md):
 # the window decode attention (200K: 48.6 -> 88.9 tok/s), FP16 prompt attention (64K TTFT 19.07 -> 11.96 s), the K/V
-# growing with the context (7,637 expert slots instead of 5,734), and the server's loop recovery for agents.
-PACK_TUNED = {"env": {"STRATA_ATTN_WINDOW": "1", "STRATA_ATTN_WINDOW_PREC": "2", "STRATA_PROMPT_ATTN_FP16ACC": "2"},
+# growing with the context (7,637 expert slots instead of 5,734), the INT8 prompt attention (200K read 76.7 ->
+# 60.0 s), the server's loop recovery for agents, and T 0.6 / presence 0 (bench/eval-ru: no spoiled words, 0 of
+# 256 replies against 16 of 672 at the model card's T 1.0 / presence 1.5).
+PACK_TUNED = {"env": {"STRATA_ATTN_WINDOW": "1", "STRATA_ATTN_WINDOW_PREC": "2", "STRATA_PROMPT_ATTN_FP16ACC": "2",
+                      "STRATA_PROMPT_ATTN_DENSE_IMMA": "2"},
               "args": ["--kv-grow"],
-              "serve": {"reasoning_loop_recovery": "resample", "reasoning_close_retry": True}}
+              "serve": {"reasoning_loop_recovery": "resample", "reasoning_close_retry": True, "sampling": {"temperature": 0.6, "presence_penalty": 0}}}
 OWN_PATH_FAMILIES.update({
     "ornith-abl": {"title": "Huihui-Ornith-1.5-35B-A3B-abliterated", "pack": True, "arch": "qwen35moe",
                    "by": "huihui-ai's abliterated Ornith-1.5; mradermacher's i1 GGUFs",

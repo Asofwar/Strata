@@ -151,6 +151,8 @@ class InstallPack(unittest.TestCase):
         self.assertEqual(self.cfg["env"]["STRATA_PROMPT_ATTN_FP16ACC"], "2")
         self.assertEqual(self.cfg["reasoning_loop_recovery"], "resample")
         self.assertIs(self.cfg["reasoning_close_retry"], True)
+        self.assertEqual(self.cfg["env"]["STRATA_PROMPT_ATTN_DENSE_IMMA"], "2")
+        self.assertEqual(self.cfg["sampling"], {"temperature": 0.6, "presence_penalty": 0})
 
     def test_ornith_abl_and_the_draft_subset(self):
         rc, out = self.install(family="ornith-abl", model="IQ3_S", draft_vocab="cyrillic", vram=12.0, kv="q4_0")
