@@ -11114,6 +11114,10 @@ int main(int argc, char** argv) {
             std::condition_variable cv;
             std::deque<std::string> lines;
             bool eof = false;
+            // GEN grammar=: the server's answers to a window's G line (G ... and GD ...), read by the decode loop while
+            // a request runs (serve/grammar.py)
+            std::deque<std::string> glines;
+            std::condition_variable gcv;
         };
         const auto in_shared = std::make_shared<StdinShared>();
         std::atomic<bool>& stop_req = in_shared->stop_req;
@@ -11155,12 +11159,18 @@ int main(int argc, char** argv) {
                 if (!l.empty() && l.back() == '\r') l.pop_back();
                 if (l == "STOP") { st->stop_req.store(true); continue; }
                 std::lock_guard<std::mutex> lk(st->mu);
+                if (l.size() >= 2 && l[0] == 'G' && (l[1] == ' ' || (l[1] == 'D' && l.size() >= 3 && l[2] == ' '))) {
+                    st->glines.push_back(l);
+                    st->gcv.notify_one();
+                    continue;
+                }
                 st->lines.push_back(l);
                 st->cv.notify_one();
             }
             std::lock_guard<std::mutex> lk(st->mu);
             st->eof = true;
             st->cv.notify_one();
+            st->gcv.notify_one();
         }).detach();
         auto next_line = [&](std::string& out) -> bool {
             std::unique_lock<std::mutex> lk(in_mu);
@@ -11314,13 +11324,18 @@ int main(int argc, char** argv) {
                     slots_all += remote_experts[(size_t) r].resident();
                     mib_all += (int64_t) (remote_experts[(size_t) r].gib() * 1024.0);
                 }
-            std::printf("INFO logit_bias=1 context=%lld kv=%s kv_resident=%lld expert_slots=%lld expert_cache_mib=%lld "
+            std::printf("INFO logit_bias=1 grammar=%d context=%lld kv=%s kv_resident=%lld expert_slots=%lld expert_cache_mib=%lld "
                         "expert_slots_primary=%lld expert_cache_primary_mib=%lld spec=%d "
                         "mtp_max=%d lookup=%d vram_free_mib=%lld cvec=%s arena_mib=%lld pool_workers=%d pcie_frac=%.2f "
                         "spec_min_p=%.2f conversation_cache_mib=%lld conversation_cache_slots=%d "
                         "conversation_cache_min_free_mib=%lld conversation_cache_min_tokens=%lld "
                         "tail_role_token=%lld vram_elastic=%d "
                         "prefill_cap=%lld prefill_stages=%d stream_all_min=%lld prefill_pipe=%g%s engine=" STRATA_VERSION "\n",
+#if defined(STRATA_GPU_METAL)
+                        0,   // GEN grammar= is refused on Metal
+#else
+                        1,
+#endif
                         (long long) o.max_context, o.kv.c_str(),
                         (long long) (g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1
                                          ? ss.qsa_states[ss.qsa_primary()].n_slots * 4 : 0),
@@ -12550,6 +12565,12 @@ int main(int argc, char** argv) {
             // in prompt order.  With them the conversation cache matches a picture by its key and grid, not by its
             // embedding floats, so a picture encoded again with other bits still matches.  Absent: the embeddings' hash.
             std::vector<uint64_t> req_img_keys;
+            // grammar=<id>,<id>,... | -1 (serve's constrained decoding, serve/grammar.py; docs/DETAILS.md): the decode
+            // runs freely until it emits one of these tokens (-1: constrained from the first token), cuts its window
+            // there, and from then on asks the server for each window's row masks (a G line out, G/GD lines back)
+            // until the server answers "G off".  Absent = as before.
+            std::string req_grammar_text;
+            bool req_grammar_present = false;
             bool req_pcie_set = false;   // the request names its own share (the measured one holds meanwhile)
             if (endp != nullptr) {   // GENI takes the same keys (#75: image requests were always greedy); its
                                      // embedding file path is the first token without an =
@@ -12564,6 +12585,7 @@ int main(int argc, char** argv) {
                     const std::string key = tok.substr(0, eq);
                     const float fv = std::strtof(tok.c_str() + eq + 1, nullptr);
                     if (key == "logit_bias") { req_bias_text = tok.substr(eq + 1); req_bias_present = true; }
+                    else if (key == "grammar") { req_grammar_text = tok.substr(eq + 1); req_grammar_present = true; }
                     else if (key == "cvec") req_cvec = std::atoi(tok.c_str() + eq + 1);
                     else if (key == "ckpt") req_ckpt = std::atoi(tok.c_str() + eq + 1) != 0;
                     else if (key == "pin") req_pin = std::max<long long>(0, std::atoll(tok.c_str() + eq + 1));
@@ -12602,6 +12624,39 @@ int main(int argc, char** argv) {
                 !strata::core::parse_logit_bias(req_bias_text, (int) n_vocab, req_bias, bias_error))) {
                 std::printf("ERR logit_bias: %s\n", o.batch > 0 ? "continuous batching is not supported" : bias_error.c_str());
                 continue;
+            }
+            struct Grammar {
+                bool on = false;                  // the request has grammar=
+                bool active = false;              // the next window asks the server for its masks
+                std::vector<int32_t> triggers;
+                std::map<int, std::vector<uint32_t>> masks;   // this request's masks by the server's id
+                uint32_t masked_rows = 0;         // the last window's rows that had a mask (bit per window row)
+                int64_t windows = 0, cuts = 0;
+                double wait_ms = 0.0;
+            } gram;
+            if (req_grammar_present) {
+                bool ok = o.batch == 0;
+#if defined(STRATA_GPU_METAL)
+                ok = false;
+#endif
+                gram.on = ok;
+                const char* q = req_grammar_text.c_str();
+                while (ok && *q != '\0') {
+                    char* qe = nullptr;
+                    const long long v = std::strtoll(q, &qe, 10);
+                    if (qe == q || (v != -1 && (v < 0 || v >= n_vocab))) { ok = false; break; }
+                    if (v == -1) gram.active = true;
+                    else gram.triggers.push_back((int32_t) v);
+                    q = *qe == ',' ? qe + 1 : qe;
+                    if (*qe != ',' && *qe != '\0') ok = false;
+                }
+                if (!ok) {
+                    std::printf("ERR grammar: %s\n", o.batch > 0 ? "continuous batching is not supported"
+                                                    : !gram.on ? "not supported on this backend" : "bad trigger list");
+                    continue;
+                }
+                std::lock_guard<std::mutex> lk(in_mu);
+                in_shared->glines.clear();   // nothing of an earlier request
             }
             std::string emb_path;
             if (geni && endp != nullptr) {
@@ -14599,7 +14654,8 @@ int main(int argc, char** argv) {
             const bool pl_want = pipe && pl_pw >= 2 && pl_snap_ok;
             const char* pl_serial = !pl_want ? nullptr
                                   : hist_n > 0 ? "repetition penalties (penalty_last_n)"
-                                  : mtp.coupled() ? "coupled draft sampling" : nullptr;
+                                  : mtp.coupled() ? "coupled draft sampling"
+                                  : gram.on ? "grammar-constrained decoding" : nullptr;
             if (pl_serial != nullptr) {   // said once per reason
                 static std::set<std::string> said;
                 if (said.insert(pl_serial).second)
@@ -15450,6 +15506,97 @@ int main(int argc, char** argv) {
                 // a suffix window and the lookup chain's tail are point masses and keep the exact-match rule
                 // (never on a first window: a merged one holds prompt tokens, not drafts)
                 if (use_mtp && mtp.prob() && !from_sfx && !first_window && T_mtp > 1) ver.set_spec_q(mtp.spec_q(), T_mtp - 1);
+                gram.masked_rows = 0;
+                if (gram.active) {
+                    // the masked rows: all of a decode window, the last of a merged one (its others are prompt rows);
+                    // row r's mask is the grammar after the drafts before it, so the line carries those drafts.  It
+                    // goes out before the window runs: the server computes while the GPU works, run() waits for it
+                    // just before the sampling.
+                    const int rows = merged ? 1 : T;
+                    std::string gl = "G " + std::to_string(rows);
+                    for (int i = T - rows + 1; i < T; ++i) { gl += ' '; gl += std::to_string(window[(size_t) i]); }
+                    gl += '\n';
+                    std::fwrite(gl.data(), 1, gl.size(), stdout);
+                    std::fflush(stdout);
+                    ++gram.windows;
+                    const long nv_engine = (long) n_vocab;
+                    ver.set_row_masks([&gram, &in_shared, &stop_req, rows, nv_engine](int Tw, const uint32_t** out_rows,
+                                                                                      std::string& e) -> bool {
+                        const auto g0 = std::chrono::steady_clock::now();
+                        for (;;) {
+                            std::string l;
+                            {
+                                std::unique_lock<std::mutex> lk(in_shared->mu);
+                                in_shared->gcv.wait_for(lk, std::chrono::milliseconds(50),
+                                                        [&] { return !in_shared->glines.empty() || in_shared->eof; });
+                                if (!in_shared->glines.empty()) {
+                                    l = std::move(in_shared->glines.front());
+                                    in_shared->glines.pop_front();
+                                } else if (in_shared->eof) {
+                                    e = "grammar: stdin closed while waiting for the window's masks";
+                                    return false;
+                                }
+                            }
+                            const double waited = std::chrono::duration<double, std::milli>(
+                                                      std::chrono::steady_clock::now() - g0).count();
+                            if (l.empty()) {
+                                strata::core::progress_beat();   // waiting for the server is not a stuck window
+                                // stopped: this window samples unconstrained, the loop ends after it (cancel)
+                                if (stop_req.load()) { gram.active = false; gram.wait_ms += waited; return true; }
+                                if (waited > 120000.0) { e = "grammar: the server did not send the window's masks"; return false; }
+                                continue;
+                            }
+                            const char* c = l.c_str();
+                            char* ce = nullptr;
+                            if (l[1] == 'D') {   // GD <id> <n_vocab> <+|-><a>[-<b>],...
+                                const long id = std::strtol(c + 3, &ce, 10);
+                                const long nv = std::strtol(ce, &ce, 10);
+                                while (*ce == ' ') ++ce;
+                                const char sign = *ce;
+                                if (id <= 0 || nv != nv_engine || (sign != '+' && sign != '-')) {
+                                    e = "grammar: bad GD line (or a vocabulary that is not the model's)";
+                                    return false;
+                                }
+                                const size_t words = ((size_t) nv + 31) / 32;
+                                std::vector<uint32_t>& m = gram.masks[(int) id];
+                                m.assign(words, sign == '+' ? 0u : ~0u);
+                                const char* r = ce + 1;
+                                while (*r != '\0') {
+                                    char* re = nullptr;
+                                    const long a0 = std::strtol(r, &re, 10);
+                                    long b0 = a0;
+                                    if (re == r) { e = "grammar: bad GD range"; return false; }
+                                    if (*re == '-') { r = re + 1; b0 = std::strtol(r, &re, 10); }
+                                    if (a0 < 0 || b0 < a0 || b0 >= nv) { e = "grammar: GD range outside the vocabulary"; return false; }
+                                    for (long v = a0; v <= b0; ++v) {
+                                        if (sign == '+') m[(size_t) v >> 5] |= 1u << (v & 31);
+                                        else m[(size_t) v >> 5] &= ~(1u << (v & 31));
+                                    }
+                                    r = *re == ',' ? re + 1 : re;
+                                    if (*re != ',' && *re != '\0') { e = "grammar: bad GD list"; return false; }
+                                }
+                                if (nv % 32 != 0) m[words - 1] &= (1u << (nv % 32)) - 1u;   // no token past the vocabulary
+                                continue;
+                            }
+                            gram.wait_ms += waited;
+                            if (l == "G off") { gram.active = false; return true; }   // the constrained part is over
+                            ce = const_cast<char*>(c + 1);
+                            for (int r = 0; r < rows; ++r) {
+                                const long id = std::strtol(ce, &ce, 10);
+                                if (id == 0) continue;
+                                const auto it = gram.masks.find((int) id);
+                                if (it == gram.masks.end()) { e = "grammar: a mask the server never defined"; return false; }
+                                const int row = Tw - rows + r;
+                                if (row < 0 || row >= Tw || row >= 32) { e = "grammar: rows out of step"; return false; }
+                                out_rows[row] = it->second.data();
+                                gram.masked_rows |= 1u << row;
+                            }
+                            return true;
+                        }
+                    });
+                } else if (gram.on) {
+                    ver.set_row_masks(nullptr);   // a window that ended before its sampling leaves none behind
+                }
                 if (!ver.run(T, window.data(), p, win_pool_fn, win_pool_user, outv.data(), err) || drive.d.failed) {
                     std::printf("ERR %s\n", drive.d.failed && drive.d.fail ? drive.d.fail : err.c_str());
                     return 1;
@@ -15471,13 +15618,27 @@ int main(int argc, char** argv) {
                 }
                 int a = merged ? T - 1 : 0;   // a merged window commits every row, as the prompt windows do
                 while (a < T - 1 && window[(size_t) a + 1] == outv[(size_t) a]) ++a;
-                if (from_sfx) { ++sfx_windows; sfx_drafts += T - 1; sfx_ok += a; }
-                if (chain_n > 0) { ++chain_windows; chain_drafts += chain_n; chain_ok += std::max(0, a - (T_mtp - 1)); }
-                if (!from_sfx && !first_window)
-                    for (int d = 0; d < T_mtp - 1 && d < 8 && d <= a; ++d) { ++dp_tested[d]; dp_ok[d] += d < a; }
-                if (strata::core::MtpDrafter::top2_env() && !from_sfx && !first_window && a < T_mtp - 1 && a < 8) {
-                    ++t2_rej[a];
-                    if (mtp.top2(a) == outv[(size_t) a]) ++t2_hit[a];
+                const int a_drafts = a;   // the drafts' own acceptance (the statistics and the draft policy)
+                if (gram.on) {   // a trigger picked on a free row ends the window: the next one is constrained
+                    for (int i = merged ? a : 0; i <= a; ++i)
+                        if (((gram.masked_rows >> i) & 1u) == 0 &&
+                            std::find(gram.triggers.begin(), gram.triggers.end(), outv[(size_t) i]) != gram.triggers.end()) {
+                            a = i;
+                            gram.active = true;
+                            ++gram.cuts;
+                            break;
+                        }
+                }
+                {
+                    const int a = a_drafts;
+                    if (from_sfx) { ++sfx_windows; sfx_drafts += T - 1; sfx_ok += a; }
+                    if (chain_n > 0) { ++chain_windows; chain_drafts += chain_n; chain_ok += std::max(0, a - (T_mtp - 1)); }
+                    if (!from_sfx && !first_window)
+                        for (int d = 0; d < T_mtp - 1 && d < 8 && d <= a; ++d) { ++dp_tested[d]; dp_ok[d] += d < a; }
+                    if (strata::core::MtpDrafter::top2_env() && !from_sfx && !first_window && a < T_mtp - 1 && a < 8) {
+                        ++t2_rej[a];
+                        if (mtp.top2(a) == outv[(size_t) a]) ++t2_hit[a];
+                    }
                 }
                 const Clock::time_point tw1 = Clock::now();
                 host_cpu_tick();
@@ -15560,10 +15721,10 @@ int main(int argc, char** argv) {
                     return 1;
                 }
                 if (timed_round && !eos && chain_n == 0)
-                    policy.observe(from_sfx, T, a, sfx_match,
+                    policy.observe(from_sfx, T, a_drafts, sfx_match,
                                    std::chrono::duration<double, std::milli>(Clock::now() - round0).count());
                 else if (timed_round && !eos)   // a chained window: its MTP part, its chain, its cost
-                    policy.observe_chain(T_mtp, chain_n, a, cm,
+                    policy.observe_chain(T_mtp, chain_n, a_drafts, cm,
                                          std::chrono::duration<double, std::milli>(Clock::now() - round0).count());
                 if (eos) { finish = "stop"; break; }
                 if (stop_req.load()) { finish = "cancel"; break; }
@@ -15773,6 +15934,10 @@ int main(int argc, char** argv) {
                 std::snprintf(chain_txt, sizeof(chain_txt), " %lld %lld %lld %lld %lld", (long long) chain_ok,
                               (long long) chain_drafts, (long long) sfx_ok, (long long) sfx_drafts, (long long) dec_windows);
             if (yielded_at >= 0) std::printf("YIELDED %d %lld\n", yielded_slot, (long long) yielded_at);
+            if (gram.on)
+                std::fprintf(stderr, "strata serve: grammar: %lld constrained windows, %lld cut at a trigger, %zu masks, "
+                                     "%.3f ms/window waiting for the server's masks\n", (long long) gram.windows,
+                             (long long) gram.cuts, gram.masks.size(), gram.windows > 0 ? gram.wait_ms / (double) gram.windows : 0.0);
             std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld %lld %lld %.1f %lld %lld%s chunk=%lld "
                         "experts_streamed=%lld\n",
                         (long long) produced_n,

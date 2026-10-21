@@ -2958,7 +2958,7 @@ llama.cpp's `json_schema` send. A root that also allows an array, string, number
 "jsonschema>=4.23,<5"`; setup does not add it); without it the answer is only checked to be one JSON object, and the
 server says so once.
 
-This is **schema prompting followed by server validation**, not grammar-constrained decoding. One generation
+By default this is **schema prompting followed by server validation**, not grammar-constrained decoding. One generation
 is made per request, with no hidden retry. Successful responses contain a validated JSON object. Malformed JSON,
 duplicate keys, non-finite numbers, schema violations and incomplete generations return **502** with
 `error.code: structured_output_failed`; invalid request schemas return **400**. JSON formats combined with
@@ -2967,6 +2967,44 @@ tools/MCP are refused explicitly. Without `response_format`, ordinary text and t
 Structured SSE buffers the answer while sending keep-alive comments. It emits content only after validation,
 then usage/timings and `[DONE]`; failures emit an SSE error and `[DONE]` without invalid content deltas.
 `/v1/status.structured_output` advertises the formats, validation method and buffered streaming behavior.
+With `"constrained_json": true` (next section) the answer is also generated under the schema's grammar; the check
+above still runs.
+
+### Constrained decoding: tool calls and JSON under a grammar (opt-in)
+
+`"constrained_tools": true` in `strata-<model>.json` makes every tool call follow the request's tool list while it is
+generated: the function is one of the request's tools, every parameter is one of that tool's, each at most once, every
+required one is there, and a value that is not a string is JSON that matches the parameter's own schema (types,
+enums, required keys inside objects, `additionalProperties: false`, ranges). `"constrained_json": true` does the same
+for a `response_format` `json_object` / `json_schema` answer. A request can turn either on or off for itself with the
+same key (`"constrained_tools": false` in the request body). Both are off by default: then nothing is sent to the
+engine and a reply is byte for byte what it was.
+
+It needs the Python package `llguidance` (`python -m pip install llguidance`; setup does not add it) and a CUDA or HIP
+engine that says `grammar=1` in its INFO line. Without them, or with `--batch`, the request runs unconstrained and the
+server says why once.
+
+How it works:
+
+- The server turns the tool list into a grammar of the chat template's own call form, after `<tool_call>`:
+  `\n<function=NAME>\n` then `<parameter=P>\nVALUE\n</parameter>\n` for each parameter, then
+  `</function>\n</tool_call>`. A string parameter's value is any text up to `\n</parameter>\n` (the parser keeps it
+  as written); any other value is JSON of the parameter's schema (the parser decodes it). Parameters may come in any
+  order when a tool has up to 6 of them; with more, in the schema's order (the optional ones can be left out).
+  [llguidance](https://github.com/guidance-ai/llguidance) compiles the grammar and computes the allowed tokens.
+- The engine runs freely until it emits `<tool_call>` (in the answer: one written inside the thinking is left alone),
+  ends its verify window there, and from then on writes `G <rows> <drafts>` before each window. The server answers with
+  one mask per row (`GD` lines define each new mask once; `G <id> ...` names them). Row t's mask is the grammar's
+  state after the window's drafts 1..t. The engine sets every logit outside a row's mask to -inf before its sampling,
+  so the pick (greedy, sampled, or the MTP rejection sampling) is always an allowed token, and a draft the grammar
+  forbids is never accepted. When the call is complete the server answers `G off` and the engine runs freely again,
+  until the next `<tool_call>`.
+- The engine sends its `G` line before the window runs and waits for the answer only at the sampling, so the masks
+  are computed while the GPU works on the window.
+- Limits: a string value cannot contain `\n</parameter>\n` (the parser would end it there anyway); a number with an
+  exponent (`1e3`) is refused where the schema gives the number a `minimum` or `maximum` (llguidance); a
+  `json_schema` answer on `/v1/responses` with tools stays checked afterwards only (the answer may be a call instead);
+  the SYCL and Metal engines do not have it.
 
 ### API request monitor
 

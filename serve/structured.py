@@ -152,6 +152,20 @@ def prepare_format(response_format, messages, with_tools=False):
     return messages, validator
 
 
+def format_schema(response_format):
+    """The JSON schema a response_format asks for ({"type": "object"} for json_object), or None (text, none, or a
+    shape prepare_format refuses).  For constrained decoding (serve/grammar.py): the answer is generated under it."""
+    if not isinstance(response_format, dict):
+        return None
+    if response_format.get("type") == "json_object":
+        return {"type": "object"}
+    if response_format.get("type") == "json_schema":
+        spec = response_format.get("json_schema")
+        if isinstance(spec, dict) and isinstance(spec.get("schema"), dict):
+            return spec["schema"]
+    return None
+
+
 def _extract_json(text: str) -> str:
     s = (text or "").strip()
     if not s:

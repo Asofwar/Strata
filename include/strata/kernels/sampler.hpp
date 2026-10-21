@@ -44,6 +44,12 @@ struct SamplerParams {
 void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* history, int history_len,
                    const SamplerParams& p, int* out, void* stream);
 
+// GRAMMAR (serve's constrained decoding, GEN grammar=): row t of `logits` (n_tokens, n_vocab) keeps only the tokens
+// whose bit is set in `masks` + t * ((n_vocab + 31) / 32) (bit v of word v / 32 = token v allowed); the others become
+// -inf, so any pick after it (greedy, sampled, rejection sampling) takes an allowed token.  Rows whose bit in `rows`
+// is clear are not touched.  Device pointers; at most 32 rows.
+void mask_logit_rows(float* logits, int n_tokens, int n_vocab, const uint32_t* masks, uint32_t rows, void* stream);
+
 // The greedy pick (no penalties) on a thread-block cluster of 8 CTAs per row (sm_90+, CUDA; S19): the same token as
 // sample_tokens' one-block argmax, which takes it unless STRATA_ARGMAX_MULTI=0.  False (nothing launched) where it
 // cannot run: HIP, a card or a build below sm_90.  Device pointers; capturable.

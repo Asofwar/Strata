@@ -609,6 +609,7 @@ Verifier::~Verifier() {
     if (qcnt_) cudaFree(qcnt_);
     if (d_spec_) cudaFree(d_spec_);
     if (logit_bias_device_) cudaFree(logit_bias_device_);
+    if (row_masks_device_) cudaFree(row_masks_device_);
     if (cs_ && cs_ != ext_stream_) cudaStreamDestroy(cs_);   // set_stream: the stage's stream, shared, not ours
     if (sh_cs_) cudaStreamDestroy(sh_cs_);
     if (copy_) { cudaStreamSynchronize(copy_); cudaStreamDestroy(copy_); }
@@ -642,6 +643,34 @@ uint64_t Verifier::dense_attention_bytes(const ModelGeometry& g, const SessionSt
     const uint64_t per_row = (uint64_t) cap * 4 +
                              strata::kernels::qsa_decode_attn_scratch_floats(cap, shapes_of(g)) * 4;
     return (uint64_t) max_t * per_row;
+}
+
+bool Verifier::apply_row_masks(int T, std::string& err) {
+    RowMaskFn fn = std::move(row_masks_);
+    row_masks_ = nullptr;
+    const uint32_t* rows[strata::kernels::kVerifyMaxT] = {};
+    if (T <= 0 || T > strata::kernels::kVerifyMaxT) { err = "verify: grammar masks for a window of " + std::to_string(T); return false; }
+    if (!fn(T, rows, err)) return false;
+    const size_t words = ((size_t) n_vocab_ + 31) / 32;
+    uint32_t on = 0;
+    for (int t = 0; t < T; ++t) {
+        if (rows[t] == nullptr) continue;
+        if (row_masks_device_ == nullptr &&
+            cudaMalloc((void**) &row_masks_device_, (size_t) strata::kernels::kVerifyMaxT * words * sizeof(uint32_t)) != cudaSuccess) {
+            (void) cudaGetLastError();
+            row_masks_device_ = nullptr;
+            err = "verify: cannot allocate the grammar masks";
+            return false;
+        }
+        if (cudaMemcpyAsync(row_masks_device_ + (size_t) t * words, rows[t], words * sizeof(uint32_t),
+                            cudaMemcpyHostToDevice, cs_) != cudaSuccess) {
+            err = "verify: cannot upload a grammar mask";
+            return false;
+        }
+        on |= 1u << t;
+    }
+    if (on != 0) strata::kernels::mask_logit_rows(head_logits_, T, (int) n_vocab_, row_masks_device_, on, cs_);
+    return true;
 }
 
 bool Verifier::set_logit_bias(const std::vector<float>& bias, std::string& err) {
@@ -3049,7 +3078,9 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         return next_ == nullptr || next_->run(T, tokens, pos0, pool, next_user_, out, err);
     }
     const bool sampled = !sampling_.greedy && sampling_.temperature > 0.0f;
-    if (head_sampling_ && (sampled || hist_d_ != nullptr || sampling_.logit_bias != nullptr)) {
+    const bool masked = head_sampling_ && static_cast<bool>(row_masks_);
+    if (head_sampling_ && (sampled || hist_d_ != nullptr || sampling_.logit_bias != nullptr || masked)) {
+        if (masked && !apply_row_masks(T, err)) return false;
         SamplerParams sp = sampling_;
         sp.counter = (uint64_t) pos0;
         // STRATA_SPEC_PROB: the drafter's q lists for this window, judged by rejection sampling (spec_prob.hpp)
@@ -4276,7 +4307,9 @@ bool Verifier::pl_finish(int32_t* out, std::string& err) {
     if (le_ < g.n_layers) return true;   // an earlier stage: the hand-off is written
     const int T = fl_T_;
     const bool sampled = !sampling_.greedy && sampling_.temperature > 0.0f;
-    if (head_sampling_ && (sampled || hist_d_ != nullptr || sampling_.logit_bias != nullptr)) {   // run()'s host-side sampling, Philox(seed, pos0 + t)
+    const bool masked = head_sampling_ && static_cast<bool>(row_masks_);
+    if (head_sampling_ && (sampled || hist_d_ != nullptr || sampling_.logit_bias != nullptr || masked)) {   // run()'s host-side sampling, Philox(seed, pos0 + t)
+        if (masked && !apply_row_masks(T, err)) return false;
         SamplerParams sp = sampling_;
         sp.counter = (uint64_t) last_pos0_;
         sample_tokens(head_logits_, T, (int) n_vocab_, hist_d_, hist_len_, sp, m_out_, cs_);

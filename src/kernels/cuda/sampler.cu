@@ -1390,4 +1390,27 @@ void spec_draft_sample(float* logits, int nv, const int32_t* sub_to_id, const in
     coupled_check("spec_draft merge");
 }
 
+namespace {
+__global__ void mask_logit_rows_kernel(float* logits, int n_vocab, const uint32_t* masks, int words, uint32_t rows) {
+    const int t = (int) blockIdx.y;
+    if (((rows >> t) & 1u) == 0) return;
+    const uint32_t* m = masks + (size_t) t * (size_t) words;
+    float* l = logits + (size_t) t * (size_t) n_vocab;
+    for (int v = (int) (blockIdx.x * blockDim.x + threadIdx.x); v < n_vocab; v += (int) (gridDim.x * blockDim.x))
+        if (((m[v >> 5] >> (v & 31)) & 1u) == 0) l[v] = -INFINITY;
+}
+}  // namespace
+
+void mask_logit_rows(float* logits, int n_tokens, int n_vocab, const uint32_t* masks, uint32_t rows, void* stream) {
+    if (n_tokens <= 0 || n_vocab <= 0 || rows == 0) return;
+    const int words = (n_vocab + 31) / 32;
+    mask_logit_rows_kernel<<<dim3(64u, (unsigned) std::min(n_tokens, 32)), 256, 0, (cudaStream_t) stream>>>(
+        logits, n_vocab, masks, words, rows);
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) {
+        std::fprintf(stderr, "mask_logit_rows launch: %s\n", cudaGetErrorString(e));
+        std::exit(1);
+    }
+}
+
 }  // namespace strata::kernels

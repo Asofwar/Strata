@@ -62,8 +62,8 @@ def http(url, body=None, timeout=3600.0):
         return json.loads(r.read())
 
 
-def chat(url, messages, tools=None, max_tokens=16384):
-    body = {"model": "strata", "messages": messages, "max_tokens": max_tokens, "stream": False}
+def chat(url, messages, tools=None, max_tokens=16384, extra=None):
+    body = {"model": "strata", "messages": messages, "max_tokens": max_tokens, "stream": False, **(extra or {})}
     if tools:
         body["tools"] = tools
     t0 = time.time()
@@ -207,6 +207,7 @@ def main():
     ap.add_argument("--max-tokens", type=int, default=16384)
     ap.add_argument("--budget-min", type=float, default=0, help="stop starting requests after this many minutes")
     ap.add_argument("--rescore", action="store_true", help="check the stored replies again (after a checker change)")
+    ap.add_argument("--body", default="", help="JSON merged into every request, e.g. '{\"constrained_tools\": true}'")
     ap.add_argument("--tokenizer", default=r"D:\Strata-data\packs\cyber-tiel-iq4_xs\tokenizer",
                     help="to count reasoning tokens (both models share the Qwen3.6 vocabulary)")
     a = ap.parse_args()
@@ -247,7 +248,7 @@ def main():
             else:
                 messages, tools = [{"role": "user", "content": it["prompt"]}], None
             try:
-                out, wall, last = chat(a.url, messages, tools, a.max_tokens)
+                out, wall, last = chat(a.url, messages, tools, a.max_tokens, json.loads(a.body) if a.body else None)
                 msg = parse_message(out)
                 error = None
             except (OSError, ValueError, KeyError) as e:

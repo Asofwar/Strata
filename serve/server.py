@@ -74,8 +74,9 @@ from serve import ready as ready_file  # noqa: E402
 from serve import owner_guard  # noqa: E402
 from serve import launch_identity  # noqa: E402
 from serve import logit_bias as bias_api  # noqa: E402
+from serve import grammar as grammar_api  # noqa: E402
 from serve import lifeline  # noqa: E402
-from serve.structured import StructuredOutputError, prepare_format, validated_json  # noqa: E402
+from serve.structured import StructuredOutputError, format_schema, prepare_format, validated_json  # noqa: E402
 from serve import responses as responses_api  # noqa: E402
 from serve.responses import ResponsesError, error_body as responses_error_body  # noqa: E402
 from serve import images as images_api  # noqa: E402
@@ -2166,8 +2167,12 @@ class StrataEngine:
         self.prefill_tok_s_mean = None
         self.drained = []      # tokens the engine still wrote after a STOP: its live state includes them
         # an image request takes the same sampling keys as text (#75: it used to decode greedily whatever was asked)
-        head = f"GENI {int(max_new)}{self.sampling_keys(sampling or {})} {embeddings}" if embeddings else \
-            f"GEN {int(max_new)}{self.sampling_keys(sampling or {})}"
+        gs = (sampling or {}).get("strata_grammar")
+        gkey = gs.engine_key() if gs is not None and self.info.get("grammar") == 1 else ""
+        if not gkey:
+            gs = None
+        head = f"GENI {int(max_new)}{self.sampling_keys(sampling or {})}{gkey} {embeddings}" if embeddings else \
+            f"GEN {int(max_new)}{self.sampling_keys(sampling or {})}{gkey}"
         try:
             self.proc.stdin.write(f"{head} {','.join(str(int(t)) for t in ids)}\n")
             self.proc.stdin.flush()
@@ -2220,6 +2225,23 @@ class StrataEngine:
                     if cancel.is_set():
                         return
                     yield int(line[2:])
+                elif line.startswith("G ") and gs is not None:
+                    # a constrained window's row masks (serve/grammar.py): answered at once, the GPU is running it
+                    f = line.split()
+                    try:
+                        reply = gs.answer(int(f[1]), [int(x) for x in f[2:]])
+                    except Exception as e:  # noqa: BLE001 - the window must get an answer: unconstrained, and said
+                        print(f"[strata] constrained decoding failed for a window ({type(e).__name__}: {e}); the rest "
+                              "of the reply is unconstrained", flush=True)
+                        gs.m = gs.c = None
+                        gs.triggers = {}
+                        reply = "G off\n"
+                    try:
+                        self.proc.stdin.write(reply)
+                        self.proc.stdin.flush()
+                    except OSError:
+                        done = True
+                        raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})") from None
                 elif line.startswith("PP "):
                     f = line.split()
                     if len(f) >= 3 and f[1].isdigit() and f[2].isdigit():
@@ -2280,6 +2302,8 @@ class StrataEngine:
                             pass
                     if not self.can_stop:
                         heard = time.monotonic()
+            if gs is not None and gs.stats["windows"]:
+                print(f"[strata] {gs.summary()}", flush=True)
 
     def _activity(self) -> tuple[float, int] | None:
         """#1317: (CPU seconds, I/O bytes) the engine process has used so far, or None when they cannot be read."""
@@ -3576,6 +3600,12 @@ class Service:
         self.repeat_stop_tokens = REPEAT_STOP_TOKENS     # #606: one token this many times in a row ends a reply (0: off)
         self.anthropic_think_unasked = True               # #278: "anthropic_thinking": "on_request" -> False
         self.tool_call_recovery = False                   # opt-in: tool calls in forms next to the template's
+        # opt-in (the config's "constrained_tools" / "constrained_json", or the same keys in a request): tool calls and
+        # response_format JSON generated under a grammar's token mask (serve/grammar.py)
+        self.constrained_tools = False
+        self.constrained_json = False
+        self._grammar_cache = {}                          # grammar text -> compiled grammar (the same tools each turn)
+        self._grammar_said = set()                        # the reasons a request ran unconstrained, said once each
         self.images = None                                # serve/images.py's ImageGen when the config has "images"
         self.restore_after_load = None                    # a session file an image job saved before it unloaded
         self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
@@ -4339,7 +4369,8 @@ class Service:
             "service": "strata", "model": self.model,
             "loaded": self.loaded(), "auto_load": hasattr(self.engine, "restart"),
             "structured_output": {"formats": ["json_object", "json_schema"], "method": "prompt_and_validate",
-                                  "constrained_decoding": False, "stream_buffered": True},
+                                  "constrained_decoding": bool(self.constrained_json),
+                                  "constrained_tools": bool(self.constrained_tools), "stream_buffered": True},
             "engine": (getattr(self.engine, "info", {}) or {}).get("version"),
             "started": int(self.started_at), "uptime_s": int(time.time() - self.started_at),
             "cache_max_tokens": ctx,
@@ -4687,6 +4718,56 @@ class Service:
             if ka is not None:
                 ka.release()
 
+    def grammar_session(self, tools, sampling, thinking, force=None):
+        """The request's constraint (serve/grammar.py), or None: off (the default), nothing to constrain, or an
+        engine / package that cannot - then the request runs as it would without the option, and the reason is
+        printed once."""
+        sampling = sampling or {}
+        on_tools, on_json = self.constrained_tools, self.constrained_json
+        if isinstance(sampling.get("constrained_tools"), bool):
+            on_tools = sampling["constrained_tools"]
+        if isinstance(sampling.get("constrained_json"), bool):
+            on_json = sampling["constrained_json"]
+        schema = sampling.get("strata_json_schema") if on_json else None
+        if tools and isinstance(schema, dict):
+            # /v1/responses with tools: the answer may be a call instead of the JSON, which a grammar from the first
+            # token would forbid - the JSON is checked afterwards as before
+            schema = None
+        tools = tools if on_tools else None
+        if not tools and not isinstance(schema, dict):
+            return None
+
+        def unconstrained(why):
+            if why not in self._grammar_said:
+                self._grammar_said.add(why)
+                print(f"[strata] constrained decoding is off for this request: {why}", flush=True)
+            return None
+
+        engine = self.engine
+        if (getattr(engine, "info", None) or {}).get("grammar") != 1:
+            return unconstrained("the engine does not support it (needs a CUDA/HIP engine with grammar=1)")
+        if getattr(engine, "batch", 0):
+            return unconstrained("continuous batching (--batch) is not supported")
+
+        def one(text):
+            got = self.tok.encode(text, parse_special=True)
+            return got[0] if len(got) == 1 else None
+        try:
+            t0 = time.perf_counter()
+            gs = grammar_api.build_session(self.tok, self.stop_ids, tools=tools,
+                                           json_schema=schema if isinstance(schema, dict) else None,
+                                           thinking=bool(thinking), force=force if force and not thinking else None,
+                                           think_end=one(THINK_END), tool_call_id=one("<tool_call>"),
+                                           cache=self._grammar_cache)
+            ms = (time.perf_counter() - t0) * 1e3
+            if ms > 200:
+                print(f"[strata] constrained decoding: the grammar took {ms:.0f} ms to build", flush=True)
+            return gs
+        except grammar_api.Unavailable as e:
+            return unconstrained(str(e))
+        except Exception as e:  # noqa: BLE001 - a grammar the library refuses must not fail the request
+            return unconstrained(f"the grammar could not be built ({type(e).__name__}: {e})")
+
     def _run(self, ids, thinking, tools, max_new, sampling, cancel, force=None) -> Iterator[tuple[str, object]]:
         """Yields ("event", Event) as text arrives, then ("done", {"finish": .., "completion_tokens": ..}).
         `force` (forced_call): the opening of the call the reply must make - see prepare()."""
@@ -4701,6 +4782,9 @@ class Service:
             # the config's "ban_scripts": under the request's own logit_bias, which wins for a token it names
             own = bias_api.normalize((sampling or {}).get("logit_bias"), None)
             sampling = {**(sampling or {}), "logit_bias": {**self.script_ban, **own} if own else self.script_ban}
+        gs = self.grammar_session(tools, sampling, thinking, force)
+        if gs is not None:
+            sampling = {**(sampling or {}), "strata_grammar": gs}
         # #123: read after the merge, so a budget shared through POST /settings is seen like the other keys
         budget = self.reasoning_budget(sampling) if thinking else None
         if thinking and not budget and self.answer_room and max_new and max_new >= ANSWER_ROOM_MIN_CAP:
@@ -4904,6 +4988,8 @@ class Service:
                                     break
                                 raw_ids.append(t)
                                 seg.append(t)
+                                if gs is not None:
+                                    gs.observe(t)
                                 thinking_n += parser.state in ("reasoning", "rcall")
                                 run_len = run_len + 1 if t == run_tok else 1
                                 run_tok = t
@@ -5053,6 +5139,8 @@ class Service:
                                 for t in extra:
                                     n += 1
                                     raw_ids.append(t)
+                                    if gs is not None:
+                                        gs.observe(t)
                                     thinking_n += parser.state in ("reasoning", "rcall")
                                     evs = cut(parser.feed(detok.push(t)))
                                     self._note(n, evs, st, rate)
@@ -5083,6 +5171,8 @@ class Service:
                         for t in extra:
                             n += 1
                             raw_ids.append(t)
+                            if gs is not None:
+                                gs.observe(t)
                             thinking_n += parser.state in ("reasoning", "rcall")
                             evs = cut(parser.feed(detok.push(t)))
                             self._note(n, evs, st, rate)
@@ -6733,6 +6823,8 @@ def make_handler(svc: Service):
                 tools = None
             force = forced_call(req.get("tool_choice"), tools)      # a bad value is a 400 before anything is sent
             messages, validator = prepare_format(req.get("response_format"), messages)
+            if validator is not None:                                # constrained_json (serve/grammar.py)
+                req["strata_json_schema"] = format_schema(req.get("response_format"))
             if validator is not None and (tools or req.get("strata_mcp")):
                 raise ValueError("structured response_format with tools/MCP is not supported")
             svc.load()
@@ -6920,6 +7012,8 @@ def make_handler(svc: Service):
                 messages, validator = prepare_format(responses_api.text_format(req), messages, with_tools=bool(tools))
             except ValueError as e:
                 raise ResponsesError(str(e).replace("response_format", "text.format"), "text.format") from None
+            if validator is not None:                        # constrained_json (serve/grammar.py)
+                req["strata_json_schema"] = format_schema(responses_api.text_format(req))
             noted = svc.__dict__.setdefault("hosted_tools_noted", set())   # said once per tool, not per request
             if set(skipped) - noted:
                 print(f"[strata] /v1/responses: left out the hosted tools {', '.join(sorted(set(skipped) - noted))} "
@@ -8096,6 +8190,11 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     if not isinstance(recovery, bool):
         raise SystemExit(f"[strata] config \"tool_call_recovery\" must be true or false, not {recovery!r}")
     svc.tool_call_recovery = recovery
+    for key in ("constrained_tools", "constrained_json"):   # opt-in: serve/grammar.py
+        val = cfg.get(key, False)
+        if not isinstance(val, bool):
+            raise SystemExit(f"[strata] config \"{key}\" must be true or false, not {val!r}")
+        setattr(svc, key, val)
     etu = cfg.get("env_to_user", False)                # opt-in: see frontend._env_to_user
     if not isinstance(etu, bool):
         raise SystemExit(f"[strata] config \"env_to_user\" must be true or false, not {etu!r}")

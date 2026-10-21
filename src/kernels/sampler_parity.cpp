@@ -532,6 +532,50 @@ int main(int argc, char** argv) {
         cudaFree(db);
     }
 
+    // GRAMMAR masks (mask_logit_rows, serve's constrained decoding): a masked row keeps only its mask's tokens - the
+    // strongest logits are outside it - for the greedy and the sampled picks; an unmasked row is not touched.
+    {
+        const int vocab = 248320, rows = 4, words = (vocab + 31) / 32;
+        std::vector<float> l((size_t) vocab * rows);
+        std::mt19937 rng(11);
+        std::normal_distribution<float> g(0.0f, 1.0f);
+        for (auto& v : l) v = g(rng);
+        for (int t = 0; t < rows; ++t) l[(size_t) t * vocab + 5] = 30.0f;   // the unconstrained pick
+        std::vector<uint32_t> masks((size_t) words * rows, 0u);
+        const int allowed[3] = {17, 123456, 248319};
+        for (int t : {0, 2})
+            for (int a : allowed) masks[(size_t) t * words + (size_t) (a >> 5)] |= 1u << (a & 31);
+        uint32_t* dm = nullptr;
+        check(cudaMalloc(&dm, masks.size() * sizeof(uint32_t)), "mask malloc");
+        check(cudaMemcpy(dm, masks.data(), masks.size() * sizeof(uint32_t), cudaMemcpyHostToDevice), "mask upload");
+        for (bool greedy : {true, false}) {
+            DeviceRows d(l, rows, {}, 0);
+            strata::kernels::mask_logit_rows(d.l, rows, vocab, dm, 0x5u, nullptr);   // rows 0 and 2
+            check(cudaDeviceSynchronize(), "mask_logit_rows");
+            strata::kernels::SamplerParams p;
+            p.greedy = greedy; p.temperature = greedy ? 0.0f : 1.0f; p.seed = 5; p.top_k = 20;
+            const std::vector<int> got = d.sample(p, nullptr);
+            for (int t = 0; t < rows; ++t) {
+                const bool in = std::find(std::begin(allowed), std::end(allowed), got[(size_t) t]) != std::end(allowed);
+                if ((t % 2 == 0) != in || (t % 2 == 1 && got[(size_t) t] != 5)) {
+                    std::fprintf(stderr, "  FAIL grammar masks (%s): row %d picked %d\n", greedy ? "greedy" : "sampled", t,
+                                 got[(size_t) t]);
+                    ++bad;
+                }
+            }
+            std::vector<float> back(l.size());
+            check(cudaMemcpy(back.data(), d.l, l.size() * sizeof(float), cudaMemcpyDeviceToHost), "masked logits");
+            for (int t = 0; t < rows; ++t)
+                for (int v = 0; v < vocab; ++v) {
+                    const size_t i = (size_t) t * vocab + v;
+                    const bool keep = t % 2 == 1 || std::find(std::begin(allowed), std::end(allowed), v) != std::end(allowed);
+                    if (keep ? back[i] != l[i] : back[i] != -std::numeric_limits<float>::infinity()) { ++bad; t = rows; break; }
+                }
+        }
+        cudaFree(dm);
+        std::printf("  grammar masks: done\n");
+    }
+
     // ---- fixture 1: plain greedy.  top_k = 0 (disabled), top_p = 1 (disabled), T = 1 -> argmax.
     {
         strata::kernels::SamplerParams p; p.top_k = 0; p.top_p = 1.0f; p.temperature = 1.0f; p.greedy = true;

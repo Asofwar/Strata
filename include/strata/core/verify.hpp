@@ -137,6 +137,13 @@ public:
         sampling_.logit_bias = logit_bias_host_.empty() ? nullptr : logit_bias_device_;
         if (next_) next_->set_sampling(sp);
     }
+    /// GRAMMAR (serve's constrained decoding, GEN grammar=): set for ONE window, before its run(); run() calls it once
+    /// the window's head logits are ready and before the host-side sampling.  It fills rows[t] (t < T) with a host
+    /// bitmask of n_vocab bits (bit v of word v / 32 set = token v allowed) or nullptr (row t unconstrained); the
+    /// masked rows' logits are set to -inf outside their mask.  False fails the window.  An empty function (the
+    /// default, and after every run) leaves the sampling exactly as it was.
+    using RowMaskFn = std::function<bool(int T, const uint32_t** rows, std::string& err)>;
+    void set_row_masks(RowMaskFn fn) { if (next_) next_->set_row_masks(std::move(fn)); else row_masks_ = std::move(fn); }
     // One request's fixed vocabulary bias. Empty clears it; copied only when changed, on the final stage's device.
     bool set_logit_bias(const std::vector<float>& bias, std::string& err);
 
@@ -457,6 +464,9 @@ private:
 #endif
     std::vector<float> logit_bias_host_;
     float* logit_bias_device_ = nullptr;
+    RowMaskFn row_masks_;                ///< set_row_masks: the next window's grammar masks (empty: none)
+    uint32_t* row_masks_device_ = nullptr;   ///< kVerifyMaxT rows of (n_vocab + 31) / 32 words
+    bool apply_row_masks(int T, std::string& err);   ///< row_masks_ on head_logits_ (and cleared)
     int device_ = -1;                    ///< the device `init` ran on: run/commit switch to it (layer split)
     unsigned long long* rr_stats_ = nullptr;   ///< STRATA_ROUTE_RESIDENT's counters on device_ (#1578); null: none
     std::atomic<bool> released_{false};  ///< #267: release_gpu_waits ran (maybe on the watchdog thread): no more windows
