@@ -102,6 +102,30 @@ def engine_key(value):
     return entry[1]
 
 
+# The config's "ban_scripts": a standing ban of every token whose text holds a character of these scripts.  A model
+# that answers in Russian sometimes writes one word half in Korean or Chinese ("ма스크" for "маска"); the ban stops
+# that without the client having to send a list.  A token that is only part of a character (byte tokens) is not banned.
+SCRIPT_RANGES = {
+    "han": ((0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFAFF), (0x20000, 0x2FFFF)),
+    "hangul": ((0x1100, 0x11FF), (0x3130, 0x318F), (0xA960, 0xA97F), (0xAC00, 0xD7AF), (0xD7B0, 0xD7FF)),
+    "kana": ((0x3040, 0x30FF), (0x31F0, 0x31FF), (0xFF66, 0xFF9F)),
+}
+
+
+def script_ban(tok, scripts):
+    """{token id: -100} for every token of `tok` whose text has a character of one of `scripts` (SCRIPT_RANGES keys)."""
+    unknown = [s for s in scripts if s not in SCRIPT_RANGES]
+    if unknown:
+        raise ValueError(f"ban_scripts: unknown script(s) {unknown}; known: {sorted(SCRIPT_RANGES)}")
+    ranges = [r for s in scripts for r in SCRIPT_RANGES[s]]
+    out = {}
+    for i in range(len(tok.tokens)):
+        text = tok.token_bytes(i).decode("utf-8", errors="ignore")
+        if any(lo <= ord(c) <= hi for c in text for lo, hi in ranges):
+            out[i] = -100.0
+    return out
+
+
 def validate_request(req, engine, vocab_size):
     """Fail closed for old engines, unsupported backends and continuous batching."""
     normalized = normalize(req.get("logit_bias"), vocab_size)

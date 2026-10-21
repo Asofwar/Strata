@@ -141,3 +141,17 @@ class LogitBiasCache(unittest.TestCase):
         for n in range(logit_bias._CACHE_MAX + 3):
             normalize({str(i): -(n + 1) for i in range(100)})
         self.assertEqual(len(logit_bias._cache), logit_bias._CACHE_MAX)
+
+class ScriptBan(unittest.TestCase):
+    class Tok:
+        tokens = ["ма", "스크", "日本", "abc", "\xe2"]
+
+        def token_bytes(self, i):
+            return b"\xe2" if i == 4 else self.tokens[i].encode()
+
+    def test_bans_only_the_named_scripts(self):
+        from serve.logit_bias import script_ban
+        self.assertEqual(script_ban(self.Tok(), ["hangul"]), {1: -100.0})
+        self.assertEqual(script_ban(self.Tok(), ["han", "hangul", "kana"]), {1: -100.0, 2: -100.0})
+        with self.assertRaises(ValueError):
+            script_ban(self.Tok(), ["cyrillic"])

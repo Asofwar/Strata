@@ -3367,7 +3367,7 @@ class Detokenizer:
             return self.inc.decode(self.tok.token_bytes(t))
         self.ids.append(t)
         text = self.tok.decode(self.ids)
-        if text.endswith("�"):
+        if text.endswith("пїЅ"):
             return ""
         delta, self.sent = text[self.sent:], len(text)
         return delta
@@ -3487,6 +3487,7 @@ class Service:
         self.codex_compaction_cache = False           # #924 (opt-in): a Codex compaction is rendered with its conversation's tools
         self.codex_thread_titles = False              # #923 (opt-in): answer Codex's thread-title turns without the engine
         self.sampling_defaults = dict(sampling_defaults or {})   # the run config's `sampling` block
+        self.script_ban = {}                          # the config's "ban_scripts" as {token id: -100} (logit_bias.script_ban)
         self.model_arch = None                        # the config's family ("qwen4exp", "qwen35moe"): None = no model-card defaults
         self.shared = {}                              # the web app's Chat settings for every client (POST /settings)
         self.shared_path = None                       # where they are kept between starts (next to the config)
@@ -4695,6 +4696,11 @@ class Service:
         if defaults:                   # the request's own fields win (explicit 0 stays greedy)
             req_values = {k: v for k, v in (sampling or {}).items() if v is not None}
             sampling = {**defaults, **req_values}
+        if self.script_ban and getattr(self.engine, "info", {}).get("logit_bias") == 1 and \
+                not getattr(self.engine, "batch", 0):
+            # the config's "ban_scripts": under the request's own logit_bias, which wins for a token it names
+            own = bias_api.normalize((sampling or {}).get("logit_bias"), None)
+            sampling = {**(sampling or {}), "logit_bias": {**self.script_ban, **own} if own else self.script_ban}
         # #123: read after the merge, so a budget shared through POST /settings is seen like the other keys
         budget = self.reasoning_budget(sampling) if thinking else None
         if thinking and not budget and self.answer_room and max_new and max_new >= ANSWER_ROOM_MIN_CAP:
@@ -7983,6 +7989,13 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         svc.requested_slots = per_replica * len(groups) if groups else per_replica
     svc.answer_room = cfg.get("answer_room") is not False
     svc.reasoning_close_retry = cfg.get("reasoning_close_retry") is True    # #1053: opt-in, off by default
+    if cfg.get("ban_scripts"):                          # opt-in: e.g. ["han", "hangul", "kana"]
+        try:
+            svc.script_ban = bias_api.script_ban(svc.tok, list(cfg["ban_scripts"]))
+        except (ValueError, TypeError, AttributeError) as e:
+            raise SystemExit(f"[strata] config ban_scripts: {e}")
+        print(f"[strata] ban_scripts {', '.join(cfg['ban_scripts'])}: {len(svc.script_ban)} tokens banned "
+              "(needs an engine with logit_bias and no --batch)", flush=True)
     if cfg.get("images"):                               # image generation (serve/images.py), set up by setup --images
         icfg = {k: (os.path.abspath(os.path.join(cfg.get("cwd") or ".", v))
                     if k in ("exe", "diffusion_model", "vae", "llm", "out_dir") and isinstance(v, str)
