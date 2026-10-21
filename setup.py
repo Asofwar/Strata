@@ -677,7 +677,7 @@ PACK_KV_BYTES_PER_TOKEN = 11 * 2 * 2 * (256 + 256 // 64 * 2)
 # 60.0 s), the server's loop recovery for agents, and T 0.6 / presence 0 (bench/eval-ru: no spoiled words, 0 of
 # 256 replies against 16 of 672 at the model card's T 1.0 / presence 1.5).
 PACK_TUNED = {"env": {"STRATA_ATTN_WINDOW": "1", "STRATA_ATTN_WINDOW_PREC": "2", "STRATA_PROMPT_ATTN_FP16ACC": "2",
-                      "STRATA_PROMPT_ATTN_DENSE_IMMA": "2"},
+                      "STRATA_PROMPT_ATTN_DENSE_IMMA": "3", "STRATA_ATTN_WINDOW_SMALL": "1"},
               "args": ["--kv-grow"],
               "serve": {"reasoning_loop_recovery": "resample", "reasoning_close_retry": True, "sampling": {"temperature": 0.6, "presence_penalty": 0}}}
 OWN_PATH_FAMILIES.update({
