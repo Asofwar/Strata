@@ -155,6 +155,24 @@ suffix/prompt-lookup drafter only (or one token per round), every token is still
 draft layer's VRAM (~0.7-1 GiB with its head) goes to the expert cache: 1,000 -> 1,678 slots in one A/B on an 8 GB
 card. The conversation cache (`--conversation-cache-mib`) stays on: a parked conversation then carries no draft K/V.
 
+**The draft layer from another file (`--mtp FILE`, `tools/mtp_extract.py`):** for the Qwen3.6 family (`qwen35moe`)
+`--mtp` takes any GGUF that holds the MTP layer (`blk.40.*`) and drafts with the main model's own output head, so a
+head from another upload needs no transplant into the model file. `tools/mtp_extract.py SRC --target MODEL.gguf --out
+head.gguf` writes the layer alone (a few hundred MB) from a local file or an https link, reading only the header and
+the layer's tensors by range requests. It refuses a donor whose geometry, vocabulary or layer shapes differ from the
+target's, lists which tensors are byte-identical to the target's, re-quantizes F16/BF16 projections (which the draft
+layer cannot read) to Q8_0 exactly as llama.cpp does, and refuses expert types the CUDA build has no kernels for (a
+Q2_K down). On Cyber-Tiel-Coder UD-IQ4_XS (RTX 5080, 2026-10-21, `--spec 4`, greedy, code / Russian / agent prompts at
+2K and 127K, 3 runs) every head found turned out to be the same trained Ornith-1.5 MTPv2 head at another quantization:
+the model's own (Q3_K experts, 378 MiB), gbuzhf's CyberTiel-Calibrated 25G-ICE (Q5_K, 576 MiB) and MTPv2-Q8_0 (Q8_0,
+864 MiB); the Sangreal ICE 1.6 head (Q2_K) does not load. On the same token stream the Q5_K experts accepted 82.4% of
+drafts against 81.6% (2.70 against 2.68 tokens per round, 266.6 against 263.9 tok/s, within the spread), Q8_0 no more,
+and at 127K all three were level (79.5-81.0% at `--spec-min-p 0.5`). `--spec-min-p 0.75` accepts ~91% but offers fewer
+drafts and was not faster (2K: 290.9 against 296.8 tok/s). Greedy answers were identical token for token with every
+head at the same expert-cache size; a different slot count (or the adaptive tier moving experts) changes the
+CPU/GPU split of the arithmetic and can fork a greedy answer at a near-tie, whatever the head. Keep the model's own
+head. Tables: [bench/results/2026-10-21-rtx5080-tiel-mtp-heads](../bench/results/2026-10-21-rtx5080-tiel-mtp-heads/README.md).
+
 **Low-RAM mode (engine 0.1.26, chosen by setup):** normally all of a model's experts are copied into RAM (23-50 GB,
 pinned) and the GPU holds a copy of the most-used ones. On a PC whose RAM cannot hold them beside the system (the
 experts plus ~10 GB), setup instead maps them from one file in the model's folder (`--mmap-experts`, the pack's
