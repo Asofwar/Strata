@@ -359,6 +359,7 @@ int run_dense(int fmt, int64_t ctx, int64_t nq, int reps, bool sharp = false) { 
     }
     k::QsaShapes s = k::qsa_real_shapes();
     s.n_head = 8 * s.n_head_kv;
+    if (const char* ps = std::getenv("QA_PAGE_SIZE")) s.page_size = std::atoll(ps);   // other page sizes (default 4)
     const int64_t HD = s.head_dim, NKV = s.n_head_kv, NH = s.n_head, PS = s.page_size;
     const int64_t pages = (ctx + PS - 1) / PS, rows = pages * NKV * PS;
     std::mt19937 rng(777 + fmt);
@@ -428,16 +429,22 @@ int run_dense(int fmt, int64_t ctx, int64_t nq, int reps, bool sharp = false) { 
     std::vector<float> o((size_t) (nq * NH * HD)), nw(o.size());
     ck(cudaMemcpy(o.data(), d_old, o.size() * 4, cudaMemcpyDeviceToHost), "down");
     ck(cudaMemcpy(nw.data(), d_new, nw.size() * 4, cudaMemcpyDeviceToHost), "down");
+    // modes 1..3: STRATA_PROMPT_ATTN_FP16ACC=1..3; int8 K/V also 4: STRATA_PROMPT_ATTN_DENSE_IMMA=2
     auto set_prec = [](int pr) {
-        const char v[2] = {(char) ('0' + pr), 0};
+        const char v[2] = {(char) ('0' + (pr <= 3 ? pr : 2)), 0};
+        const char* fa = pr >= 1 && pr <= 3 ? v : "";
+        const char* im = pr >= 4 ? v : "";
 #if defined(_WIN32)
-        _putenv_s("STRATA_PROMPT_ATTN_FP16ACC", pr ? v : "");
+        _putenv_s("STRATA_PROMPT_ATTN_FP16ACC", fa);
+        _putenv_s("STRATA_PROMPT_ATTN_DENSE_IMMA", im);
 #else
-        if (pr) setenv("STRATA_PROMPT_ATTN_FP16ACC", v, 1); else unsetenv("STRATA_PROMPT_ATTN_FP16ACC");
+        if (fa[0]) setenv("STRATA_PROMPT_ATTN_FP16ACC", fa, 1); else unsetenv("STRATA_PROMPT_ATTN_FP16ACC");
+        if (im[0]) setenv("STRATA_PROMPT_ATTN_DENSE_IMMA", im, 1); else unsetenv("STRATA_PROMPT_ATTN_DENSE_IMMA");
 #endif
     };
-    std::vector<float> lp[4];   // the reduced-precision modes' outputs (lp[0] unused)
-    for (int pr = 1; pr <= 3; ++pr) {
+    const int n_modes = fmt == 1 ? 4 : 3;
+    std::vector<float> lp[5];   // the reduced-precision modes' outputs (lp[0] unused)
+    for (int pr = 1; pr <= n_modes; ++pr) {
         set_prec(pr);
         go(true, d_new);
         ck(cudaDeviceSynchronize(), "run");
@@ -445,7 +452,7 @@ int run_dense(int fmt, int64_t ctx, int64_t nq, int reps, bool sharp = false) { 
         ck(cudaMemcpy(lp[pr].data(), d_new, o.size() * 4, cudaMemcpyDeviceToHost), "down");
     }
     set_prec(0);
-    double err_old = 0, err_new = 0, ref_scale = 0, err_lp[4] = {0, 0, 0, 0};
+    double err_old = 0, err_new = 0, ref_scale = 0, err_lp[5] = {0, 0, 0, 0, 0};
     for (int64_t i = 0; i < nq; i += std::max<int64_t>(1, nq / 6)) {
         const int64_t w = ctx - nq + i + 1;
         for (int64_t h = 0; h < NH; h += 3) {
@@ -477,7 +484,7 @@ int run_dense(int fmt, int64_t ctx, int64_t nq, int reps, bool sharp = false) { 
                 ref_scale = std::max(ref_scale, std::fabs(r));
                 err_old = std::max(err_old, std::fabs(o[at] - r));
                 err_new = std::max(err_new, std::fabs(nw[at] - r));
-                for (int pr = 1; pr <= 3; ++pr) err_lp[pr] = std::max(err_lp[pr], std::fabs(lp[pr][at] - r));
+                for (int pr = 1; pr <= n_modes; ++pr) err_lp[pr] = std::max(err_lp[pr], std::fabs(lp[pr][at] - r));
             }
         }
     }
@@ -516,7 +523,7 @@ int run_dense(int fmt, int64_t ctx, int64_t nq, int reps, bool sharp = false) { 
     // the reduced-precision modes against the FP32 dense kernel (d = mode - FP32, per output row of HD values):
     // max and mean |d|, max |d| / output scale, mean and max of |d|_2 / |FP32 row|_2, and FP64's max error for both
     bool lp_ok = true;
-    for (int pr = 1; pr <= 3; ++pr) {
+    for (int pr = 1; pr <= n_modes; ++pr) {
         double mx = 0, sum = 0, rel_sum = 0, rel_max = 0;
         bool fin = true;
         const int64_t n_rows = (int64_t) nw.size() / HD;
@@ -544,9 +551,9 @@ int run_dense(int fmt, int64_t ctx, int64_t nq, int reps, bool sharp = false) { 
         cudaEventElapsedTime(&ms, e0, e1);
         set_prec(0);
         lp_ok = lp_ok && fin;
-        std::printf("  %s FP16ACC=%d vs FP32: max |d| %.3g (%.2g of scale), mean |d| %.3g, row rel L2 mean %.3g max %.3g; "
+        std::printf("  %s %s=%d vs FP32: max |d| %.3g (%.2g of scale), mean |d| %.3g, row rel L2 mean %.3g max %.3g; "
                     "vs FP64 %.3g (FP32 %.3g); %.3f ms per chunk (%.2fx the FP32 dense)\n",
-                    fin ? "ok" : "NOT FINITE", pr, mx, mx / scale, sum / (double) nw.size(), rel_sum / (double) n_rows,
+                    fin ? "ok" : "NOT FINITE", pr <= 3 ? "FP16ACC" : "DENSE_IMMA", pr <= 3 ? pr : 2, mx, mx / scale, sum / (double) nw.size(), rel_sum / (double) n_rows,
                     rel_max, err_lp[pr], err_new, ms / reps, ms_new / ms);
     }
     cudaFree((void*) d_steps); cudaFree((void*) d_q); cudaFree(d_old); cudaFree(d_new);
