@@ -1338,7 +1338,8 @@ task(
 task(
     id="py-impl-retry", kind="implement",
     prompt="Implement the `retry` decorator in retry.py as its docstring describes, and add a test file "
-           "tests/test_retry.py that covers it.",
+           "tests/test_retry.py that covers it. The suite runs with the standard library's unittest "
+           "(python -m unittest discover -s tests), so write unittest.TestCase tests.",
     files={
         "retry.py": d('''\
             import time

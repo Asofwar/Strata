@@ -229,6 +229,8 @@ class Sandbox:
             argv[0] = "node"
         else:
             raise ValueError(f"program {argv[0]!r} is not allowed (only python and node)")
+        if any(x.lower() in ("pip", "pip3", "ensurepip", "venv") for x in argv[1:3]):
+            raise ValueError("installing packages is not allowed here: use the standard library")
         code, out = run_proc(argv, self.root, CMD_TIMEOUT)
         return f"exit code {code}\n{out}"
 
