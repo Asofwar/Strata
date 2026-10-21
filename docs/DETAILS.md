@@ -434,6 +434,18 @@ the GB/s it read over the rows phases, and the CPUs the host thread ran on (samp
 the tasks it ran and its microseconds per task. Equal numbers on every thread with a low GB/s mean the pool waits
 between its phases, not that one core is slow. None of these lines changes what the engine computes.
 
+A `strata decode commit/emit (ms/window):` line splits the timing line's commit/emit part: starting the adaptive
+tier's thread, the commit and its checks, formatting the window's `T` lines and writing them. The engine's stdout is
+unbuffered, and every `T` line used to be its own write. Into the server's pipe that costs nothing (RTX 5080,
+Cyber-Tiel-Coder UD-IQ4_XS, the server's settings, 2026-10-21: commit/emit 0.07-0.09 ms per window at 2K, 8K and 66K
+context, and the client's token rate equal to the engine's within 1%). Into a file it does: a `--serve` run over
+stdin with stdout redirected to a file in `%TEMP%` (Windows 11) spent 4.6 ms of a 14 ms window at 2K on the `T`
+lines, which made its decode 179 tok/s instead of about 270 through the server. A window's `T` lines now go out as
+one write (the same bytes): the same run spends 0.7 ms per window on them, and the pipe write takes 0.01 ms. Through
+the server the decode speed did not change beyond run-to-run noise (2K, 8K and 66K, 3 runs each, measured while
+another program kept 19 cores busy, so those tok/s are low for both builds). Profile `--serve` over stdin with stdout
+on a pipe, or read the commit/emit line before you compare its tok/s with `generate --stats`.
+
 **The CPU experts at 130K-200K context, RTX 5080 16 GB + i9-14900K (measured 2026-10-21):** Cyber-Tiel-Coder
 35B-A3B UD-IQ4_XS (gate/up IQ3_S in every layer, down IQ4_XS or Q6_K), 48 GB DDR5, Windows 11, CUDA 13.4, the
 server's settings (`--expert-cache auto --kv int8 --max-context 262144 --pcie-frac 0.00 --pool-workers 7 --adapt-every 1

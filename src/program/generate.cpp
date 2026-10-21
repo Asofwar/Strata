@@ -9833,6 +9833,20 @@ int main(int argc, char** argv) {
         // #879: this request met a window whose head logits were not all finite (nonfinite_hit): it ends with
         // DONE ... nonfinite, emitting none of that window's tokens
         bool nf_hit = false;
+        // A window's T lines go out as one write.  stdout is unbuffered (main), so each printf was its own write:
+        // nothing into the server's pipe, but 0.6-1.8 ms per line into a file on Windows (--serve over stdin with
+        // stdout redirected: 4.6 ms of a 14 ms window at 2K, docs/DETAILS.md).  The bytes are the same.
+        std::string tok_lines;
+        auto tok_line = [&](int32_t id) {
+            char b[24];
+            const int n = std::snprintf(b, sizeof b, "T %d\n", (int) id);
+            if (n > 0) tok_lines.append(b, (size_t) n);
+        };
+        auto tok_lines_out = [&]() {
+            if (!tok_lines.empty()) std::fwrite(tok_lines.data(), 1, tok_lines.size(), stdout);
+            tok_lines.clear();
+            std::fflush(stdout);
+        };
         auto nonfinite_hit = [&](const strata::core::Verifier& v, const char* what) -> bool {
             const int row = v.nonfinite_row();
             if (row < 0) return false;
@@ -14561,6 +14575,7 @@ int main(int argc, char** argv) {
 #endif
             };
             double dt_run = 0, dt_commit = 0, dt_draft = 0;
+            double dt_e_spawn = 0, dt_e_commit = 0, dt_e_print = 0, dt_e_flush = 0;   // the commit/emit stage's parts
             double dt_adapt_wait = 0, dt_adapt_join = 0;   // the tier's wait before a window / join after the draft (ms, summed)
             const int64_t dt_sw0 = ajob ? a_swapped : adapt_nswaps;
             int64_t dec_windows = 0, dec_T = 0;
@@ -15085,13 +15100,13 @@ int main(int argc, char** argv) {
                     const bool nf = nonfinite_hit(V1(A), "decode");   // #879: none of its tokens goes out
                     bool eos = false;
                     for (int i = 0; !nf && i <= a && produced_n < max_new && !eos; ++i) {
-                        std::printf("T %d\n", (int) outp[(size_t) i]);
+                        tok_line(outp[(size_t) i]);
                         strata::core::progress_beat();
                         ++produced_n;
                         if (o.suffix_draft > 0) sfx.append(outp[(size_t) i]);
                         eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) outp[(size_t) i]) != o.eos_ids.end();
                     }
-                    std::fflush(stdout);
+                    tok_lines_out();
                     if (nf) finish = "nonfinite";
                     else if (eos) finish = "stop";
                     else if (stop_req.load()) finish = "cancel";
@@ -15471,6 +15486,7 @@ int main(int argc, char** argv) {
                 // (--adapt-async 1: the asynchronous tier above instead, ticked before the window)
                 if (!drive.d.usage.empty() && !ajob && ((rounds + 1) % o.adapt_every) == 0)
                     adapt_thr = std::thread([&] { strata::aux_cpus::pin_current_thread(); adapt_ok = adapt(); });
+                const Clock::time_point te0 = Clock::now();
                 if (!ver.commit(a + 1, err)) {
                     if (adapt_thr.joinable()) adapt_thr.join();
                     std::printf("ERR %s\n", err.c_str());
@@ -15498,19 +15514,25 @@ int main(int argc, char** argv) {
                     draft_accepted += a;
                 }
                 first_window = false;
+                const Clock::time_point te1 = Clock::now();
                 bool eos = false;
                 for (int i = merged ? a : 0; i <= a && produced_n < max_new && !eos; ++i) {   // (merged: row T-1 only)
-                    std::printf("T %d\n", (int) outv[(size_t) i]);
+                    tok_line(outv[(size_t) i]);
                     strata::core::progress_beat();
                     ++produced_n;
                     if (sfx_on) sfx.append(outv[(size_t) i]);
                     if (o.lookup_chain > 0) extra_sources_append(&outv[(size_t) i], 1);
                     eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) outv[(size_t) i]) != o.eos_ids.end();
                 }
-                std::fflush(stdout);
+                const Clock::time_point te2 = Clock::now();
+                tok_lines_out();
                 ++rounds;
                 if (drive.d.fs) drive.d.fs->completed.fetch_add(1, std::memory_order_release);
                 const Clock::time_point tw2 = Clock::now();
+                {
+                    auto msd = [](Clock::time_point a0, Clock::time_point b0) { return std::chrono::duration<double, std::milli>(b0 - a0).count(); };
+                    dt_e_spawn += msd(tw1, te0); dt_e_commit += msd(te0, te1); dt_e_print += msd(te1, te2); dt_e_flush += msd(te2, tw2);
+                }
                 // coupled drafts with penalties: the next window's row-0 history (`consumed` holds this window's
                 // commit, outv[a] is its row 0) - the drafts extend it on the device as the verify rows will
                 if (use_mtp && hist_n > 0 && mtp.coupled() && !eos && produced_n < max_new)
@@ -15567,6 +15589,8 @@ int main(int argc, char** argv) {
                              (d1.host - ds0.host) / w, dt_commit / w, dt_draft / w, (d1.misses - ds0.misses) / (w * L),
                              (d1.entries - ds0.entries) / (w * L), (d1.hits - ds0.hits) / (w * L), (d1.pcie - ds0.pcie) / (w * L),
                              dt_adapt_wait / w, dt_adapt_join / w, (double) ((ajob ? a_swapped : adapt_nswaps) - dt_sw0) / w);
+                std::fprintf(stderr, "strata decode commit/emit (ms/window): adapt start %.3f  commit + checks %.3f  T lines %.3f  "
+                                     "write %.3f\n", dt_e_spawn / w, dt_e_commit / w, dt_e_print / w, dt_e_flush / w);
                 {   // the pool's phases (prompt windows included when a prompt tail merged into decode windows)
                     const double gu = pool.ms_multi_gu - pgu0, q = pool.ms_multi_q - pq0, dn = pool.ms_multi_down - pdown0;
                     std::string hc;
