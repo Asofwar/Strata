@@ -7,10 +7,13 @@
 
 <p align="center"><a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português</a> · <b>Русский</b></p>
 
-> **Это форк Asofwar от [Niko1221/Strata](https://github.com/Niko1221/Strata).** Он добавляет модели Qwen3.6 /
-> Ornith / Cyber-Tiel на основном движке из пака (контекст до 262K, int8 KV, MTP на карте 16 GB), FP16 внимание
-> промпта, детерминированный режим и исправления сервера для агентов. Что именно добавлено, замеры и установка:
-> [docs/FORK.ru.md](docs/FORK.ru.md). Ниже перевод README upstream.
+> **Это форк Asofwar от [Niko1221/Strata](https://github.com/Niko1221/Strata)** для агентов с кодом и длинным
+> контекстом на карте 16 GB. Модели Qwen3.6 / Ornith / Cyber-Tiel работают на основном движке из пака (контекст до
+> 262K, int8 KV, MTP-черновики), а setup включает для них ядра форка для длинного контекста: на RTX 5080 Cyber-Tiel
+> UD-IQ4_XS читает промпт 200K за 49.4 с и пишет 161–171 токен/с при 200K. Ещё: разговоры на NVMe, выход из
+> зацикленного рассуждения у агентов, детерминированный режим, проверки качества на русском и агентных задачах.
+> Что добавлено, замеры, рекомендуемый конфиг и установка: [docs/FORK.ru.md](docs/FORK.ru.md); проверки качества:
+> [docs/EVAL.ru.md](docs/EVAL.ru.md) и [docs/AGENT-EVAL.ru.md](docs/AGENT-EVAL.ru.md). Ниже перевод README upstream.
 
 <h3 align="center">Современная большая модель на вашем игровом ПК</h3>
 

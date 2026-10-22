@@ -262,7 +262,7 @@ limits: [QWEN36.md](QWEN36.md).
 START-HERE.bat --setup --family qwen36 --model UD-Q4_K_XL
 ```
 
-Two fine-tunes of the same architecture run on Flash-Next's engine path from a Strata pack instead (int8 KV, the expert cache, MTP drafts from the file: 100K-262K contexts on a 16 GB card, one request at a time, no images): [Huihui-Ornith-1.5-35B-A3B-abliterated](QWEN36_PACK.md#huihui-ornith-15-35b-a3b-abliterated) (huihui-ai's Ornith-1.5 with its refusals removed, mradermacher's IQ4_XS / IQ3_S) and [Cyber-Tiel-Coder-35B-A3B](QWEN36_PACK.md#cyber-tiel-coder-35b-a3b) (a coding fine-tune of it that thinks shorter, UD-IQ4_XS / UD-IQ3_XXS). Cyber-Tiel UD-IQ4_XS on an RTX 5080 16 GB with 48 GB of RAM wrote 100-113 tokens/s at 119K of context and 60 at 260K (engine branch `asofwar/integrate-perf`).
+Two fine-tunes of the same architecture run on Flash-Next's engine path from a Strata pack instead (int8 KV, the expert cache, MTP drafts from the file: 100K-262K contexts on a 16 GB card, one request at a time, no images): [Huihui-Ornith-1.5-35B-A3B-abliterated](QWEN36_PACK.md#huihui-ornith-15-35b-a3b-abliterated) (huihui-ai's Ornith-1.5 with its refusals removed, mradermacher's IQ4_XS / IQ3_S) and [Cyber-Tiel-Coder-35B-A3B](QWEN36_PACK.md#cyber-tiel-coder-35b-a3b) (a coding fine-tune of it that thinks shorter, UD-IQ4_XS / UD-IQ3_XXS). Cyber-Tiel UD-IQ4_XS on an RTX 5080 16 GB with an i9-14900K and 48 GB of RAM, with the settings this fork's setup writes, read a 200K-token prompt in 49.4 s and wrote 146-167 tokens/s at 130K of context and 161-171 at 200K ([measurements](QWEN36_PACK.md#cyber-tiel-coder-35b-a3b)).
 
 ```
 START-HERE.bat --setup --family ornith-abl

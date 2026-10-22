@@ -52,8 +52,10 @@ SHA-256), so a PC that has one of them can link those two shards instead of down
   file those experts take the FP16 prompt path. On AMD a code object loads on first use, so they stay in the engine.
 - `STRATA_MMQ_KQ=1` is opt-in because MMQ rounds the prompt's products differently from the FP16 path (the output
   differs at the rounding level); its speed and KL are measured before it becomes a default. Measured on an RTX 5080
-  with UD-IQ4_XS, whose layers 34, 38 and 39 have Q6_K down projections: a 200K prompt's GPU time 50.1 -> 48.3 s, KL at
-  the engine's run-to-run level ([DETAILS.md](DETAILS.md), "Long prompts: the part that is not attention").
+  with Cyber-Tiel-Coder-35B-A3B UD-IQ4_XS, whose layers 34, 38 and 39 have Q6_K down projections: a 200K prompt's GPU
+  time 50.1 -> 48.3 s and its read through the server 51.8 -> 49.4 s, KL at the engine's run-to-run level
+  ([DETAILS.md](DETAILS.md#long-prompts-the-rest-of-the-time-measured-2026-10-22)). This fork's setup writes it for the
+  `cyber-tiel` and `ornith-abl` families.
 
 ## Quality: the yardstick
 

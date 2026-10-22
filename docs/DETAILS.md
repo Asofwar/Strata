@@ -416,8 +416,7 @@ move on a Threadripper PRO 3975WX + R9700 (14.5 ms, +0.4%, 5 pairs); no case rea
 - Draft layer: `--lookup-chain-min M` (the shortest context match `--lookup-chain` extends, default 3),
   `--mtp-hnorm stream` (one norm per stream, as llama.cpp's MTP graph) and `--mtp-draft-vocab FILE` (a token subset
   of your own instead of `<mtp>/draft_vocab.bin`).
-- Elsewhere: `STRATA_DENSE_MMQ=1` (HIP; on CUDA too, see "Long prompts: the part that is not attention") and
-  `STRATA_HIP_ADAPT_KERNEL_COPY=1` in [AMD_HIP.md](AMD_HIP.md#model-and-serving-configuration);
+- Elsewhere: HIP `STRATA_DENSE_MMQ=1` and `STRATA_HIP_ADAPT_KERNEL_COPY=1` in [AMD_HIP.md](AMD_HIP.md#model-and-serving-configuration);
   `STRATA_KEEP_EMPTY_TURNS=1` and `STRATA_TOPK_STREAM=0` in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 
@@ -471,86 +470,6 @@ one write (the same bytes): the same run spends 0.7 ms per window on them, and t
 the server the decode speed did not change beyond run-to-run noise (2K, 8K and 66K, 3 runs each, measured while
 another program kept 19 cores busy, so those tok/s are low for both builds). Profile `--serve` over stdin with stdout
 on a pipe, or read the commit/emit line before you compare its tok/s with `generate --stats`.
-
-**The CPU experts at 130K-200K context, RTX 5080 16 GB + i9-14900K (measured 2026-10-21):** Cyber-Tiel-Coder
-35B-A3B UD-IQ4_XS (gate/up IQ3_S in every layer, down IQ4_XS or Q6_K), 48 GB DDR5, Windows 11, CUDA 13.4, the
-server's settings (`--expert-cache auto --kv int8 --max-context 262144 --pcie-frac 0.00 --pool-workers 7 --adapt-every 1
---adapt-swaps 160 --adapt-decay 0.97`, `STRATA_ATTN_WINDOW=1 STRATA_ATTN_WINDOW_PREC=2`, `--spec 4 --spec-min-p 0.40`),
-`--serve` with the requests 2K, then 130K and 200K in turn, 192 tokens each, greedy. With the window attention on, a
-verify window at 200K took about 14-20 ms; the GPU waited for the CPU's experts 1.2-3.3 ms of it (`waitCPU` in the GPU
-profile) and the pool computed 2-3.5 missed experts per layer. The pool read 36-41 GB/s in its good requests, while
-this PC streams 78 GB/s from RAM on the same 8 P-cores: the gate/up rows of one token went through ggml's IQ3_S dot,
-which is bound by its codebook lookups, not by the memory.
-
-| what was changed | 130K tok/s | 200K tok/s | CPU ms/window (130K / 200K) | hit rate (130K / 200K) |
-|---|---|---|---|---|
-| the server's settings (control, 4 runs each) | 114.3 | 116.8 | 5.37 / 6.02 | 85.7% / 88.7% |
-| `STRATA_IQ3S_MT1=1` + `--kv-grow` (4 runs each, same downtime) | 163.7 | 140.2 | 2.31 / 3.05 | 91.6% / 90.8% |
-| `STRATA_IQ3S_MT1=1` alone (9 runs of 3 starts, against 27 runs of 9 starts of the control and of the settings below that measured the same) | 145.0 vs 131.5 | 163.2 vs 126.6 | 3.90 / 4.39 vs 4.98 / 6.43 | same |
-
-Medians. `STRATA_IQ3S_MT1=1` takes Strata's gathered IQ3_S kernel for one token too: the pool's gate/up rows went
-from 36-41 to 56-64 GB/s in the good requests. `--kv-grow` let the cache start with 7,668 slots instead of 5,519-5,796
-and keep 6,796 of them at 130K and 6,204 at 200K; the missed experts per layer fell by about a third and the prompts
-read as fast (2,209-2,229 tok/s for 85K new tokens at 200K, against 2,179-2,223). Greedy text: the first token where
-two runs differ came at a median of 15 of 192 between the control's own starts (the adaptive tier makes the decode
-non-deterministic) and at 15 between the control and `STRATA_IQ3S_MT1=1`, so the change is inside that noise.
-Measured and not better: `--pool-workers 5`, 8 (an E-core joins), 12, `--pool-affinity p-cores --pool-workers 15`
-(the P-cores' SMT siblings too), `--no-host-worker`, process priority High, `--vram-reserve-mib 1472`,
-the PCIe share at 0.1 and 0.2 (it moved at most 0.17 experts per layer to the link, no speed change), `--adapt-swaps 320`
-and `--adapt-decay 0.90` (hit rate and CPU time within the control's spread). `--max-context 196608` gives the cache
-513 more slots but refuses a 200K prompt; `--kv-grow` gives more slots without losing context.
-
-In about half the requests the pool then read only 13-25 GB/s with the same work. Every thread ran its tasks at the
-same speed (`STRATA_POOL_STATS`), but the threads sat idle 30-50% of each pool phase instead of about 10%; a request
-kept its speed until the next long prompt (85K new tokens). It was not other programs, the workers sleeping, the host
-thread moving, Windows power throttling, process priority, a fuller VRAM or the CPU clock. The cause is below.
-
-**Why the CPU pool slowed down after a long prompt (found 2026-10-22):** Windows took the expert arena out of the
-engine's working set. `cudaHostRegister` keeps the arena's pages in RAM, because the GPU copies from them, but it does
-not keep them in the working set. When RAM runs short, Windows still trims them. That frees no memory, since the
-pages stay locked for the GPU. But every 4 KB page of an expert the pool reads next is then a page fault, about 400
-per expert, taken by 8 threads at once. The PC these numbers come from had 48 GB of RAM and 1-4 GB of it available
-(a WSL and a QEMU virtual machine, browsers, 18-38 GB in the page file). A long prompt is when RAM runs shortest: the
-conversation cache copies the outgoing conversation into ordinary memory (2 GB at 130K tokens) and the K/V grows.
-Measured with the new `STRATA_POOL_STATS` lines (RTX 5080, i9-14900K, Cyber-Tiel-Coder UD-IQ4_XS, the server's
-settings with `STRATA_IQ3S_MT1=1` and `--kv-grow`, `--serve` with 2K, then 130K and 200K in turn, 192 tokens each):
-
-- In a run under such pressure (the PC paged in up to 170,000 pages a second) the engine's working set fell
-  from 17.4 to 9.2 GiB, while the arena alone is 14.1 GiB. The last three requests then took 20,000-247,000 page
-  faults each, against 530-720 before, and the pool read 25-33 GB/s, against 33-43 GB/s earlier in that run.
-- `STRATA_TEST_TRIM_WS=1` (a test switch) empties the engine's working set before every decode, as Windows does when RAM
-  runs short. It gives the same slow mode every time: 0.92-1.35 million page faults per request, none of the arena in
-  the working set at the decode's start and 24-36% at its end, every thread at the same speed but a tenth to a quarter
-  of each 76-146 us pool phase spent waiting for the slowest one, and 18-23 GB/s.
-
-`STRATA_ARENA_WSLOCK=1` (opt-in, Windows) locks the registered arena in the working set as well: it raises the
-working-set minimum and calls `VirtualLock`. The start-up line then says `expert arena: locked 14463 MiB via
-working-set minimum + VirtualLock`. It costs no RAM, because the pages were locked in RAM already. With it the arena
-stayed 100% in the working set in every request, also under `STRATA_TEST_TRIM_WS=1`. Same settings and requests as
-above, each pair of arms in one stop of the server, in the order control, lock, lock, control. Medians of the 6
-requests at 130K and the 8 at 200K after the first long prompt (15K new tokens at 130K, 85K at 200K; in the first
-control run with the working set emptied, 114K at 130K and three of the 200K requests only 3K, because the
-conversation cache kept more):
-
-| | 130K tok/s | 200K tok/s | ms per window, 130K / 200K | CPU ms per window | pool GB/s | page faults per request |
-|---|---|---|---|---|---|---|
-| working set emptied before each decode, control | 124.7 | 129.6 | 13.25 / 16.06 | 4.02 / 5.26 | 19.8 / 20.2 | 0.96-1.35 million |
-| working set emptied before each decode, `STRATA_ARENA_WSLOCK=1` | 161.2 | 166.9 | 10.84 / 13.25 | 1.75 / 2.38 | 53.1 / 53.5 | 7,600-16,000 |
-| no RAM pressure that hour, control | 174.6 | 177.7 | 10.91 / 13.10 | 1.77 / 2.38 | 49.2 / 48.0 | 350-800 |
-| no RAM pressure that hour, `STRATA_ARENA_WSLOCK=1` | 155.9 | 168.6 | 10.59 / 12.81 | 1.49 / 2.08 | 52.2 / 52.4 | 530-840 |
-
-The tokens per second also depend on how many drafted tokens a window keeps, which changed from run to run here
-(1.60-2.33 tokens per window at the same context), so the time per window is the fairer comparison: with the lock it
-was the same or shorter in every case. Without RAM pressure (the arena stayed in the working set in the control too)
-the lock changed nothing beyond that noise. `STRATA_TEST_TRIM_WS` stays a test switch: it trims the whole engine, not
-only the arena.
-
-Not fixed by the lock: when RAM is this short, other waits grow too. The worst request seen (another run, before the
-working-set numbers existed) read 3.5 GB/s and decoded 31.7 tok/s at 200K. Its conversation restore took 968 ms
-instead of 142-217, its GPU-reach wait doubled, and its pool threads got only 33-59% of their CPU cycles because the
-workers fell asleep between layers while the host thread waited. Free RAM on the PC, or a smaller
-`--conversation-cache-mib`, helps there; the lock alone was not measured on such a request. Compare runs by medians
-over several starts, not by one request.
 
 **How good the next-layer expert prediction is (measurement only):** `STRATA_LOOKAHEAD_STATS=1` runs the router look-ahead on any expert tier and
 scores it against the routing of the next layer: every 100 windows the engine log has a `strata lookahead stats:` line with the experts per layer
@@ -1779,6 +1698,14 @@ without penalties, so more of its guesses are now rejected. Requests without pen
 
 **Token biases (opt-in).** The chat API supports request-scoped `logit_bias` objects and token/bias pair lists on supporting CUDA/HIP engines without continuous batching. A value of -100 (or `false` in a pair list) excludes a token. Unsupported engines return an error. See [LOGIT_BIAS.md](LOGIT_BIAS.md) for formats, limits and validation.
 
+**Scripts banned for every request (opt-in, this fork).** `"ban_scripts": ["han", "hangul", "kana"]` in
+`strata-<model>.json` gives every token whose text has a Han, Hangul or kana character a bias of -100 (a byte token
+that is only part of a character is not banned). A model that answers in Russian sometimes writes one word half in
+Korean or Chinese ("ма스크" for "маска"); the ban stops that without the client sending a list. On the Qwen3.6
+vocabulary it bans 65,716 of 248,320 tokens, none of them Cyrillic or Latin. A request's own `logit_bias` wins for a
+token it names. It needs the same engine as token biases (no `--batch`); the server's start line says how many tokens it
+banned. Unknown script names stop the server with the list of known ones.
+
 **Sampled drafting (opt-in, 0.1.40.2).** With temperature above 0 the engine keeps a draft only when it equals the token the model sampled for that position, and the draft layer proposes its best guess. Two opt-in switches change how the draft layer drafts a sampled request; greedy requests (temperature 0) are never touched and stay byte-identical. `STRATA_SPEC_COUPLED=1` (or `--coupled-draft`) drafts by sampling with the request's own settings and the random number the checking row will use; the text for a seed does not change. `STRATA_SPEC_PROB=1` is speculative rejection sampling: the draft layer samples its guess from its own distribution q, the check accepts it with probability min(1, p/q) (p is the model's distribution after penalties, top_k, top_p, min_p and temperature) and otherwise samples the replacement from the leftover distribution, so every token is distributed exactly as without drafts (the text for a seed then depends on the drafts, so it is reproducible only for the same engine, flags and prompt). Guesses without a distribution (prompt lookup, suffix drafts) keep the exact-match rule, which is already exact. Neither is faster in a way that holds up: on an RTX 3060 (IQ3_XXS, 200-token story and code answers, 10 interleaved pairs) the default's median output speed was 42.4 / 43.2 / 43.3 tok/s at temperature 0.3 / 0.7 / 1.0, coupled drafting 40.6 / 42.4 / 43.3 and rejection sampling 41.0 / 42.6 / 42.6, with run-to-run differences of up to 5% between repeats; drafts kept per round fell at 0.3 and rose by about 5 points at 1.0, which the cost of the longer sampled windows ate. `STRATA_SPEC_DEPTH=1` prints the acceptance by draft depth for each request; `STRATA_SPEC_MIN_TEMP=0.9` limits sampled drafting to hotter requests. Proof that the rejection rule keeps the distribution: `spec_prob_test` (chi-square, 2 million trials per case) and `spec_verify_parity` (GPU against the host reference).
 
 ---
@@ -2393,7 +2320,9 @@ the pairs in which the switched arm won). They are here so you can try them on y
   prompt chunk 8192, `--prompt-cache 0`, a fresh engine per arm, medians of 3): 4K 1402 / 1410 / 1391 ms, 16K 4621 /
   4666 / 4578 ms, 64K 18481 / 18688 / 18325 ms for the default / `STRATA_GDN_CHUNKED=2` / `=1`, so the wide scan
   takes 0.8-0.9% off and the 128-block scan adds 0.5-1.1%. The first 8 greedy tokens were the same in all three arms.
-  The recurrence is a small part of a prompt here (the experts are most of it), so that is the whole gain.
+  The recurrence is a small part of a prompt here (the experts are most of it), so that is the whole gain. The
+  chunked kernels exist for Flash-Next's 48 value heads only, so on the Qwen3.6 family (32 value heads: Qwen3.6,
+  Ornith, Cyber-Tiel) `STRATA_GDN_CHUNKED` changes nothing, on any card.
 - **`STRATA_FS_SLOTS=N`: the Foresight swap space** (q8atnight, #1348): N VRAM slots per layer, refilled on a copy stream
   with the experts that just missed and with the ones the next layer's router predicts (`STRATA_FS_AHEAD=0` for the
   misses only), so that an expert the cache lacks can be computed on the GPU instead of by the CPU. The model's own router
@@ -2469,11 +2398,9 @@ the pairs in which the switched arm won). They are here so you can try them on y
   MMQ's outer scheduler (`src/prefill/moe_mmq_tab.cuh`) takes one pointer per expert instead, and a resident expert is
   read where it is; streamed, peer-GPU and other experts are still copied. The launch (tile size, stream-k split,
   fixup) is the one MMQ makes for the copied group and the tile code is llama.cpp's own, so the answers are the same
-  bits (`prefill_mmq_tab_test`: 1,206 products bitwise equal to the copied path, all nine types - Q2_0, IQ2_XXS, IQ2_XS,
-  IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, Q8_0 - and every tile size, at Flash-Next's expert widths and at Qwen3.6's
-  (IQ3_S gate/up [1024, 2048], IQ4_XS down [2048, 512]); the optional Q5_0 and K-quant experts get no pointer table and
-  keep the copy). A layer is read in place at the model's own widths, so a Qwen3.6-35B-A3B pack takes it too (37 of
-  Cyber-Tiel-Coder UD-IQ4_XS's 40 layers; the 3 with Q6_K down experts keep the copy). Each sized cache slot keeps 256 bytes after its expert, because MMQ reads up to
+  bits (`prefill_mmq_tab_test`: 874 products bitwise equal to the copied path, all nine types - Q2_0, IQ2_XXS, IQ2_XS,
+  IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, Q8_0 - and every tile size; the optional Q5_0 and K-quant experts get no
+  pointer table and keep the copy). Each sized cache slot keeps 256 bytes after its expert, because MMQ reads up to
   136 bytes past a 640-wide down matrix; they are zeroed before each group. That is about 2.3 MiB over 9,300 slots (one
   slot fewer out of 6,998 on one RTX 3090). `STRATA_MMQ_DIRECT=2` keeps that layout but copies as before (an A/B
   reference); 0 or unset is the default path, byte for byte. `STRATA_MMQ_DIRECT_LOG=1` adds each stage's count of experts
@@ -2499,423 +2426,6 @@ the pairs in which the switched arm won). They are here so you can try them on y
   `tools/batch_test.py --n 16` prompts (solo and batch) were identical too, and to those of a build without the
   option. The uniform cache (no profile) holds no resident expert when a native pack's prompt is read (serve needs the
   profile, and a one-shot run fills the cache only while it decodes), so `expert_cache_slot_guard_test` covers it.
-- **`STRATA_PROMPT_ATTN_FP16ACC=1|2|3`: the dense prompt attention (Qwen3.6 / Ornith, sm_80+) at FP16 precision.** By
-  default `prompt_attn_dense_kernel` carries q and p as FP16 hi + lo parts with FP32 accumulators (FP32-level accuracy).
-  `=1` drops the lo parts (half the MMAs) and with them half the kernel's shared memory, so two blocks of 4 warps share
-  an SM instead of one (int8 K/V: 49,920 bytes a block against 81 KB); that occupancy is most of the gain. `=2` also adds
-  each 32-cell chunk's p.v in an FP16 accumulator (int8 V only; p is scaled so the sum stays below 2^15), promoted to
-  the FP32 sum per chunk. `=3` also adds each 64-dim group's q.k in an FP16 accumulator (int8 K only). The softmax
-  (max, exp, sum) stays FP32 in every mode; FP16 K/V take `=1` for any value. Unset, the kernels compile to the same
-  SASS as before (all 14 kernels of `qsa_prompt_attn.cu`, sm_120, compared with `cuobjdump -sass`).
-  `qsa_prompt_attn_parity` reports each mode against the FP32 kernel and an FP64 reference (int8 K/V, RTX 5080):
-
-  | | chunk time, 2048 queries at 16K | chunk time, 8192 queries at 64K | row error vs FP32 (rel. L2, mean / max) | max error vs FP64 (FP32: 4-7e-6) |
-  |---|---|---|---|---|
-  | default | 21.4 ms | 326 ms | - | - |
-  | `=1` | 11.3 ms | 152 ms | 5.7e-4 / 2.7e-3 | 7.8e-4 |
-  | `=2` | 10.2 ms | 135 ms | 6.3e-4 / 2.7e-3 | 1.0e-3 |
-  | `=3` | 8.4 ms | 117 ms | 1.9e-3 / 8.0e-3 | 4.5e-3 |
-
-  For scale, the int8 KV cache itself rounds each value to 1/254 of its group's largest. The parity tool's `sharp`
-  rows (queries that share a direction with a sink cell and needles, a peaked softmax) give the same picture.
-  Whole engine, Ornith 1.5 35B-A3B IQ4_XS, `--kv int8`, prompt chunk 8192, RTX 5080 16 GB (PCIe 5.0 x8, Windows 11,
-  CUDA 13.4), the config's arguments plus `--vram-reserve-mib 1472`, a fresh engine per arm, three different prompts
-  per size (time to first token, s):
-
-  | | 4K | 16K | 64K |
-  |---|---|---|---|
-  | default | 0.70 / 0.70 / 0.71 | 2.70 / 2.68 / 2.68 | 19.09 / 19.06 / 19.06 |
-  | `=2` | 0.70 / 0.69 / 0.69 | 2.25 / 2.23 / 2.23 | 11.95 / 11.96 / 11.96 |
-  | `=3` | 0.68 / 0.67 / 0.67 | 2.20 / 2.18 / 2.61 | 11.58 / 11.63 / 11.64 |
-
-  So 1.20x at 16K and 1.59x (`=2`) / 1.64x (`=3`) at 64K (`=1`: 14.2-14.5 s at 64K, one run). Decode does not use
-  this kernel: 128 tokens after a 200-token prompt ran 130-270 tok/s in both arms (medians ~205 / ~207). Quality, the
-  same runs: a passphrase asked back from 16K and 64K documents (4 depths, 2 documents each) was found 16 of 16 times
-  in every arm (2 default, 2 `=2`, 2 `=3`). Greedy 128 tokens after 12 real-text prompts (4K-64K): two default runs
-  first differ at token 52.7 on average (2 of 12 identical: the engine is not bit-reproducible), default against `=2`
-  at 47.9-58.1 (2-4 identical), against `=3` at 34.8-52.1 (1-3 identical). Teacher-forced log-probabilities of the last
-  511 tokens of six real texts (four 16K, two 64K; `STRATA_LOGPOS`, top 40): two default runs KL 0.0080 nats, argmax
-  agreement 96.4%; default against `=2` KL 0.0094 / 0.0101, 96.7% / 96.2%; against `=3` 0.0097 / 0.0106, 96.3% /
-  96.0%; perplexity 3.305 and 3.318 (default), 3.319 (`=2`), 3.312 (`=3`). The reduced modes add a little to the
-  engine's own run-to-run KL and nothing measurable to retrieval or perplexity; `=2` keeps the error at FP16 rounding.
-  Not measured: other cards (the occupancy gain depends on the 100 KB per SM of sm_86/89/120), FP16 K/V in the engine.
-- **`STRATA_PROMPT_ATTN_DENSE_IMMA=2`: the dense prompt attention on INT8 tensor cores (int8 K/V, sm_80+).** The same
-  block as the kernel above (8 queries x 8 heads, a 32-cell chunk read once for them, the softmax in registers), but
-  both products are `mma m16n8k32` on int8 with int32 sums: K and V enter as the int8 codes they are stored as (no
-  int8 -> FP16 conversion per warp and MMA), and q and p * v_scale as two 8-bit parts each (16 bits: a signed high byte
-  and an unsigned low byte, X = rint(x * 32766 / bound)). q is scaled per row; p * v_scale per row, chunk and 64-dim V
-  group, against the chunk's largest p times its largest V scale. The int32 sums of the two parts meet exactly in FP32.
-  Each warp builds p.v's operands from its own registers and an 8-byte read per cell (V transposed by byte permutes),
-  so a chunk needs no extra pass through shared memory. INT8 MMA runs about 3x the FP16-accumulate rate on sm_120 and
-  6x the FP32-accumulate rate of the default kernel's q.k; the kernel is not limited by its MMAs (it waits on loads,
-  barriers and the work around them), so the gain is smaller than that. It takes precedence over `FP16ACC`; FP16 K/V
-  ignore it. Unset, the other 24 kernels of `qsa_prompt_attn.cu` compile to the same SASS as before (sm_120,
-  `cuobjdump -sass`). `qsa_prompt_attn_parity` (RTX 5080, int8 K/V, 8192 queries at 64K cells; page sizes 4, 3 and 512
-  checked too):
-
-  | | chunk time | row error vs FP32 (rel. L2, mean / max) | max error vs FP64 (FP32: 6.8e-6) |
-  |---|---|---|---|
-  | default (FP32-level) | 286-311 ms | - | - |
-  | `FP16ACC=2` | 118-127 ms | 6.3e-4 / 2.7e-3 | 1.0e-3 |
-  | `DENSE_IMMA=2` | 85-97 ms | 8.9e-5 / 3.2e-4 | 2.0e-4 |
-
-  So 1.31-1.40x the `FP16ACC=2` kernel at about 7x its accuracy. In the engine (nsys, a 200K prompt from scratch) the
-  prompt attention took 49.3 s at 66.5 TFLOP/s with `FP16ACC=2` and 36.1 s at 90.9 TFLOP/s with `DENSE_IMMA=2`.
-  Whole engine: Cyber-Tiel-Coder 35B-A3B UD-IQ4_XS, RTX 5080 16 GB (PCIe 5.0 x8) + i9-14900K, 48 GB, Windows 11, CUDA
-  13.4, the server's settings (`--kv int8 --max-context 262144 --prefill auto` (8192-token chunks) `--pcie-frac 0.00
-  --kv-grow`, `STRATA_PROMPT_ATTN_FP16ACC=2`, `STRATA_ATTN_WINDOW=1`, `STRATA_IQ3S_MT1=1`), `--serve`, a fresh engine
-  per arm, three runs per size (token 0 changed so nothing is reused; "200K after 115K": the 130K prompt, then 200K with
-  the same start, 114,688 tokens reused from the checkpoint and 85,312 read), time to read the prompt (median, s):
-
-  | | 64K | 130K | 200K | 200K after 115K |
-  |---|---|---|---|---|
-  | the server's settings (`FP16ACC=2`) | 13.90 | 37.2 | 76.7 | 46.0 |
-  | + `STRATA_PROMPT_ATTN_DENSE_IMMA=2` | 12.23 | 30.8 | 60.0 | 34.4 |
-  | speed-up | 1.14x | 1.21x | 1.28x | 1.34x |
-
-  Quality, teacher-forced log-probabilities of the last 511 tokens of the 64K, 130K and 200K texts (`STRATA_LOGPOS`,
-  top 40, the windows read the tail; the prompt path wrote the cache before it): two runs of the server's settings KL
-  0.0058 / 0.0083 / 0.0139 nats, argmax agreement 98.2 / 96.7 / 94.3%; the server's settings against `DENSE_IMMA=2`
-  KL 0.0079-0.0085 / 0.0123-0.0139 / 0.0149-0.0163, agreement 96.9-97.5 / 92.8-93.4 / 93.7-94.1%; perplexity 2.078 and
-  2.074 against 2.076, 4.298 and 4.288 against 4.303, 9.07 and 9.13 against 8.99. The difference stays near the
-  engine's own run-to-run KL; part of it is `FP16ACC=2`'s own error, which the new kernel does not have. Greedy 128
-  tokens after the same prompts first differ at 33.6 tokens on average (1 of 13 identical); a few long prompts differ
-  at token 0, where the server's settings themselves pick either of the same two tokens depending on the prompt's
-  first token. Not measured: other cards, FP16 K/V, decode (this kernel is the prompt's; the window decode keeps its
-  own).
-
-### Long prompts at 64K-200K: where the time goes (RTX 5080, measured 2026-10-21)
-
-Same PC, model and server settings as the `DENSE_IMMA` measurement above (read with the timing switch on, which then
-added 6-9% and charged its own cost to "expert gather": see "Long prompts: the part that is not attention" below).
-`STRATA_PREFILL_TIMING=1` (the prompt path's GPU time by phase; a gap where the GPU waits is charged to the phase that waited), medians of three runs, share of the
-GPU timeline:
-
-| prompt | read | dense prompt attention | expert gather ("dequant") | expert gate/up + down | GDN (all) | other |
-|---|---|---|---|---|---|---|
-| 64K from scratch | 13.9 s | 39% | 13% | 15% | 18% | 14% |
-| 130K from scratch | 37.2 s | 56% | 10% | 11% | 13% | 10% |
-| 200K from scratch | 76.7 s | 66% | 8% | 8% | 10% | 8% |
-| 200K after 115K reused | 46.0 s | 73% | 7% | 7% | 7% | 7% |
-
-nsys (one-shot `--tokens-file`, from the first GDN kernel to the end of the prompt): at 64K 14.8 s, the GPU idle 13%
-(1.2 s of 20 us-1 ms gaps, the rest after expert copies); kernels: prompt attention 5.3 s (66 TFLOP/s), cuBLAS
-projections 2.1 s, expert MMQ 2.1 s, GDN 1.1 s. At 200K 78.6 s, idle 7.3%; prompt attention 49.3 s (74% of kernel
-time, 66.5 TFLOP/s), cuBLAS 6.4 s, MMQ 6.4 s, GDN 3.3 s. So the attention, quadratic in the context, is the long
-prompt's cost; everything else grows with the tokens read.
-
-The expert gather is the prompt path copying each chunk's routed experts into one buffer for MMQ - resident ones too -
-once per chunk and layer, so a larger chunk pays it for more tokens. `--prefill auto:16384` (chunks of 16,384 tokens;
-the prompt path then borrows 5,618 expert-cache slots, 7.75 GiB, instead of 3,090, 4.26 GiB, and gives them back
-before the decode) halves it: 0.9 s instead of 1.7 s at 64K. One downtime, the server's settings in every arm, two
-runs each (medians, s):
-
-| | 64K | 130K | 200K | 200K after 115K |
-|---|---|---|---|---|
-| the server's settings | 14.28 | 38.35 | 75.72 | 45.74 |
-| + `STRATA_PROMPT_ATTN_DENSE_IMMA=2` | 12.67 | 33.27 | 65.06 | 38.04 |
-| + `DENSE_IMMA=2` + `--prefill auto:16384` | 11.21 | 29.44 | 59.54 | 34.81 |
-| speed-up of the last row | 1.27x | 1.30x | 1.27x | 1.31x |
-
-The middle row had a request start with 126 MiB of VRAM free (the WDDM paging warning), which made it a few percent
-slower than the three-run measurement above (12.23 / 30.8 / 60.0 / 34.4); against that, the larger chunk gains 8% at
-64K, 4% at 130K and about 1% at 200K. Decode after these prompts (128 tokens) ran 109-224 tok/s in every arm.
-
-`STRATA_MMQ_DIRECT=1` (resident experts read in place) does not pay here. The copy it removes is only part of the
-gather, and the pointer-table gate/up product is a little slower than the copied one. (Two fixes were needed to try
-it: the build's signature check failed under MSVC, which keeps `__restrict__` in a function's type, and the switch was
-limited to Flash-Next's expert widths, so on this model it read 0 layers in place.) RTX 5080 16 GB, i9-14900K,
-Windows 11, CUDA 13.4, Cyber-Tiel-Coder UD-IQ4_XS with the server's settings (`DENSE_IMMA=2`), one engine run per arm
-with 3 prompts of each size, two downtimes, medians in s:
-
-| | 64K | 130K | 200K | 200K after 115K |
-|---|---|---|---|---|
-| default build (two runs of 3) | 12.71 / 12.58 | 32.76 / 32.70 | 63.68 / 62.42 | 37.20 / 36.99 |
-| `-DSTRATA_MMQ_TAB=ON` + `STRATA_MMQ_DIRECT=1` | 12.49 | 31.99 | 62.90 | 36.76 |
-| default build + `--prefill auto:16384` | 11.88 | 28.95 | 57.24 | 34.08 |
-| TAB + `DIRECT=1` + `--prefill auto:16384` | 11.21 | 29.95 | 58.78 | 34.42 |
-
-The two default runs differ by up to 2%, so every difference in the table is at the noise level. The GPU timeline
-(`STRATA_PREFILL_TIMING=1`) at 200K, mean of 3 runs: the copy phase 5.98 -> 5.73 s and the products 6.41 -> 6.62 s,
-the whole prompt 62.82 -> 62.60 s; with `auto:16384` the copy phase 3.22 -> 3.21 s, the products 5.06 -> 5.20 s,
-the whole prompt 56.95 -> 57.45 s. 92% of the resident experts were read in place (61,819 of 66,904 at 200K), but on
-16 GB most of a long prompt's experts are streamed (107,026 at 200K) and those are still copied. The TAB build also
-had 20-80 fewer expert-cache slots (its kernels take ~37 MiB of VRAM at start, the guards 256 B a slot). The tokens
-generated after these prompts diverged from the default build at the same places as two default runs diverge from
-each other, and decode ran 117-265 tok/s in every arm. So release builds keep the option off.
-
-What was tried in the INT8 kernel and not kept (`qsa_prompt_attn_parity`, 8192 queries at 64K, against the kernel as
-it is): V transposed once per chunk in shared memory by the block (two more barriers a chunk: 108-111 ms against 88);
-16 queries and 8 warps a block (one block an SM: no faster); two K/V stages with one barrier a chunk (8 warps, 97 KB:
-no faster); K and V of a chunk loaded together after it (no faster); p * v_scale in one 8-bit part (1.13x faster, 4x
-the error of `FP16ACC=2`); the I2F conversions replaced by exact magic-number adds (the same bits, no measurable
-change - kept). Switching off parts of the kernel showed the p.v products ~35%, the q.k products ~23%, the K/V loads
-~18% of its time; the issue slots are far from full, so it waits on latency and barriers rather than on any one unit.
-
-### `STRATA_PROMPT_ATTN_DENSE_IMMA=3`: the INT8 prompt kernel in fewer instructions (opt-in, measured 2026-10-21)
-
-The same block as `=2` (8 queries x 8 heads, a 32-cell chunk, two blocks an SM) and the same quantization (q and
-p * v_scale in 16-bit high/low byte parts against the same bounds, int8 K/V codes, exact int32 sums), so the outputs
-match `=2`'s error to the digit. What changed is the work around the MMAs, which `=2` waits on:
-
-- a pair of int32 part sums (h, l) joins as one integer 256 h + l (one IMAD; exact, below 2^31) and one I2F instead of
-  two magic-number conversions and an FMA; in p.v the high part's MMA result, shifted by 8 bits, is the low part's MMA
-  accumulator, so the join is a shift;
-- p * v_scale is rounded by one FMA with the magic number: p is taken against the chunk's own max (exp2(s - chunk max)
-  times 32766), so only 1 / the group's largest V scale is left to multiply;
-- two barriers a chunk instead of four: K(c) and the end of p.v(c - 1) meet at one, after which V(c) loads during
-  q.k(c) and the softmax; V(c) and the end of q.k(c) at the other, after which K(c + 1) loads during p.v(c);
-- the swizzled shared-memory addresses are four offsets per thread plus constants;
-- the blocks start with the latest queries (the widest rows).
-
-It takes precedence over `FP16ACC` as `=2` does; FP16 K/V ignore it. Unset, the other 25 kernels of
-`qsa_prompt_attn.cu` compile to the same SASS as before (sm_120, `cuobjdump -sass`). `qsa_prompt_attn_parity` (RTX 5080,
-int8 K/V; page sizes 4, 3 and 512 checked; two runs each):
-
-| | 64K cells, 8192 queries | 64K, peaked attention | 16K, 2048 queries | 1,000 cells, 37 queries | row error vs FP32 (rel. L2, mean / max) | max error vs FP64 |
-|---|---|---|---|---|---|---|
-| `DENSE_IMMA=2` | 96.6 / 97.0 ms | 96.8 / 97.2 ms | 6.6-8.6 ms | 0.121 ms | 8.9e-5 / 3.2e-4 | 2.0e-4 |
-| `DENSE_IMMA=3` | 84.3 / 85.1 ms | 83.9 / 84.5 ms | 5.7-7.5 ms | 0.090 ms | 8.9e-5 / 3.2e-4 | 2.0e-4 |
-
-So 1.14-1.16x on long chunks (8.25 TFLOP of attention per 64K chunk: 85 -> 98 TFLOP/s) and 1.34x on short ones.
-Whole engine, the setup of the `DENSE_IMMA=2` measurement above (Cyber-Tiel-Coder UD-IQ4_XS, RTX 5080 + i9-14900K,
-Windows 11, CUDA 13.4, the server's settings, which include `DENSE_IMMA=2`, plus `--vram-reserve-mib 1472`), one
-downtime, a fresh engine per arm, three prompts of each size (medians, s):
-
-| | 64K | 130K | 200K | 200K after 115K |
-|---|---|---|---|---|
-| the server's settings (`DENSE_IMMA=2`) | 12.87 | 32.32 | 63.28 | 36.57 |
-| + `STRATA_PROMPT_ATTN_DENSE_IMMA=3` (and `STRATA_ATTN_WINDOW_SMALL=1`) | 12.34 | 30.72 | 58.77 | 33.82 |
-| speed-up | 1.04x | 1.05x | 1.08x | 1.08x |
-
-A third arm with the server's settings (one prompt of each size) read 12.82 / 33.57 / 65.97 / 38.12 s, so the run-to-run
-spread is 2-4%. The gain follows the attention's share of the prompt (39% at 64K, 66% at 200K, above). Greedy 128 tokens
-after the 13 prompts: the server's settings against the new arm first differ at 31.4 tokens on average, the two arms of
-the server's settings at 40.8 (5 prompts) - inside the noise (a 130K prompt differs at token 0 in both). Not measured:
-KL (the parity tool's outputs match `=2`'s error exactly), other cards, Linux.
-
-What was tried and not kept (same tool and size, against `=2` in the same run): 16 queries and 8 warps a block with
-64-cell chunks (99 KB, one block an SM; K/V rows padded to 272 bytes): 1.12-1.16x, the same as the kept kernel but
-spilling 250-370 bytes; the same with 32-cell chunks and K/V double-buffered: 1.03-1.07x; 4 warps with padded K/V rows
-(50.7 KB, one block an SM): 0.73x. Switching parts off in the 8-warp version (73 ms in that run): without p.v 54 ms,
-without q.k 58.5 ms, without both 27 ms, without the K/V loads 71 ms, nothing but the loop 5.6 ms. So no single part
-dominates; the loads are hidden. The time goes to dependent chains inside a warp (ldmatrix -> MMA -> join -> softmax ->
-quantize -> MMA) with 255 registers a thread (the 16 x 256 FP32 accumulator alone is 128), which leaves no room for a
-second tile in flight; FlashAttention-3's overlap needs wgmma / setmaxnreg, which sm_120 does not have. Nsight Compute
-could not be used (`ERR_NVGPUCTRPERM`: GPU performance counters need administrator rights on this PC). A split of the
-cells over two blocks for the last wave (about 6% of a chunk's blocks idle in its last wave at 8192 queries) needs a
-scratch buffer in the prompt path's API and was not done.
-
-### `STRATA_PROMPT_ATTN_DENSE_IMMA=4`: `=3` with cheaper loads and a split last wave (opt-in, measured 2026-10-22)
-
-Nsight Compute 2026.3 (`ncu --set full`, the counters opened to all users on this PC) on `=3`, RTX 5080, 64K cells and
-8192 queries, the first launch in `qsa_prompt_attn_parity`:
-
-- 255 registers and 48 bytes of stack a thread: 293 M local-memory requests, 35% of the sectors in L1; two blocks
-  (8 warps) an SM, 16.7% occupancy; the tensor pipe busy 46% of the time, 0.46 instructions issued per cycle and
-  scheduler.
-- Cycles per issued instruction 4.29: issued 1.00, `wait` (fixed-latency dependencies) 1.26, math pipe throttle (the
-  tensor pipe busy) 0.55, short scoreboard (shared memory, shuffles, MUFU) 0.44, not selected 0.30, long scoreboard
-  0.26, dispatch 0.13, barrier 0.11.
-- By source line (a `-lineinfo` build, the warp samples): the cp.async address arithmetic took 24% of the samples and
-  15.5% of the instructions. Per 16-byte piece it shuffled the cell's page, which waited on the page-table load issued
-  just before it, and multiplied 64-bit row indices, twice per chunk (K, then V of the same cells). Then the MMAs
-  (~19%, mostly math throttle), p.v's joins (11% / 20% of the instructions), the quantization of p (9% / 12%), the
-  softmax (8% / 12.5%) and q.k's joins (6% / 12%).
-- SM active 95.4% of the elapsed cycles: 2,048 blocks of a chunk are 12.19 waves of 168, and in the last one most
-  slots are empty.
-
-`=4` keeps `=3`'s block, layout and arithmetic and changes three things:
-
-- warp 0 computes the chunk's 32 row indices once (lane = cell) into shared memory, its page-table load issued a chunk
-  ahead; a thread reads its 4 cells' rows with one 16-byte load and adds one product per piece, for K and for V;
-- 1 / (the chunk's largest V scale) is one `rcp.approx` instead of the IEEE division (within 1 ulp; p * v_scale / vmax
-  still rounds to at most 32766);
-- the last partial wave is split over the cells: its T items (the shortest rows, as the blocks run widest first) run
-  on wave / T blocks each, over whole chunks, and write unnormalized sums and (max, sum) to a scratch buffer that
-  `prompt_attn_tail_merge_kernel` combines. The buffer is one wave of 64 rows x 258 floats (11 MB on an 84-SM card),
-  allocated at the first split call on a device and kept; without room, or while the stream captures a graph, the
-  launch is not split. `STRATA_PROMPT_ATTN_TAIL=0` turns the split off (read per call).
-
-256 more bytes of shared memory (two blocks an SM still). Unset, the other 30 kernels of `qsa_prompt_attn.cu` compile
-to the same SASS (sm_120, `cuobjdump -sass` of the file built with and without the change). A pitfall found on the way:
-a call to `max(int, int)` in the new code changed the PTX of kernels it does not touch (an unsigned division became a
-signed one in `decode_attn_window_small_kernel`); plain conditionals keep them identical. The new code is guarded
-for the HIP build of the same file (no inline PTX, no occupancy call on AMD), but that build was not run (no ROCm on
-the test PC).
-
-The same profile on `=4`: 26.5 G instructions instead of 30.8 G, 98.6 M local-memory requests instead of 293 M, 172 M
-cycles instead of 212 M, the SM throughput 56% instead of 45%; the stall mix moved to the tensor pipe (math throttle
-0.75 cycles per instruction, long scoreboard 0.11). The MMA lines are now the largest share of the samples (29%).
-
-`qsa_prompt_attn_parity` (RTX 5080, int8 K/V, page size 4 unless noted; `=3` and `=4` in the same run, two runs):
-
-| | 64K, 8192 queries | 64K, peaked | 128K, 8192 queries | 16K, 2048 queries | 1,000 cells, 37 queries |
-|---|---|---|---|---|---|
-| `DENSE_IMMA=3` | 72.9-73.1 ms | 72.8 ms | 151.4-151.7 ms | 5.2-5.3 ms | 0.087-0.088 ms |
-| `DENSE_IMMA=4` | 62.2-62.3 ms | 62.2 ms | 128.9-129.0 ms | 3.9-4.0 ms | 0.034-0.037 ms |
-| `=4`, `STRATA_PROMPT_ATTN_TAIL=0` | 63.9 ms | 63.9 ms | - | - | 0.074 ms |
-
-So 1.17x on long chunks (8.25 TFLOP per 64K chunk: 113 -> 133 TFLOP/s), 1.33x at 16K and 2.4x on the short ragged
-chunk, where the split puts 16 blocks on each of its 10 items. The errors are `=3`'s to the digit: row error against
-FP32 8.9e-5 / 3.2e-4 (mean / max, rel. L2), max error against FP64 2.0e-4 (64K), 2.5e-4 (128K), 2.9e-4 (1,000 cells);
-`=4` against `=3` at most 9.6e-5 (2.6e-5 of the output scale) at 64K, from the reciprocal. Page sizes 3 and 512: the
-same errors as `=3`, 16K 3.9-4.1 ms against 5.2-6.3. (`=3` read 81.6-84.0 ms at 64K in a run the day before, with
-`=4` before the tail split at 72.4-74.1: the card's clock state differs between days, so compare within a run.)
-
-Whole engine, one downtime, a fresh engine per arm (Cyber-Tiel-Coder UD-IQ4_XS, RTX 5080 + i9-14900K, Windows 11,
-CUDA 13.4, the server's settings - `DENSE_IMMA=3`, `STRATA_ATTN_WINDOW_SMALL=1`, `--prefill auto` (8192-token chunks),
-`--kv-grow` - plus `--vram-reserve-mib 1472`), three prompts of each size, medians; the attention column is the prompt
-attention's GPU time from `STRATA_PREFILL_TIMING`:
-
-| | 64K | 130K | 200K | 200K after 115K |
-|---|---|---|---|---|
-| the server's settings (`DENSE_IMMA=3`), s | 12.68 | 31.70 | 57.59 | 32.55 |
-| + `STRATA_PROMPT_ATTN_DENSE_IMMA=4`, s | 11.87 | 28.32 | 53.84 | 30.49 |
-| speed-up | 1.07x | 1.12x | 1.07x | 1.07x |
-| attention GPU time, `=3` -> `=4`, s | 3.56 -> 2.99 | 13.78 -> 11.35 | 31.51 -> 26.98 | 20.88 -> 18.29 |
-
-The single prompts spread by 1-7% (200K with `=3`: 53.8, 57.6, 58.0 s; with `=4`: 53.7, 53.8, 54.3 s). Attention is
-still 41-62% of the prompt's GPU time at 130K-200K. Five of the 26 requests started with 407-962 MiB of VRAM free (the
-WDDM warning: the first 64K and the third 200K request of the first arm, the first and third 64K and the first 130K
-request of the second), so the 64K column is the least sure. The `=4` arm also had `STRATA_ATTN_WINDOW_SMALL=6` (windows of 5-6 tokens on the small
-kernel, which `attn_window_parity` times at 422-428 µs against 466-473 for the window kernel at 200K cells); its decode
-did not differ beyond the answers' spread (tok/s means of three 128-token answers, `=3` arm / `=4` arm: 130K 166.5 /
-168.8, 200K 171.2 / 154.3, 200K after 115K 163.7 / 186.9, 64K 251.4 / 255.4; single answers range 127-220), so that
-setting is not recommended from this run.
-
-Where a 200K decode window goes now (`STRATA_VERIFY_PROFILE=1 STRATA_DECODE_TIMING=1`, the server's settings, one
-request each, 128 tokens): from scratch, 63 windows of 2.22 queries (2.03 tokens) at 13.42 ms: the host waits 8.54 ms
-for the GPU, 2.23 ms per-layer host work (2.11 of it the CPU experts), 0.67 commit/emit, 0.87 draft. The GPU's 11.34
-ms: attention in the 10 QSA layers 3.38 ms (the largest stage; K/V of 200K cells are 2.05 GB a window, 2.1 ms at the
-card's ~960 GB/s), VRAM expert hits 1.63, the GDN layers' q/k/v GEMVs 1.08, waits for the CPU experts 0.87, the head
-0.55, routers 0.71, shared experts 0.66, out-projections 0.65. After 115K reused (42 windows of 3.36 queries, 18.46
-ms): attention 3.95 ms, but the waits for the CPU experts 4.50 ms (the pool read 39.8 GB/s and ran 5.09 experts per
-layer-window, against 43-57 GB/s and 1.6-2.4 in the other requests) - the slow pool reads of "The CPU experts at
-130K-200K context" above, not the attention. No cheap stage stood out: the attention is within 1.6x of reading K/V once at full
-bandwidth. An nsys trace of the same decode (`--trace=cuda`) showed only copies after the prompt: the decode runs as
-CUDA graphs, whose kernels need `--cuda-graph-trace=node`.
-
-What was tried and not kept: the page-table load one chunk ahead in `decode_attn_window_small_kernel`, whose shuffle
-waited on it (Nsight Compute, 200K cells: 28% of the warp samples at T <= 2, 16% at T = 3-4). Its outputs were the
-same, but four interleaved runs against the old build at 200K cells gave medians inside the noise (T = 1-4: 297 / 305 /
-377 / 360 against 293 / 293 / 359 / 373 µs) and slower at T = 6 and 8, so it was reverted: at T <= 2 the kernel reads
-K/V at 89% of the card's DRAM bandwidth (Nsight Compute), and at T = 3-4 it runs one block an SM (56 KB of shared
-memory) at 66%.
-
-### Long prompts: the part that is not attention (RTX 5080, measured 2026-10-22)
-
-Same PC and model as the `DENSE_IMMA=4` measurement above: Cyber-Tiel-Coder UD-IQ4_XS, RTX 5080 16 GB (PCIe 5.0 x8) +
-i9-14900K, Windows 11, CUDA 13.4, the server's settings (which now include `DENSE_IMMA=4`; `--prefill auto`: chunks of
-8,192 tokens, a 384-slot ring, 3,089 expert-cache slots borrowed) plus `--vram-reserve-mib 1472`, a fresh engine per
-arm.
-
-**The timing switch was part of the cost.** `STRATA_PREFILL_TIMING=1` recorded an event at every expert of the
-streamed walk, besides each phase change: about 20 records per group of 16 experts. Under WDDM a recorded event is GPU
-time. An nsys trace of a 200K prompt with the switch on shows a gap of 120-630 µs (median 260) before each group's
-gather, 4.9 s in all, while the copies the gather waited for had landed long before (its wait was enqueued ~370 ring
-entries behind the copy issuer). The timeline charged those gaps to "dequant" (6.1 s of a 200K prompt) and "wait copy".
-So this file's tables measured with the switch on overstate the prompt by 6-9%. Medians of three prompts, s:
-
-| | 130K | 200K after 115K |
-|---|---|---|
-| without `STRATA_PREFILL_TIMING` (one downtime, the server's build) | 26.87 | 28.62 |
-| with it, as it was (same downtime) | 29.31 | 30.62 |
-
-A mark of the phase that is already running now is not recorded. It only split an interval charged to the same phase,
-so every phase's sum stays the same, and a group gets 5 records instead of ~20. In later downtimes, without the switch
-and with the changed switch: 130K 26.24 / 27.68 s, 200K 50.83 / 51.51 s, and "dequant" at 200K is 1.9 s. The switch
-still costs 1-6%, so compare timed runs with timed runs. The real 200K prompt from scratch takes ~50.8 s, not 53.8.
-
-**Where the rest of a 200K prompt goes.** nsys (`--trace=cuda --cuda-graph-trace=node`, one-shot `--tokens-file`,
-the server's build and settings, no timing switch), from the first GDN kernel to the end of the last chunk's last
-layer. Each moment is charged once: to the kernel running, else to the GPU waiting while an expert copy is in flight,
-else to idle:
-
-| stage | 200K | share | 130K | share |
-|---|---|---|---|---|
-| the prompt's GPU window | 50.11 s | | 26.09 s | |
-| prompt attention | 27.27 s | 54.4% | 11.61 s | 44.5% |
-| dense projections (cuBLAS: GDN in/out, attention q/k/v/o, shared expert, router) | 6.28 s | 12.5% | 4.02 s | 15.4% |
-| routed experts, MMQ gate/up and down | 4.90 s | 9.8% | 3.13 s | 12.0% |
-| GDN recurrence | 2.24 s | 4.5% | 1.45 s | 5.6% |
-| norms, adds, RoPE, routing, other | 2.07 s | 4.1% | 1.29 s | 4.9% |
-| layers 34, 38 and 39's experts on the FP16 path (their MoE part, gaps included) | 1.70 s | 3.4% | 1.12 s | 4.3% |
-| no kernel while an expert copy is in flight | 1.32 s | 2.6% | 0.71 s | 2.7% |
-| GDN conv, gates, norms | 1.15 s | 2.3% | 0.73 s | 2.8% |
-| no kernel, no copy | 0.98 s | 2.0% | 0.60 s | 2.3% |
-| MoE combine | 0.95 s | 1.9% | 0.61 s | 2.3% |
-| expert gather into the MMQ groups | 0.62 s | 1.2% | 0.41 s | 1.6% |
-| MMQ activations (q8_1, SwiGLU) | 0.50 s | 1.0% | 0.33 s | 1.3% |
-| dense weights Q8_0 to FP16 | 0.12 s | 0.2% | 0.08 s | 0.3% |
-
-The experts streamed over PCIe are not the limit. At 200K, 298 GB cross the link (11.9 GB a chunk: every
-non-resident expert of every layer, since at this chunk size nearly all 256 are routed). At 24.4 GB/s that keeps the
-copy engine busy 12.2 s, and 89% of it runs behind kernels. The copy engine idles through each attention layer (the
-ring is full) and catches up in the GDN layers after it. `STRATA_PREFILL_RING=512` (the ring's cap) left the time
-without a kernel unchanged (1.13 -> 1.14 s with `STRATA_MMQ_KQ=1` below).
-
-The largest stage besides attention is the dense projections, at ~91 TFLOP/s (2.86 GFLOP a token), near what FP16
-inputs with FP32 sums give on this card (110-118 TFLOP/s, `mma.sync` m16n8k16).
-
-The next one is a format question. UD-IQ4_XS keeps the down projections of layers 34, 38 and 39 in Q6_K, which MMQ
-takes only with the K-quant library (`STRATA_MMQ_KQ=1`, `strata_kq.dll` next to the engine). Without it, those three
-layers run every expert on its own: an FP16 dequantize, two GEMMs and a SwiGLU, bound by kernel launches. A GDN layer
-takes ~21.5 ms of a 200K prompt's chunk; layers 34 and 38 take 40.7 and 35.0 ms, 17 and 11 ms of it with no kernel
-running, and layer 39 (attention) takes 12 ms more than layer 35 besides its attention.
-
-Two opt-ins were measured against this:
-
-- `STRATA_MMQ_KQ=1` (it already exists): the three layers run on MMQ. The prompt path then needs no FP16 expert
-  buffers and borrows 2,739 cache slots instead of 3,089.
-- `STRATA_DENSE_MMQ=1`, the HIP switch (#820), now also on CUDA: the dense GGUF projections run on llama.cpp's int8
-  MMQ instead of dequantize + cuBLAS, with the activations rounded to q8_1 per 32 values. On CUDA the FP16 activations
-  are quantized as they are (`mmq::quantize_f16`, which writes the same bytes as widening them to FP32 first:
-  `prefill_dense_mmq_test`).
-
-Without either switch the prompt path runs the kernels it ran before: the 10 existing kernels of `moe_mmq.cu` and the
-2 of `gemm.cu` compile to the same SASS (sm_120, `cuobjdump -sass`), with three small new ones beside them.
-
-GPU time of the 200K prompt, nsys as above, one run each, s ("gaps": no kernel, with or without a copy in flight):
-
-| | GPU window | prompt attention | dense projections | routed-expert MMQ | FP16-path layers | gaps |
-|---|---|---|---|---|---|---|
-| the server's settings | 50.11 | 27.27 | 6.28 | 4.90 | 1.70 | 2.30 |
-| + `STRATA_MMQ_KQ=1` | 48.25 | 27.37 | 6.18 | 5.25 | - | 1.88 |
-| + `STRATA_MMQ_KQ=1` + `STRATA_DENSE_MMQ=1` | 48.57 | 27.56 | 5.15 | 5.31 | - | 3.04 |
-
-`STRATA_MMQ_KQ=1` takes 1.9 s off the window: the FP16-path layers' 1.70 s, for 0.35 s more MMQ, and fewer gaps.
-`STRATA_DENSE_MMQ=1` runs the dense projections 1.1 s faster (MMQ 4.23 s, its stream-K fixup 0.43 s, the activations
-0.30 s), but the gaps grow by about the same. Each 1,024-row slice of the activation buffer is four launches (quantize,
-bounds, MMQ, fixup: ~196,000 at 200K instead of ~6,000 cuBLAS calls), and the host falls behind by 1-2 ms in every layer.
-
-Prompt time in the server's mode, three prompts per arm, medians in s. Arms of identical settings differed by up to
-5% between engine starts (the control below: 26.24 / 27.42 / 26.61 at 130K, 50.83 / 52.14 / 51.73 at 200K), so the
-second downtime ran the arms interleaved, two of each:
-
-| | 130K | 200K |
-|---|---|---|
-| downtime 1: the server's settings | 26.24 | 50.83 |
-| downtime 1: + `STRATA_MMQ_KQ=1` | 27.34 | 49.72 |
-| downtime 1: + `STRATA_DENSE_MMQ=1` (before `quantize_f16`) | 27.49 | 49.66 |
-| downtime 1: + both (before `quantize_f16`) | 25.39 | 50.60 |
-| downtime 2 (interleaved, 6 prompts each): the server's settings | 27.09 (26.13-27.56) | 51.77 (49.69-52.28) |
-| downtime 2 (interleaved, 6 prompts each): + `STRATA_MMQ_KQ=1` | 25.74 (25.07-26.44) | 49.37 (48.70-50.38) |
-
-All three `STRATA_MMQ_KQ=1` arms read 200K faster than all three arms of the server's settings (-2% to -5%); at 130K
-one arm was 4% slower and two were 4-6% faster.
-
-Quality: teacher-forced log-probabilities of the last 511 tokens of the 64K, 130K and 200K texts (`STRATA_LOGPOS`, top
-40, with the prompt path writing the cache the windows read). Two runs of the server's settings give KL 0.0053 /
-0.0100 / 0.0147 (0.0100 over all positions). Against them, `STRATA_MMQ_KQ=1` gives 0.0049-0.0061 / 0.0119-0.0148 /
-0.0156-0.0166 (0.0112-0.0121) and `STRATA_DENSE_MMQ=1` 0.0086-0.0087 / 0.0196-0.0236 / 0.0186-0.0194 (0.0159-0.0170).
-Perplexity of the 200K tail is 8.99 and 9.07 for the server's settings, 9.16 with `MMQ_KQ` and 9.40 with `DENSE_MMQ`.
-So `STRATA_MMQ_KQ=1` stays at the engine's run-to-run level, and `STRATA_DENSE_MMQ=1` adds about as much again for no
-gain on this card. Recommended for this config: env `"STRATA_MMQ_KQ": "1"`. `STRATA_DENSE_MMQ` stays off. Larger
-slices (fewer launches) would be the next thing to try with it.
-
-Not measured: other cards, Linux, the HIP build of the changed files (no ROCm on the test PC; the HIP path keeps
-`f16_to_f32` + `quantize`), and decode after the prompts beyond the answers' spread (128-201 tok/s in every arm).
 
 ## Thread placement: `--aux-cpus` (Linux, off by default)
 
@@ -3177,8 +2687,9 @@ How it works:
   `json_schema` answer on `/v1/responses` with tools stays checked afterwards only (the answer may be a call instead);
   the SYCL and Metal engines do not have it.
 
-Measured (2026-10-22, RTX 5080 + i9-14900K, Cyber-Tiel-Coder UD-IQ4_XS, the run-tiel-main config without the
-conversation disk, `--spec 4` MTP; `bench/tool-grammar/stress.py`: 50 prompts that each ask for one call with quotes,
+Measured (2026-10-22, RTX 5080 + i9-14900K, Cyber-Tiel-Coder UD-IQ4_XS, the live server's settings (setup's
+pack settings plus the per-PC ones in [FORK.ru.md](FORK.ru.md#рекомендуемый-конфиг)) without the conversation disk,
+`--spec 4` MTP; `bench/tool-grammar/stress.py`: 50 prompts that each ask for one call with quotes,
 backslashes, newlines and tabs, Cyrillic, CJK and emoji, JSON inside a string, the template's own tags, SQL quoting or
 long code; one reply per prompt and arm, the arms alternating prompt by prompt):
 
@@ -3330,7 +2841,29 @@ level because of the fused prompt experts (below). What changed:
 
 Not measured: other 12.0 cards (RTX 5070), Windows, partly-resident caches, the IQ3_XXS and IQ2_XS packs.
 
-## Long-context decode attention: one K/V read per verify window (`STRATA_ATTN_WINDOW=1`, opt-in)
+## Long contexts on the pack path (Qwen3.6 / Ornith / Cyber-Tiel; this fork, opt-in)
+
+The Qwen3.6-family models from a pack (`--pack`, [QWEN36_PACK.md](QWEN36_PACK.md)) attend every cached cell in their
+10 full-attention layers. At 100K-262K of context that attention is most of a long prompt's read and the largest stage
+of a verify window, and on a 16 GB card the CPU pool computes the experts the cache cannot hold. The kernels and
+switches in this chapter are this fork's and stay off unless set. Setup's `cyber-tiel` and `ornith-abl` families write
+the ones below into their config ([what setup writes](QWEN36_PACK.md#what-setup-writes-for-these-two)).
+
+Measured, unless a part says otherwise, on an RTX 5080 16 GB (PCIe 5.0 x8) with an i9-14900K, 48 GB DDR5, Windows 11,
+CUDA 13.4: Cyber-Tiel-Coder-35B-A3B UD-IQ4_XS, `--kv int8`, `--max-context 262144`, `--spec 4` with the file's MTP
+layer, `--serve`, a fresh engine per arm. "The server's settings" are the switches the server ran with on that day;
+each part names them.
+
+| Setting that setup writes | What it does | Measured |
+|---|---|---|
+| `STRATA_ATTN_WINDOW=1`, `STRATA_ATTN_WINDOW_PREC=2` | a verify window's attention reads the K/V once for all its tokens | decode at 200K 48.6 -> 88.9 tok/s |
+| `STRATA_ATTN_WINDOW_SMALL=1` | windows of up to 4 tokens on a streaming INT8 kernel | decode at 200K 127.6 -> 160.7 tok/s |
+| `STRATA_PROMPT_ATTN_DENSE_IMMA=4` | the prompt's attention on INT8 tensor cores | a 200K prompt: 76.7 s with the FP16 mode, then 60.0, 58.8 and 53.8 s for the kernel's three versions, each against the one before in its own run |
+| `STRATA_MMQ_KQ=1` | the Q6_K down experts of layers 34, 38 and 39 on MMQ | a 200K prompt 51.8 -> 49.4 s |
+| `STRATA_ARENA_WSLOCK=1` (Windows) | the expert arena stays in the working set | decode under RAM pressure at 200K 129.6 -> 166.9 tok/s |
+| `--kv-grow` (an upstream switch) | the K/V takes VRAM as the context grows | 7,668 expert slots at the start instead of 5,519-5,796 |
+
+### Decode attention: one K/V read per verify window (`STRATA_ATTN_WINDOW=1`)
 
 Qwen3.6 / qwen35moe models (Cyber-Tiel, Ornith: 8 query heads per KV head, no indexer, every cached cell attended) spend
 most of a long-context decode in the 10 full-attention layers: 57% of the decode time at 200K cells on an RTX 5080. The
@@ -3340,12 +2873,14 @@ cache T times, at about 210-250 GB/s (nsys: 995 µs for one query at 200K cells,
 `STRATA_ATTN_WINDOW=1` runs a window's attention through the dense prompt kernel instead, split over the cells: a block
 holds up to 8 queries x the 8 heads of one KV head (64 tensor-core rows), so each K/V chunk is read once for the whole
 window (cp.async double buffering, 16-byte loads, rows found from the page table, int8 codes into the MMA, the per-64
-scales in FP32), and the ranges are merged with the log-sum-exp rescale. Only for int8 KV in VRAM on sm_80+, without
-an indexer; anything else (FP16 or Q4 KV, a streamed KV cache, a model with an indexer) keeps the decode kernel.
-`STRATA_ATTN_WINDOW_PREC` picks the prompt kernel's precision mode (as `STRATA_PROMPT_ATTN_FP16ACC`): 0 (the default)
-carries q and p as FP16 hi + lo parts, FP32-level; 2 uses one FP16 value each and an FP16 accumulator per 32-cell chunk
-of p.v (half the MMAs); 1 and 3 are the other modes. At precision 0 a lone query keeps the decode kernel (as fast).
-`STRATA_ATTN_WINDOW_SPLITS=N` fixes the number of cell ranges (default: two waves of blocks).
+scales in FP32), and the ranges are merged with the log-sum-exp rescale. The cells are split into two waves of blocks.
+Only for int8 KV in VRAM on sm_80+, without an indexer; anything else (FP16 or Q4 KV, a streamed KV cache, a model
+with an indexer) keeps the decode kernel. `STRATA_ATTN_WINDOW_PREC` picks the prompt kernel's precision mode (as
+`STRATA_PROMPT_ATTN_FP16ACC`, [below](#prompt-attention-on-int8-tensor-cores-strata_prompt_attn_dense_imma4)): 0 (the
+default) carries q and p as FP16 hi + lo parts, FP32-level; 1 drops the lo parts; 2 also adds each 32-cell chunk's p.v
+in an FP16 accumulator (half the MMAs of 0). At precision 0 a lone query keeps the decode kernel (as fast). Removed: a
+mode with q.k in FP16 as well (`=3` now runs `=2`) and `STRATA_ATTN_WINDOW_SPLITS` (a fixed number of cell ranges; no
+measurement showed a gain).
 
 Accuracy (`attn_window_parity`, synthetic int8 KV, page size 4 with a shuffled page table, 2 KV heads x 8 heads,
 T = 1..6, flat and peaked attention, max error relative to the largest output against an FP64 reference):
@@ -3368,10 +2903,9 @@ In the engine (nsys, 200K prompt, precision 0) the window kernel takes 980 µs p
 the whole window. It is bound by the tensor-core work of 64 rows (a window rarely fills 8 queries), not by memory:
 precision 2 halves it (about 420 GB/s).
 
-Decode, RTX 5080 16 GB (PCIe 5.0 x8), i9-14900K, Windows 11, Cyber-Tiel-Coder 35B-A3B UD-IQ4_XS, `--kv int8 --spec 4`
-with MTP, `--spec-min-p 0.50`, `--vram-reserve-mib 1472`, the server's switches (`STRATA_ATTN_SPLITS=256` and others),
-`--serve` with 192-token greedy answers, 3 answers per context in one engine start (the 2nd and 3rd reuse the prompt);
-mean tok/s (each answer):
+Decode, Cyber-Tiel-Coder 35B-A3B UD-IQ4_XS, `--kv int8 --spec 4` with MTP, `--spec-min-p 0.50`,
+`--vram-reserve-mib 1472`, the server's switches (`STRATA_ATTN_SPLITS=256` and others), `--serve` with 192-token greedy
+answers, 3 answers per context in one engine start (the 2nd and 3rd reuse the prompt); mean tok/s (each answer):
 
 | context | off | `STRATA_ATTN_WINDOW=1` | `STRATA_ATTN_WINDOW=1` + `STRATA_ATTN_WINDOW_PREC=2` |
 |---|---|---|---|
@@ -3389,16 +2923,16 @@ With the window cheaper, longer drafts pay off sooner: at 200K with precision 2,
 140.3 tok/s (2 answers) and 0.40 gave 75.2 and 102.0, against 88.9 at 0.50. Not measured: shorter contexts with a lower
 `--spec-min-p`, other cards, FP16 or Q4 KV (not covered), Linux.
 
-### `STRATA_ATTN_WINDOW_SMALL=1`: short windows on a streaming INT8 kernel (opt-in, measured 2026-10-21)
+### Short windows: `STRATA_ATTN_WINDOW_SMALL=1` (measured 2026-10-21)
 
 At long context most verify windows are 1-2 tokens, and the window kernel's block is still 64 tensor-core rows (8
-queries x 8 heads), 3/4 of them empty; it runs at about 420 GB/s. `STRATA_ATTN_WINDOW_SMALL=1` (with `STRATA_ATTN_WINDOW=1`)
-sends windows of up to 4 queries to `decode_attn_window_small_kernel` instead, at any `STRATA_ATTN_WINDOW_PREC`
-(`=N`, 2-8: windows of up to N queries):
+queries x 8 heads), 3/4 of them empty; it runs at about 420 GB/s. `STRATA_ATTN_WINDOW_SMALL=1` (with
+`STRATA_ATTN_WINDOW=1`) sends windows of up to 4 queries to `decode_attn_window_small_kernel` instead, at any
+`STRATA_ATTN_WINDOW_PREC`; any nonzero value means 1:
 
 - the rows are only the window's: NT = ceil(T / 2) MMA tiles of 16 rows (the 8 heads of two queries);
 - the arithmetic is `DENSE_IMMA`'s: K and V enter as their int8 codes, q and p * v_scale as 16-bit high/low byte parts,
-  int32 sums (the joins as in `DENSE_IMMA=3`);
+  int32 sums (the joins as in `DENSE_IMMA=4`, below);
 - a block streams one range of the cells with K and V of 32 cells double-buffered by cp.async, read once for the
   window; its four warps share the stream: warp w scores the chunk's cells 8w .. 8w + 7 for every row, the scores meet
   in shared memory, every warp runs the softmax of the 32 cells and warp w sums p.v for the 64 dims of V group w. So a
@@ -3410,24 +2944,25 @@ sends windows of up to 4 queries to `decode_attn_window_small_kernel` instead, a
 error relative to the largest output against FP64): the new kernel 4.7e-5 to 1.7e-4 (mean ~1e-5) at every T and size,
 against 2.5e-4 to 1.7e-3 for the window kernel at precision 2 and 1e-6 at precision 0; the decode kernel 1e-6 to 2e-5.
 Time per call including the merge, RTX 5080, 200,000 cells (µs; the precision-2 column from a run with the GPU otherwise
-idle, the precision-0 run separately):
+idle, the precision-0 run separately; the small kernel was timed past 4 queries to set its limit):
 
 | T (queries) | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
 |---|---|---|---|---|---|---|---|---|
 | decode kernel | 909 | 1,618 | 2,343 | 3,069 | 3,810 | 4,559 | 5,915 | 6,806 |
 | window, precision 0 | - | 1,104 | 1,123 | 1,096 | 1,084 | 1,102 | 1,117 | 1,106 |
 | window, precision 2 | 465 | 469 | 472 | 474 | 476 | 478 | - | - |
-| `STRATA_ATTN_WINDOW_SMALL` | 267 | 270 | 341 | 342 | 429 | 432 | 555 | 544 |
+| `decode_attn_window_small_kernel` | 267 | 270 | 341 | 342 | 429 | 432 | 555 | 544 |
 
 At T = 1-2 that is 211 MB of K/V in 267 µs, about 790 GB/s of the card's ~960. At 66,000 cells: 76-84 µs against 175-197
 for precision 2 (T = 1-2), 121-141 against 181-197 (T = 3-4). At 2,048 cells all are 15-40 µs (launch-bound). Beyond 4
-queries the gain over precision 2 is small (T = 5-6) or negative (T = 7-8), hence the default limit of 4.
+queries the gain over precision 2 is small (T = 5-6) or negative (T = 7-8), hence the limit of 4.
 
-Decode in the engine, the same downtime as the `DENSE_IMMA=3` measurement above (the server's settings: `--spec 4` with
-MTP, `--spec-min-p 0.50`, `STRATA_ATTN_WINDOW=1 STRATA_ATTN_WINDOW_PREC=2`; `--vram-reserve-mib 1472`): 128 greedy
-tokens after each prompt, tok/s (each of the 3 answers, and their mean):
+Decode in the engine, one downtime (the server's settings: `--spec 4` with MTP, `--spec-min-p 0.50`,
+`STRATA_ATTN_WINDOW=1 STRATA_ATTN_WINDOW_PREC=2`, `STRATA_PROMPT_ATTN_DENSE_IMMA=2`; `--vram-reserve-mib 1472`): 128
+greedy tokens after each prompt, tok/s (each of the 3 answers, and their mean). The second arm also had the prompt
+kernel's `DENSE_IMMA=3`, which decode does not run:
 
-| context | the server's settings | + `STRATA_ATTN_WINDOW_SMALL=1` (and `DENSE_IMMA=3`) |
+| context | the server's settings | + `STRATA_ATTN_WINDOW_SMALL=1` |
 |---|---|---|
 | 130K from scratch | 91.4, 125.5, 120.8: 112.6 | 119.8, 150.9, 168.5: 146.4 (+30%) |
 | 200K from scratch | 126.5, 117.8, 138.5: 127.6 | 184.7, 156.0, 141.5: 160.7 (+26%) |
@@ -3435,9 +2970,372 @@ tokens after each prompt, tok/s (each of the 3 answers, and their mean):
 | 64K | 197.1, 266.5, 271.0: 244.9 | 235.6, 245.1, 266.3: 249.0 |
 
 The draft acceptance differs from answer to answer in both arms (each answer is one sample of the adaptive tier and the
-drafts), so single answers spread by ~25%; the means at 130K and 200K moved together by 26-33%. The prompt kernel does
-not run in decode, so this is the small window's. Greedy text: see the `DENSE_IMMA=3` measurement (the same runs).
-Not measured: other cards, Linux, the window's T distribution in the engine (nsys).
+drafts), so single answers spread by ~25%; the means at 130K and 200K moved together by 26-33%. Greedy 128 tokens after
+the 13 prompts: the two arms first differ at 31.4 tokens on average, two arms of the server's settings at 40.8 (5
+prompts) - inside the noise (a 130K prompt differs at token 0 in both). Not measured: other cards, Linux, the window's
+T distribution in the engine (nsys).
+
+Tried and removed or not kept:
+
+- Higher limits (`STRATA_ATTN_WINDOW_SMALL=6`: windows of 5-6 tokens on this kernel too, 422-428 µs against 466-473 for
+  the window kernel at 200K cells). In the `DENSE_IMMA=4` measurement below, decode means of three 128-token answers
+  with `=1` / `=6` were 166.5 / 168.8 tok/s at 130K, 171.2 / 154.3 at 200K, 163.7 / 186.9 at 200K after 115K and
+  251.4 / 255.4 at 64K (single answers 127-220): no gain beyond the spread, so values above 1 were removed.
+- The page-table load one chunk ahead in this kernel, whose shuffle waited on it (Nsight Compute, 200K cells: 28% of
+  the warp samples at T <= 2, 16% at T = 3-4). The same outputs, but four interleaved runs against the old build at 200K
+  cells gave medians inside the noise (T = 1-4: 297 / 305 / 377 / 360 against 293 / 293 / 359 / 373 µs) and slower at
+  T = 6 and 8, so it was reverted: at T <= 2 the kernel reads K/V at 89% of the card's DRAM bandwidth (Nsight Compute),
+  and at T = 3-4 it runs one block an SM (56 KB of shared memory) at 66%.
+
+Where a 200K decode window goes with both switches and `DENSE_IMMA=4` (`STRATA_VERIFY_PROFILE=1 STRATA_DECODE_TIMING=1`,
+the server's settings, one request each, 128 tokens): from scratch, 63 windows of 2.22 queries (2.03 tokens) at 13.42
+ms: the host waits 8.54 ms for the GPU, 2.23 ms per-layer host work (2.11 of it the CPU experts), 0.67 commit/emit,
+0.87 draft. The GPU's 11.34 ms: attention in the 10 QSA layers 3.38 ms (the largest stage; K/V of 200K cells are 2.05
+GB a window, 2.1 ms at the card's ~960 GB/s), VRAM expert hits 1.63, the GDN layers' q/k/v GEMVs 1.08, waits for the
+CPU experts 0.87, the head 0.55, routers 0.71, shared experts 0.66, out-projections 0.65. After 115K reused (42 windows
+of 3.36 queries, 18.46 ms): attention 3.95 ms, but the waits for the CPU experts 4.50 ms (the pool read 39.8 GB/s and
+ran 5.09 experts per layer-window, against 43-57 GB/s and 1.6-2.4 in the other requests) - the slow pool reads of
+[the CPU experts part](#cpu-experts-at-130k-200k-strata_iq3s_mt1---kv-grow-and-strata_arena_wslock) below, not the
+attention. No cheap stage stood out: the attention is within 1.6x of reading K/V once at full bandwidth. An nsys trace
+of the same decode (`--trace=cuda`) showed only copies after the prompt: the decode runs as CUDA graphs, whose kernels
+need `--cuda-graph-trace=node`.
+
+### Prompt attention on INT8 tensor cores (`STRATA_PROMPT_ATTN_DENSE_IMMA=4`)
+
+The prompt path reads a pack model's attention with `prompt_attn_dense_kernel`: a block takes 8 neighbouring queries x
+the 8 heads of one KV head, reads each 32-cell chunk of K/V once for them and keeps the softmax in registers
+([QWEN36_PACK.md](QWEN36_PACK.md#speed-measured)). By default it carries q and p as FP16 hi + lo parts with FP32
+accumulators (FP32-level accuracy). At 200K of context this attention is most of the prompt: nsys of a 200K prompt from
+scratch put 49.3 s of 78.6 s there with `STRATA_PROMPT_ATTN_FP16ACC=2` (66.5 TFLOP/s, [below](#the-fp16-modes-strata_prompt_attn_fp16acc12)),
+and with `DENSE_IMMA=4` 27.3 s of 50.1 s ([the next part](#long-prompts-the-rest-of-the-time-measured-2026-10-22)).
+
+`STRATA_PROMPT_ATTN_DENSE_IMMA=4` (int8 K/V, sm_80+; `=2` and `=3`, the kernel's earlier versions, run it too) keeps
+that block and chunk and does both products as `mma m16n8k32` on int8 with int32 sums:
+
+- K and V enter as the int8 codes they are stored as (no int8 -> FP16 conversion per warp and MMA). q and p * v_scale
+  enter as two 8-bit parts each (16 bits: a signed high byte and an unsigned low byte, X = rint(x * 32766 / bound)).
+  q is scaled per row. p is taken against the chunk's own max (exp2(s - chunk max) times 32766) and times the 64-dim V
+  group's scale over the chunk's largest V scale, rounded by one FMA with a magic number; 1 / that largest scale is one
+  `rcp.approx` (within 1 ulp; the product still rounds to at most 32766).
+- A pair of int32 part sums (h, l) joins exactly as one integer 256 h + l (one IMAD, below 2^31) and one I2F; in p.v
+  the high part's MMA result, shifted by 8 bits, is the low part's accumulator. Each warp builds p.v's operands from
+  its own registers and an 8-byte read per cell (V transposed by byte permutes), so a chunk needs no extra pass
+  through shared memory.
+- Two barriers a chunk: V(c) loads during q.k(c) and the softmax, K(c + 1) during p.v(c). Warp 0 computes the chunk's
+  32 row indices once into shared memory, its page-table load issued a chunk ahead, and a thread reads its 4 cells'
+  rows with one 16-byte load.
+- The blocks start with the latest queries (the widest rows). The last partial wave is split over the cells: its T
+  items run on wave / T blocks each, over whole chunks, and write unnormalized sums and (max, sum) to a scratch buffer
+  that `prompt_attn_tail_merge_kernel` combines. The buffer is one wave of 64 rows x 258 floats (11 MB on an 84-SM
+  card), allocated at the first split call on a device and kept; without room, or while the stream captures a graph,
+  the launch is not split. `STRATA_PROMPT_ATTN_TAIL=0` turns the split off (read per call).
+
+INT8 MMA runs about 3x the FP16-accumulate rate on sm_120 and 6x the FP32-accumulate rate of the default kernel's q.k;
+the kernel is not limited by its MMAs (it waits on loads, barriers and the work around them), so the gain is smaller
+than that. It takes precedence over `STRATA_PROMPT_ATTN_FP16ACC`; FP16, Q4_0 and K8V4 K/V ignore it. Two blocks of 4
+warps share an SM (about 50 KB of shared memory a block). Unset, the other kernels of `qsa_prompt_attn.cu` compile to the same SASS
+(sm_120, `cuobjdump -sass` of the file built with and without it). The HIP build of the file is guarded (no inline PTX,
+no occupancy call on AMD) but was not run (no ROCm on the test PC).
+
+Accuracy (`qsa_prompt_attn_parity`, RTX 5080, int8 K/V, page size 4; page sizes 3 and 512 give the same errors): the
+row error against the FP32 kernel is 8.9e-5 / 3.2e-4 (mean / max, relative L2) and the max error against FP64 2.0e-4
+at 64K cells (the same digits for all three versions), 2.5e-4 at 128K and 2.9e-4 at 1,000 cells; `=4` against `=3` at
+most 9.6e-5 (2.6e-5 of the output scale), from the reciprocal. `FP16ACC=2` has 6.3e-4 / 2.7e-3 and 1.0e-3. For scale,
+the int8 KV cache itself rounds each value to 1/254 of its group's largest.
+
+**How it got here.** Each version was measured against the one before it in the same run: the card's clock state
+differs between days, so numbers from different runs do not compare. Kernel: `qsa_prompt_attn_parity`, one chunk of
+8192 queries over 64K cells. Engine: the time to read the prompt through `--serve`, the server's settings of that day
+(`--prefill auto`: 8,192-token chunks; the `=3` and `=4` runs with `--vram-reserve-mib 1472`), three
+prompts of each size, medians. "200K after 115K" is the 130K prompt, then 200K with the same start (114,688 tokens
+reused from the checkpoint, 85,312 read):
+
+| step, measured in one run | kernel | 64K | 130K | 200K | 200K after 115K |
+|---|---|---|---|---|---|
+| `FP16ACC=2` -> `DENSE_IMMA=2` (2026-10-21) | 118-127 -> 85-97 ms | 13.90 -> 12.23 s | 37.2 -> 30.8 s | 76.7 -> 60.0 s | 46.0 -> 34.4 s |
+| `=2` -> `=3` (2026-10-21) | 96.6-97.0 -> 84.3-85.1 ms | 12.87 -> 12.34 s | 32.32 -> 30.72 s | 63.28 -> 58.77 s | 36.57 -> 33.82 s |
+| `=3` -> `=4` (2026-10-22) | 72.9-73.1 -> 62.2-62.3 ms | 12.68 -> 11.87 s | 31.70 -> 28.32 s | 57.59 -> 53.84 s | 32.55 -> 30.49 s |
+
+(The default FP32-level kernel took 286-311 ms on that chunk in the first run.) In the engine nsys put the 200K
+prompt's attention at 49.3 s (66.5 TFLOP/s) with `FP16ACC=2` and 36.1 s (90.9 TFLOP/s) with `DENSE_IMMA=2`. The `=3`
+engine arm also had `STRATA_ATTN_WINDOW_SMALL=1` (decode only). The `=3` -> `=4` run had `STRATA_PREFILL_TIMING=1` on,
+which then added 6-9% (the same 200K prompt takes ~50.8 s without it, next part); its attention GPU time went
+3.56 -> 2.99, 13.78 -> 11.35, 31.51 -> 26.98 and 20.88 -> 18.29 s. Single prompts spread by 1-7%, and a third arm of
+the `=2` baseline read 12.82 / 33.57 / 65.97 / 38.12 s, so differences of 2-4% are noise. Other chunk sizes, `=3` ->
+`=4`: 128K 151.4-151.7 -> 128.9-129.0 ms, 16K (2048 queries) 5.2-5.3 -> 3.9-4.0 ms, and a short ragged chunk (1,000
+cells, 37 queries) 0.087 -> 0.035 ms, where the last-wave split puts 16 blocks on each of its 10 items (0.074 ms with
+`STRATA_PROMPT_ATTN_TAIL=0`).
+
+What each version changed: `=3` cut the work around the MMAs, which `=2` waits on (the 256 h + l joins instead of two
+magic-number conversions and an FMA, the one-FMA rounding of p, two barriers a chunk instead of four, the swizzled
+shared-memory addresses as four offsets per thread, the widest rows first). `=4` came from Nsight Compute on `=3` (64K
+cells, 8192 queries): 255 registers and 48 bytes of stack a thread (293 M local-memory requests), two blocks an SM
+(16.7% occupancy), the tensor pipe busy 46% of the time; by source line the cp.async address arithmetic took 24% of
+the warp samples and 15.5% of the instructions (per 16-byte piece it shuffled the cell's page, which waited on the
+page-table load just before it, and multiplied 64-bit row indices, twice per chunk); and the last of a chunk's 12.19
+waves of 168 blocks left most slots empty (SM active 95.4%). On `=4`: 26.5 G instructions instead of 30.8 G, 98.6 M
+local-memory requests, 172 M cycles instead of 212 M, the stall mix moved to the tensor pipe (the MMA lines now 29% of
+the samples). A pitfall found on the way: a call to `max(int, int)` in new code changed the PTX of kernels it does not
+touch (an unsigned division became a signed one in `decode_attn_window_small_kernel`); plain conditionals keep them
+identical.
+
+Quality in the engine, measured on `=2` (whose error the later versions keep, above): teacher-forced log-probabilities
+of the last 511 tokens of 64K, 130K and 200K texts (`STRATA_LOGPOS`, top 40, the windows read the tail; the prompt path
+wrote the cache before it). Two runs of the server's settings (`FP16ACC=2`): KL 0.0058 / 0.0083 / 0.0139 nats, argmax
+agreement 98.2 / 96.7 / 94.3%. The server's settings against `DENSE_IMMA=2`: KL 0.0079-0.0085 / 0.0123-0.0139 /
+0.0149-0.0163, agreement 96.9-97.5 / 92.8-93.4 / 93.7-94.1%; perplexity 2.078 and 2.074 against 2.076, 4.298 and 4.288
+against 4.303, 9.07 and 9.13 against 8.99. The difference stays near the engine's own run-to-run KL; part of it is
+`FP16ACC=2`'s own error, which the INT8 kernel does not have. With `=4` in the server's settings two runs gave KL
+0.0053 / 0.0100 / 0.0147 on the same texts (next part). Greedy 128 tokens after the prompts first differ at 33.6
+tokens on average with `=2` (1 of 13 identical; a few long prompts differ at token 0, where the server's settings
+themselves pick either of the same two tokens depending on the prompt's first token).
+
+What was tried and not kept (`qsa_prompt_attn_parity`, one 64K chunk, against the kernel of that day):
+
+- V transposed once per chunk in shared memory by the block: two more barriers a chunk, 108-111 ms against 88.
+- 16 queries and 8 warps a block: no faster with 32-cell chunks (one block an SM); with 64-cell chunks (99 KB, K/V rows
+  padded to 272 bytes) 1.12-1.16x over `=2`, the same as `=3` but spilling 250-370 bytes; the same with 32-cell chunks
+  and K/V double-buffered 1.03-1.07x; 4 warps with padded K/V rows (50.7 KB, one block an SM) 0.73x.
+- Two K/V stages with one barrier a chunk (8 warps, 97 KB), or K and V of a chunk loaded together after it: no faster.
+- p * v_scale in one 8-bit part: 1.13x faster, 4x the error of `FP16ACC=2`.
+- A split of the cells over two blocks for the last wave was first left out (it needs a scratch buffer); `=4` has it.
+
+Switching parts off (in the 8-warp version, 73 ms: without p.v 54 ms, without q.k 58.5, without both 27, without the
+K/V loads 71, nothing but the loop 5.6) showed no single part dominating: the time goes to dependent chains inside a
+warp (ldmatrix -> MMA -> join -> softmax -> quantize -> MMA) with 255 registers a thread (the 16 x 256 FP32 accumulator
+alone is 128), which leaves no room for a second tile in flight. FlashAttention-3's overlap needs wgmma / setmaxnreg,
+which sm_120 does not have. Not measured: other cards, Linux, the HIP build.
+
+#### The FP16 modes (`STRATA_PROMPT_ATTN_FP16ACC=1|2`)
+
+These modes of `prompt_attn_dense_kernel` apply when `DENSE_IMMA` is not set (int8 or FP16 K/V); setup does not write
+them. `=1` drops the lo parts (half the MMAs) and with them half the kernel's shared memory, so two blocks of 4 warps
+share an SM instead of one (int8 K/V: 49,920 bytes a block against 81 KB); that occupancy is most of the gain. `=2`
+also adds each 32-cell chunk's p.v in an FP16 accumulator (int8 V only; p is scaled so the sum stays below 2^15),
+promoted to the FP32 sum per chunk. The softmax (max, exp, sum) stays FP32 in every mode; FP16 K/V take `=1` for any
+value. Unset, the kernels compile to the same SASS as before (sm_120, `cuobjdump -sass`). `qsa_prompt_attn_parity`
+(int8 K/V, RTX 5080):
+
+| | chunk time, 2048 queries at 16K | chunk time, 8192 queries at 64K | row error vs FP32 (rel. L2, mean / max) | max error vs FP64 (FP32: 4-7e-6) |
+|---|---|---|---|---|
+| default | 21.4 ms | 326 ms | - | - |
+| `=1` | 11.3 ms | 152 ms | 5.7e-4 / 2.7e-3 | 7.8e-4 |
+| `=2` | 10.2 ms | 135 ms | 6.3e-4 / 2.7e-3 | 1.0e-3 |
+
+The parity tool's `sharp` rows (queries that share a direction with a sink cell and needles, a peaked softmax) give
+the same picture. Whole engine, Ornith 1.5 35B-A3B IQ4_XS, `--kv int8`, prompt chunk 8192, the config's arguments plus
+`--vram-reserve-mib 1472`, a fresh engine per arm, three different prompts per size (time to first token, s):
+
+| | 4K | 16K | 64K |
+|---|---|---|---|
+| default | 0.70 / 0.70 / 0.71 | 2.70 / 2.68 / 2.68 | 19.09 / 19.06 / 19.06 |
+| `=2` | 0.70 / 0.69 / 0.69 | 2.25 / 2.23 / 2.23 | 11.95 / 11.96 / 11.96 |
+
+So 1.20x at 16K and 1.59x at 64K (`=1`: 14.2-14.5 s at 64K, one run). Decode does not use this kernel: 128 tokens after
+a 200-token prompt ran 130-270 tok/s in both arms (medians ~205 / ~207). Quality, the same runs: a passphrase asked
+back from 16K and 64K documents (4 depths, 2 documents each) was found 16 of 16 times in every arm. Greedy 128 tokens
+after 12 real-text prompts (4K-64K): two default runs first differ at token 52.7 on average (2 of 12 identical: the
+engine is not bit-reproducible), default against `=2` at 47.9-58.1 (2-4 identical). Teacher-forced log-probabilities of
+the last 511 tokens of six real texts (four 16K, two 64K; `STRATA_LOGPOS`, top 40): two default runs KL 0.0080 nats,
+argmax agreement 96.4%; default against `=2` KL 0.0094 / 0.0101, 96.7% / 96.2%; perplexity 3.305 and 3.318 (default),
+3.319 (`=2`). So `=2` adds a little to the engine's own run-to-run KL and nothing measurable to retrieval or
+perplexity. Not measured: other cards (the occupancy gain depends on the 100 KB per SM of sm_86/89/120), FP16 K/V in
+the engine.
+
+Removed: `=3`, which also added each 64-dim group's q.k in an FP16 accumulator (int8 K): 11.58-11.64 s at 64K (1.03x
+`=2`) with 4.5e-3 max error against FP64 and KL 0.0097 / 0.0106; `=3` now runs `=2`.
+
+### Long prompts: the rest of the time (measured 2026-10-22)
+
+The server's settings here include `DENSE_IMMA=4` (`--prefill auto`: chunks of 8,192 tokens, a 384-slot ring, 3,089
+expert-cache slots borrowed), plus `--vram-reserve-mib 1472`.
+
+**The timing switch was part of the cost.** `STRATA_PREFILL_TIMING=1` recorded an event at every expert of the
+streamed walk, besides each phase change: about 20 records per group of 16 experts. Under WDDM a recorded event is GPU
+time. An nsys trace of a 200K prompt with the switch on shows a gap of 120-630 µs (median 260) before each group's
+gather, 4.9 s in all, while the copies the gather waited for had landed long before (its wait was enqueued ~370 ring
+entries behind the copy issuer). The timeline charged those gaps to "dequant" (6.1 s of a 200K prompt) and "wait copy".
+So this file's tables measured with the switch on overstate the prompt by 6-9%. Medians of three prompts, s:
+
+| | 130K | 200K after 115K |
+|---|---|---|
+| without `STRATA_PREFILL_TIMING` (one downtime, the server's build) | 26.87 | 28.62 |
+| with it, as it was (same downtime) | 29.31 | 30.62 |
+
+A mark of the phase that is already running now is not recorded. It only split an interval charged to the same phase,
+so every phase's sum stays the same, and a group gets 5 records instead of ~20. In later downtimes, without the switch
+and with the changed switch: 130K 26.24 / 27.68 s, 200K 50.83 / 51.51 s, and "dequant" at 200K is 1.9 s. The switch
+still costs 1-6%, so compare timed runs with timed runs. The real 200K prompt from scratch takes ~50.8 s, not 53.8.
+
+**Where a 200K prompt goes.** nsys (`--trace=cuda --cuda-graph-trace=node`, one-shot `--tokens-file`, the server's
+build and settings, no timing switch), from the first GDN kernel to the end of the last chunk's last layer. Each moment
+is charged once: to the kernel running, else to the GPU waiting while an expert copy is in flight, else to idle:
+
+| stage | 200K | share | 130K | share |
+|---|---|---|---|---|
+| the prompt's GPU window | 50.11 s | | 26.09 s | |
+| prompt attention | 27.27 s | 54.4% | 11.61 s | 44.5% |
+| dense projections (cuBLAS: GDN in/out, attention q/k/v/o, shared expert, router) | 6.28 s | 12.5% | 4.02 s | 15.4% |
+| routed experts, MMQ gate/up and down | 4.90 s | 9.8% | 3.13 s | 12.0% |
+| GDN recurrence | 2.24 s | 4.5% | 1.45 s | 5.6% |
+| norms, adds, RoPE, routing, other | 2.07 s | 4.1% | 1.29 s | 4.9% |
+| layers 34, 38 and 39's experts on the FP16 path (their MoE part, gaps included) | 1.70 s | 3.4% | 1.12 s | 4.3% |
+| no kernel while an expert copy is in flight | 1.32 s | 2.6% | 0.71 s | 2.7% |
+| GDN conv, gates, norms | 1.15 s | 2.3% | 0.73 s | 2.8% |
+| no kernel, no copy | 0.98 s | 2.0% | 0.60 s | 2.3% |
+| MoE combine | 0.95 s | 1.9% | 0.61 s | 2.3% |
+| expert gather into the MMQ groups | 0.62 s | 1.2% | 0.41 s | 1.6% |
+| MMQ activations (q8_1, SwiGLU) | 0.50 s | 1.0% | 0.33 s | 1.3% |
+| dense weights Q8_0 to FP16 | 0.12 s | 0.2% | 0.08 s | 0.3% |
+
+The experts streamed over PCIe are not the limit. At 200K, 298 GB cross the link (11.9 GB a chunk: every
+non-resident expert of every layer, since at this chunk size nearly all 256 are routed). At 24.4 GB/s that keeps the
+copy engine busy 12.2 s, and 89% of it runs behind kernels. The copy engine idles through each attention layer (the
+ring is full) and catches up in the GDN layers after it. `STRATA_PREFILL_RING=512` (the ring's cap) left the time
+without a kernel unchanged (1.13 -> 1.14 s with `STRATA_MMQ_KQ=1` below).
+
+The largest stage besides attention is the dense projections, at ~91 TFLOP/s (2.86 GFLOP a token), near what FP16
+inputs with FP32 sums give on this card (110-118 TFLOP/s, `mma.sync` m16n8k16).
+
+The next one is a format question. UD-IQ4_XS keeps the down projections of layers 34, 38 and 39 in Q6_K, which MMQ
+takes only with the K-quant library (`STRATA_MMQ_KQ=1`, `strata_kq.dll` next to the engine; [QUANTS.md](QUANTS.md)).
+Without it, those three layers run every expert on its own: an FP16 dequantize, two GEMMs and a SwiGLU, bound by kernel
+launches. A GDN layer takes ~21.5 ms of a 200K prompt's chunk; layers 34 and 38 take 40.7 and 35.0 ms, 17 and 11 ms of
+it with no kernel running, and layer 39 (attention) takes 12 ms more than layer 35 besides its attention.
+
+**`STRATA_MMQ_KQ=1`** runs the three layers on MMQ. The prompt path then needs no FP16 expert buffers and borrows 2,739
+cache slots instead of 3,089. GPU time of the 200K prompt, nsys as above, one run each: the window 50.11 -> 48.25 s;
+the FP16-path layers' 1.70 s are gone for 0.35 s more MMQ (4.90 -> 5.25 s), the gaps (no kernel, with or without a
+copy in flight) 2.30 -> 1.88 s, the attention 27.27 -> 27.37 s and the dense projections 6.28 -> 6.18 s.
+
+Prompt time in the server's mode, medians in s. Arms of identical settings differed by up to 5% between engine starts
+(the control: 26.24 / 27.42 / 26.61 at 130K, 50.83 / 52.14 / 51.73 at 200K), so the second downtime ran the arms
+interleaved, two of each:
+
+| | 130K | 200K |
+|---|---|---|
+| downtime 1: the server's settings | 26.24 | 50.83 |
+| downtime 1: + `STRATA_MMQ_KQ=1` | 27.34 | 49.72 |
+| downtime 2 (interleaved, 6 prompts each): the server's settings | 27.09 (26.13-27.56) | 51.77 (49.69-52.28) |
+| downtime 2 (interleaved, 6 prompts each): + `STRATA_MMQ_KQ=1` | 25.74 (25.07-26.44) | 49.37 (48.70-50.38) |
+
+All three `STRATA_MMQ_KQ=1` arms read 200K faster than all three arms of the server's settings (-2% to -5%); at 130K
+one arm was 4% slower and two were 4-6% faster. Quality: teacher-forced log-probabilities of the last 511 tokens of the
+64K, 130K and 200K texts (`STRATA_LOGPOS`, top 40, with the prompt path writing the cache the windows read). Two runs
+of the server's settings give KL 0.0053 / 0.0100 / 0.0147 (0.0100 over all positions). Against them,
+`STRATA_MMQ_KQ=1` gives 0.0049-0.0061 / 0.0119-0.0148 / 0.0156-0.0166 (0.0112-0.0121); perplexity of the 200K tail is
+8.99 and 9.07 for the server's settings and 9.16 with it. So it stays at the engine's run-to-run level, and setup's
+pack families write it. Not measured: other cards, Linux, decode after the prompts beyond the answers' spread (128-201
+tok/s in every arm).
+
+Measured, but not set by setup:
+
+- **`--prefill auto:16384`** (chunks of 16,384 tokens). The expert gather copies each chunk's routed experts into one
+  buffer for MMQ - resident ones too - once per chunk and layer, so a larger chunk pays it for more tokens: 0.9 s
+  instead of 1.7 s at 64K. The prompt path then borrows 5,618 expert-cache slots (7.75 GiB) instead of 3,090 (4.26 GiB)
+  and gives them back before the decode. Measured with `DENSE_IMMA=2`, two downtimes (medians, s; 64K / 130K / 200K /
+  200K after 115K): 12.67 / 33.27 / 65.06 / 38.04 with 8,192-token chunks against 11.21 / 29.44 / 59.54 / 34.81 (two
+  runs each; one request of the 8,192 arm started with 126 MiB of VRAM free and the WDDM paging warning), and
+  12.58-12.71 / 32.70-32.76 / 62.42-63.68 / 36.99-37.20 against 11.88 / 28.95 / 57.24 / 34.08 (three prompts per
+  size). Decode after these prompts ran 109-265 tok/s in every arm. Not measured with `DENSE_IMMA=4` and `MMQ_KQ`.
+
+Tried, no gain, removed:
+
+- **`STRATA_DENSE_MMQ=1` on CUDA** (the HIP switch #820 ported: the dense GGUF projections on llama.cpp's int8 MMQ, the
+  activations rounded to q8_1 per 32 values). With `MMQ_KQ` the dense projections ran 1.1 s faster at 200K (5.15 s),
+  but each 1,024-row slice of the activations was four launches (~196,000 at 200K instead of ~6,000 cuBLAS calls), the
+  host fell behind by 1-2 ms in every layer and the gaps grew by as much (3.04 s; GPU window 48.57 s). KL 1.6x the
+  run-to-run level (0.0159-0.0170 over all positions, 200K perplexity 9.40). Removed from CUDA; the HIP switch is
+  unchanged ([AMD_HIP.md](AMD_HIP.md#model-and-serving-configuration)).
+- **`-DSTRATA_MMQ_TAB=ON` with `STRATA_MMQ_DIRECT=1`** (resident experts read in place,
+  [above](#more-opt-in-switches-measured-for-0141-all-off-unless-you-set-them)), which needed two build fixes to run
+  here (MSVC keeps `__restrict__` in a function's type; the switch knew only Flash-Next's expert widths). With
+  `DENSE_IMMA=2`, 64K-200K: every difference inside the 2% between two default runs (200K: 63.68 / 62.42 s default,
+  62.90 s with it; with `--prefill auto:16384` 57.24 against 58.78). 92% of the resident experts were read in place
+  (61,819 of 66,904 at 200K), but on 16 GB most of a long prompt's experts are streamed (107,026 at 200K) and still
+  copied, and the build had 20-80 fewer cache slots. The fixes were removed.
+
+### CPU experts at 130K-200K: `STRATA_IQ3S_MT1`, `--kv-grow` and `STRATA_ARENA_WSLOCK`
+
+**Measured 2026-10-21 on an RTX 5080 16 GB + i9-14900K:** Cyber-Tiel-Coder
+35B-A3B UD-IQ4_XS (gate/up IQ3_S in every layer, down IQ4_XS or Q6_K), 48 GB DDR5, Windows 11, CUDA 13.4, the
+server's settings (`--expert-cache auto --kv int8 --max-context 262144 --pcie-frac 0.00 --pool-workers 7 --adapt-every 1
+--adapt-swaps 160 --adapt-decay 0.97`, `STRATA_ATTN_WINDOW=1 STRATA_ATTN_WINDOW_PREC=2`, `--spec 4 --spec-min-p 0.40`),
+`--serve` with the requests 2K, then 130K and 200K in turn, 192 tokens each, greedy. With the window attention on, a
+verify window at 200K took about 14-20 ms; the GPU waited for the CPU's experts 1.2-3.3 ms of it (`waitCPU` in the GPU
+profile) and the pool computed 2-3.5 missed experts per layer. The pool read 36-41 GB/s in its good requests, while
+this PC streams 78 GB/s from RAM on the same 8 P-cores: the gate/up rows of one token went through ggml's IQ3_S dot,
+which is bound by its codebook lookups, not by the memory.
+
+| what was changed | 130K tok/s | 200K tok/s | CPU ms/window (130K / 200K) | hit rate (130K / 200K) |
+|---|---|---|---|---|
+| the server's settings (control, 4 runs each) | 114.3 | 116.8 | 5.37 / 6.02 | 85.7% / 88.7% |
+| `STRATA_IQ3S_MT1=1` + `--kv-grow` (4 runs each, same downtime) | 163.7 | 140.2 | 2.31 / 3.05 | 91.6% / 90.8% |
+| `STRATA_IQ3S_MT1=1` alone (9 runs of 3 starts, against 27 runs of 9 starts of the control and of the settings below that measured the same) | 145.0 vs 131.5 | 163.2 vs 126.6 | 3.90 / 4.39 vs 4.98 / 6.43 | same |
+
+Medians. `STRATA_IQ3S_MT1=1` takes Strata's gathered IQ3_S kernel for one token too: the pool's gate/up rows went
+from 36-41 to 56-64 GB/s in the good requests. `--kv-grow` let the cache start with 7,668 slots instead of 5,519-5,796
+and keep 6,796 of them at 130K and 6,204 at 200K; the missed experts per layer fell by about a third and the prompts
+read as fast (2,209-2,229 tok/s for 85K new tokens at 200K, against 2,179-2,223). Greedy text: the first token where
+two runs differ came at a median of 15 of 192 between the control's own starts (the adaptive tier makes the decode
+non-deterministic) and at 15 between the control and `STRATA_IQ3S_MT1=1`, so the change is inside that noise.
+Measured and not better: `--pool-workers 5`, 8 (an E-core joins), 12, `--pool-affinity p-cores --pool-workers 15`
+(the P-cores' SMT siblings too), `--no-host-worker`, process priority High, `--vram-reserve-mib 1472`,
+the PCIe share at 0.1 and 0.2 (it moved at most 0.17 experts per layer to the link, no speed change), `--adapt-swaps 320`
+and `--adapt-decay 0.90` (hit rate and CPU time within the control's spread). `--max-context 196608` gives the cache
+513 more slots but refuses a 200K prompt; `--kv-grow` gives more slots without losing context.
+
+In about half the requests the pool then read only 13-25 GB/s with the same work. Every thread ran its tasks at the
+same speed (`STRATA_POOL_STATS`), but the threads sat idle 30-50% of each pool phase instead of about 10%; a request
+kept its speed until the next long prompt (85K new tokens). It was not other programs, the workers sleeping, the host
+thread moving, Windows power throttling, process priority, a fuller VRAM or the CPU clock. The cause is below.
+
+**Why the CPU pool slowed down after a long prompt (found 2026-10-22):** Windows took the expert arena out of the
+engine's working set. `cudaHostRegister` keeps the arena's pages in RAM, because the GPU copies from them, but it does
+not keep them in the working set. When RAM runs short, Windows still trims them. That frees no memory, since the
+pages stay locked for the GPU. But every 4 KB page of an expert the pool reads next is then a page fault, about 400
+per expert, taken by 8 threads at once. The PC these numbers come from had 48 GB of RAM and 1-4 GB of it available
+(a WSL and a QEMU virtual machine, browsers, 18-38 GB in the page file). A long prompt is when RAM runs shortest: the
+conversation cache copies the outgoing conversation into ordinary memory (2 GB at 130K tokens) and the K/V grows.
+Measured with the new `STRATA_POOL_STATS` lines (RTX 5080, i9-14900K, Cyber-Tiel-Coder UD-IQ4_XS, the server's
+settings with `STRATA_IQ3S_MT1=1` and `--kv-grow`, `--serve` with 2K, then 130K and 200K in turn, 192 tokens each):
+
+- In a run under such pressure (the PC paged in up to 170,000 pages a second) the engine's working set fell
+  from 17.4 to 9.2 GiB, while the arena alone is 14.1 GiB. The last three requests then took 20,000-247,000 page
+  faults each, against 530-720 before, and the pool read 25-33 GB/s, against 33-43 GB/s earlier in that run.
+- `STRATA_TEST_TRIM_WS=1` (a test switch) empties the engine's working set before every decode, as Windows does when RAM
+  runs short. It gives the same slow mode every time: 0.92-1.35 million page faults per request, none of the arena in
+  the working set at the decode's start and 24-36% at its end, every thread at the same speed but a tenth to a quarter
+  of each 76-146 us pool phase spent waiting for the slowest one, and 18-23 GB/s.
+
+`STRATA_ARENA_WSLOCK=1` (opt-in, Windows) locks the registered arena in the working set as well: it raises the
+working-set minimum and calls `VirtualLock`. The start-up line then says `expert arena: locked 14463 MiB via
+working-set minimum + VirtualLock`. It costs no RAM, because the pages were locked in RAM already. With it the arena
+stayed 100% in the working set in every request, also under `STRATA_TEST_TRIM_WS=1`. Same settings and requests as
+above, each pair of arms in one stop of the server, in the order control, lock, lock, control. Medians of the 6
+requests at 130K and the 8 at 200K after the first long prompt (15K new tokens at 130K, 85K at 200K; in the first
+control run with the working set emptied, 114K at 130K and three of the 200K requests only 3K, because the
+conversation cache kept more):
+
+| | 130K tok/s | 200K tok/s | ms per window, 130K / 200K | CPU ms per window | pool GB/s | page faults per request |
+|---|---|---|---|---|---|---|
+| working set emptied before each decode, control | 124.7 | 129.6 | 13.25 / 16.06 | 4.02 / 5.26 | 19.8 / 20.2 | 0.96-1.35 million |
+| working set emptied before each decode, `STRATA_ARENA_WSLOCK=1` | 161.2 | 166.9 | 10.84 / 13.25 | 1.75 / 2.38 | 53.1 / 53.5 | 7,600-16,000 |
+| no RAM pressure that hour, control | 174.6 | 177.7 | 10.91 / 13.10 | 1.77 / 2.38 | 49.2 / 48.0 | 350-800 |
+| no RAM pressure that hour, `STRATA_ARENA_WSLOCK=1` | 155.9 | 168.6 | 10.59 / 12.81 | 1.49 / 2.08 | 52.2 / 52.4 | 530-840 |
+
+The tokens per second also depend on how many drafted tokens a window keeps, which changed from run to run here
+(1.60-2.33 tokens per window at the same context), so the time per window is the fairer comparison: with the lock it
+was the same or shorter in every case. Without RAM pressure (the arena stayed in the working set in the control too)
+the lock changed nothing beyond that noise. `STRATA_TEST_TRIM_WS` stays a test switch: it trims the whole engine, not
+only the arena.
+
+Not fixed by the lock: when RAM is this short, other waits grow too. The worst request seen (another run, before the
+working-set numbers existed) read 3.5 GB/s and decoded 31.7 tok/s at 200K. Its conversation restore took 968 ms
+instead of 142-217, its GPU-reach wait doubled, and its pool threads got only 33-59% of their CPU cycles because the
+workers fell asleep between layers while the host thread waited. Free RAM on the PC, or a smaller
+`--conversation-cache-mib`, helps there; the lock alone was not measured on such a request. Compare runs by medians
+over several starts, not by one request.
 
 ## CUDA opt-in switches measured for 0.1.45 (RTX 3060 and RTX A4000, sm_86; all off unless you set them)
 

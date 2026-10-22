@@ -1,6 +1,6 @@
 # Qwen3.6-35B-A3B
 
-> **This fork's pack path (0.1.46).** Upstream 0.1.46 runs Qwen3.6-35B-A3B on an engine of its own (`src/qwen35`, [QWEN36.md](QWEN36.md)): no pack, fp32 KV. This page is the other path, Flash-Next's engine running a qwen35moe GGUF from a Strata pack (`--pack`: int8 KV, the expert cache, MTP drafts from the file), which holds 100K-262K contexts on a 16 GB card. `strata` takes it whenever `--pack` is given. Setup installs two families on it, [Huihui-Ornith-1.5-35B-A3B-abliterated](#huihui-ornith-15-35b-a3b-abliterated) (`--family ornith-abl`) and [Cyber-Tiel-Coder-35B-A3B](#cyber-tiel-coder-35b-a3b) (`--family cyber-tiel`). The `qwen36` / `ornith` setup families described below came with the original port and are not in 0.1.46's setup (its `--family qwen36` installs the `src/qwen35` path); a config written by hand with `--pack` still runs them.
+> **This fork's pack path (0.1.46).** Upstream 0.1.46 runs Qwen3.6-35B-A3B on an engine of its own (`src/qwen35`, [QWEN36.md](QWEN36.md)): no pack, fp32 KV. This page is the other path, Flash-Next's engine running a qwen35moe GGUF from a Strata pack (`--pack`: int8 KV, the expert cache, MTP drafts from the file), which holds 100K-262K contexts on a 16 GB card. `strata` takes it whenever `--pack` is given. Setup installs two families on it, [Huihui-Ornith-1.5-35B-A3B-abliterated](#huihui-ornith-15-35b-a3b-abliterated) (`--family ornith-abl`) and [Cyber-Tiel-Coder-35B-A3B](#cyber-tiel-coder-35b-a3b) (`--family cyber-tiel`). The `qwen36` / `ornith` setup families described below came with the original port and are not in 0.1.46's setup (its `--family qwen36` installs the `src/qwen35` path); a config written by hand with `--pack` still runs them. For the two families setup also writes the fork's measured long-context settings ([what setup writes](#what-setup-writes-for-these-two)).
 
 A second, smaller model next to Qwen3.8-Flash-Next: [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B)
 (35B parameters, 3B active per token), in Unsloth's GGUFs with the MTP draft layer
@@ -11,7 +11,9 @@ shared expert - but 40 layers of 256 experts instead of 48 of 512, so its expert
 
 > **On this page:** [Setup](#setup) · [What fits](#what-fits) · [Speed](#speed-measured) ·
 > [Small cards](#small-cards) · [Against llama.cpp](#against-llamacpp) · [Ornith-1.5](#ornith-15-35b-a3b) ·
-> [What is different](#what-is-different-from-flash-next) · [Limits](#limits)
+> [What is different](#what-is-different-from-flash-next) · [Limits](#limits) ·
+> [Huihui-Ornith abliterated](#huihui-ornith-15-35b-a3b-abliterated) · [Cyber-Tiel-Coder](#cyber-tiel-coder-35b-a3b) ·
+> [What setup writes](#what-setup-writes-for-these-two)
 
 ## Setup
 
@@ -217,7 +219,8 @@ That repository has no image encoder (mmproj), so setup installs this model with
 
 Measured with IQ4_XS on an RTX 5080 (16 GB, PCIe 5.0 x8), i9-14900K, 48 GB of RAM, Windows 11, CUDA 13.4: 262K
 context, `--kv int8`, MTP with the Cyrillic draft vocabulary, `--spec 4 --spec-min-p 0.5`, served to Codex as a coding
-agent. These numbers are from the engine branch `asofwar/integrate-perf` (before 0.1.46):
+agent. These numbers are from the fork's build before the 0.1.46 port, without the settings setup writes now
+([below](#what-setup-writes-for-these-two)):
 
 | What | Result |
 | --- | ---: |
@@ -230,7 +233,9 @@ agent. These numbers are from the engine branch `asofwar/integrate-perf` (before
 
 Codex's prefix reuse works (for example 136,468 of 136,581 tokens reused). In long agent runs it sometimes looped in
 its reasoning. The server's opt-in `"reasoning_loop_recovery": "resample"` is the remedy for agents whose system prompt
-lacks Strata's effort sentence. Not measured: IQ3_S, Russian answer quality, smaller cards.
+lacks Strata's effort sentence. Answer quality against Cyber-Tiel (a Russian / coding / tool-call set, and 20 agentic
+coding tasks): [EVAL.ru.md](EVAL.ru.md), [AGENT-EVAL.ru.md](AGENT-EVAL.ru.md) (in Russian). Not measured: IQ3_S,
+smaller cards.
 
 ## Cyber-Tiel-Coder-35B-A3B
 
@@ -252,7 +257,7 @@ START-HERE.bat --setup --family cyber-tiel              (Windows)
 Its repository also has an image encoder, `mmproj-BF16.gguf` (0.9 GB). Images with it are untested, so setup installs
 this model without images.
 
-Measured with UD-IQ4_XS on the same PC and settings as above (engine branch `asofwar/integrate-perf`):
+Measured with UD-IQ4_XS on the same PC and settings as above, on the same build before the 0.1.46 port:
 
 | What | Result |
 | --- | ---: |
@@ -263,8 +268,25 @@ Measured with UD-IQ4_XS on the same PC and settings as above (engine branch `aso
 | At 205-208K of context, writes | 68-81 tokens/s |
 | 260,498-token prompt, reads / writes | 215 s (1,209 tokens/s) / 60 tokens/s |
 
-Codex's prefix reuse works. No reasoning loops were seen in about an hour of Codex use. Not measured: short-chat
-speed, Russian answer quality, images, UD-IQ3_XXS, smaller cards.
+Codex's prefix reuse works. No reasoning loops were seen in about an hour of Codex use.
+
+With the settings setup writes now, on 0.1.46 (the same PC, measured 2026-10-21 and 2026-10-22 with the live server's
+settings: setup's plus `STRATA_IQ3S_MT1=1`, `--pcie-frac 0.00` and `--spec-min-p 0.50`, [FORK.ru.md](FORK.ru.md#рекомендуемый-конфиг);
+`--serve`, `--vram-reserve-mib 1472`, a fresh engine per arm, greedy):
+
+| What | Result |
+| --- | ---: |
+| 130K-token prompt from scratch, reads | 25.7 s (median of 6) |
+| 200K-token prompt from scratch, reads | 49.4 s (median of 6) |
+| At 64K of context, writes | 249-251 tokens/s |
+| At 130K of context, writes | 146-167 tokens/s |
+| At 200K of context, writes | 161-171 tokens/s |
+
+The writes are means of three 128-token answers, from two downtimes; single answers spread by ~25% with the drafts
+accepted. Each setting's own measurement: [DETAILS.md](DETAILS.md#long-contexts-on-the-pack-path-qwen36--ornith--cyber-tiel-this-fork-opt-in).
+Answer quality on a Russian / coding / tool-call set and as a coding agent: [EVAL.ru.md](EVAL.ru.md),
+[AGENT-EVAL.ru.md](AGENT-EVAL.ru.md) (in Russian). Not measured: short-chat speed with these settings, images,
+UD-IQ3_XXS, smaller cards.
 
 ## What setup writes for these two
 
@@ -276,6 +298,26 @@ Both are `OWN_PATH_FAMILIES` entries with `"pack": True` in `setup.py`, installe
   (the GGUF), `--expert-profile data/expert-profile-qwen36.bin`, `--expert-cache auto`, `--prefill auto`, `--spec 4`,
   `--mtp-draft-vocab` (the chosen subset, `--draft-vocab`), `--kv int8` (or `--kv`), and a 262K context on a 16 GB card
   (128K below).
+
+The config also gets the fork's measured settings for this path (`PACK_TUNED` in `setup.py`; RTX 5080 16 GB,
+i9-14900K, Cyber-Tiel-Coder UD-IQ4_XS; each one's measurement in
+[DETAILS.md](DETAILS.md#long-contexts-on-the-pack-path-qwen36--ornith--cyber-tiel-this-fork-opt-in)):
+
+| Where in the config | Setting | What it does | Measured |
+| --- | --- | --- | --- |
+| `"env"` | `STRATA_ATTN_WINDOW=1`, `STRATA_ATTN_WINDOW_PREC=2` | a verify window's attention reads the K/V once for all its tokens | decode at 200K 48.6 -> 88.9 tokens/s |
+| `"env"` | `STRATA_ATTN_WINDOW_SMALL=1` | windows of up to 4 tokens on a streaming INT8 kernel | decode at 200K 127.6 -> 160.7 tokens/s |
+| `"env"` | `STRATA_PROMPT_ATTN_DENSE_IMMA=4` | the prompt's attention on INT8 tensor cores | a 200K prompt 57.6 -> 53.8 s against the kernel's previous version (76.7 s with the FP16 mode before the first) |
+| `"env"` | `STRATA_MMQ_KQ=1` | the Q6_K down experts of layers 34, 38 and 39 on MMQ | a 200K prompt 51.8 -> 49.4 s |
+| `"env"` | `STRATA_ARENA_WSLOCK=1` | Windows: the expert arena stays in the working set, so the CPU pool does not fault on it when RAM runs short | decode under RAM pressure at 200K 129.6 -> 166.9 tokens/s; no more RAM |
+| `"args"` | `--kv-grow` | the K/V takes VRAM as the context grows, the expert cache the rest | 7,668 expert slots at the start instead of 5,519-5,796 |
+| top level | `"sampling": {"temperature": 0.6, "presence_penalty": 0}` | the default sampling for requests that set none | no spoiled words in 256 replies, against 16 of 672 at the model card's T 1.0 / presence 1.5 ([EVAL.ru.md](EVAL.ru.md)) |
+| top level | `"reasoning_loop_recovery": "resample"`, `"reasoning_close_retry": true` | an agent's reasoning loop is broken with raised sampling; a reply that ends inside its thinking is continued once | no number; used with Codex |
+
+`STRATA_PROMPT_ATTN_FP16ACC` is not written: with int8 K/V `DENSE_IMMA` takes precedence over it, and q4_0 / k8v4 K/V
+never reach that kernel. Settings that depend on the PC (`STRATA_IQ3S_MT1`, `STRATA_ADAPT_OVERLAP`, `--pcie-frac`, the
+conversation cache on the disk) are not written; [FORK.ru.md](FORK.ru.md#рекомендуемый-конфиг) lists them with their
+measurements.
 
 A ready-made engine from the upstream releases runs qwen35moe on `src/qwen35` only. Its `strata --families` has no
 `qwen35moe-pack`, so setup compiles the engine from this checkout instead. One request at a time; `--parallel` is not

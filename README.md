@@ -7,9 +7,13 @@
 
 <p align="center"><b>English</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português</a> · <a href="README.ru.md">Русский</a></p>
 
-> **This is Asofwar's fork of [Niko1221/Strata](https://github.com/Niko1221/Strata)** with Qwen3.6 / Ornith /
-> Cyber-Tiel on the main engine from a pack (up to 262K context, int8 KV, MTP on a 16 GB card), opt-in FP16 prompt
-> attention, a deterministic mode and server fixes for coding agents - see [docs/FORK.ru.md](docs/FORK.ru.md) (Russian).
+> **This is Asofwar's fork of [Niko1221/Strata](https://github.com/Niko1221/Strata)**, for coding agents with long
+> contexts on a 16 GB card. Qwen3.6 / Ornith / Cyber-Tiel run on the main engine from a pack (up to 262K context, int8
+> KV, MTP drafts), and setup turns on the fork's long-context kernels for them: on an RTX 5080 Cyber-Tiel UD-IQ4_XS
+> reads a 200K prompt in 49.4 s and writes 161-171 tokens/s at 200K. Also: conversations parked on NVMe, a reasoning
+> loop recovery for agents, a deterministic mode, and Russian quality and agent benchmarks. Overview, measurements and
+> the recommended config: [docs/FORK.ru.md](docs/FORK.ru.md) (Russian); the kernels:
+> [docs/DETAILS.md](docs/DETAILS.md#long-contexts-on-the-pack-path-qwen36--ornith--cyber-tiel-this-fork-opt-in).
 
 <h3 align="center">Run a state-of-the-art model on your own gaming PC</h3>
 

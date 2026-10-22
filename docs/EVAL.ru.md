@@ -1,6 +1,8 @@
 # Качество ответов: Cyber-Tiel-Coder и Huihui-Ornith на этом ПК
 
 Небольшая проверка, какая из двух моделей лучше для Codex и для работы на русском. Измерено 2026-10-21.
+Агентные задачи (до 25 ходов с инструментами): [AGENT-EVAL.ru.md](AGENT-EVAL.ru.md). Что это за форк и его
+настройки: [FORK.ru.md](FORK.ru.md).
 
 ## Коротко
 
@@ -11,8 +13,8 @@
   `ятарь-9948` вместо `янтарь-9948`, `weather` вместо `get_weather`, `Кан伯ра` вместо `Канберра`. С temperature 0.6
   и presence_penalty 0 таких сбоев не было ни одного (0 из 256 ответов против 16 из 672 на temperature 1.0), а
   русские ответы прошли 40 из 40 (Tiel) и 39 из 40 (Ornith).
-- Рекомендация: оставить Cyber-Tiel для Codex и добавить в его конфиг блок `"sampling": {"temperature": 0.6,
-  "presence_penalty": 0}`. Ornith — запасной вариант, не хуже по качеству; переходить на него ради этого набора
+- Рекомендация: оставить Cyber-Tiel для Codex с блоком `"sampling": {"temperature": 0.6, "presence_penalty": 0}` в
+  конфиге (setup для `cyber-tiel` и `ornith-abl` теперь пишет его сам). Ornith — запасной вариант, не хуже по качеству; переходить на него ради этого набора
   смысла нет: разница в коде почти вся из одной задачи, а длинные агентные сессии (где Ornith, по опыту владельца,
   чаще зацикливается) здесь не проверялись.
 - Квант покрупнее (UD-Q4_K_XL вместо UD-IQ4_XS) того не стоит: 246 против 243 из 256 ответов, это в пределах
@@ -22,13 +24,14 @@
 ## На чём мерили
 
 - ПК: NVIDIA GeForce RTX 5080 16 ГБ (драйвер 617.42), Intel Core i9-14900K, 47.7 ГБ RAM, Windows 11.
-- Сервер: `E:\Projects\Strata-main` (коммит `2a2f2241`, движок 0.1.46.1), порт 8096, тот же конфиг, что у
-  `run-tiel-main.bat` (`strata-tiel-main.json`): `--spec 4`, MTP из файла модели, `--mtp-draft-vocab` cyrillic,
-  `--kv int8`, `--kv-grow`, те же переменные `STRATA_*`. Убраны только `--conversation-disk-*`, чтобы прогоны не
-  писали в дисковый кэш владельца.
+- Сервер: сборка форка на коммите `2a2f2241` (движок 0.1.46.1), порт 8096, конфиг рабочего сервера владельца на тот
+  день: `--spec 4`, MTP из файла модели, `--mtp-draft-vocab` cyrillic, `--kv int8`, `--kv-grow`, переменные `STRATA_*`
+  того дня (среди них `STRATA_ATTN_WINDOW*`, `STRATA_PROMPT_ATTN_FP16ACC`, `STRATA_GDN_CHUNKED`, `STRATA_IQ3S_MT1`;
+  нынешний конфиг: [FORK.ru.md](FORK.ru.md#рекомендуемый-конфиг)). Убраны только `--conversation-disk-*`, чтобы
+  прогоны не писали в дисковый кэш владельца.
 - Модели:
-  - Cyber-Tiel-Coder-35B-A3B-MTP UD-IQ4_XS, пак `D:\Strata-data\packs\cyber-tiel-iq4_xs` (в таблицах `tiel`);
-  - Huihui-Ornith-1.5-35B-A3B-abliterated i1-IQ4_XS, пак `D:\Strata-data\packs\ornith-abl-iq4_xs`, MTP из того же
+  - Cyber-Tiel-Coder-35B-A3B-MTP UD-IQ4_XS, пак `cyber-tiel-iq4_xs` (в таблицах `tiel`);
+  - Huihui-Ornith-1.5-35B-A3B-abliterated i1-IQ4_XS, пак `ornith-abl-iq4_xs`, MTP из того же
     файла (`ornith`). Это «abliterated» модель: у неё сняты отказы.
 - Запросы: OpenAI chat API без полей сэмплинга, как у Codex по умолчанию. Сервер тогда берёт сэмплинг карточки
   Qwen3.6 для режима с размышлением: temperature 1.0, top_p 0.95, top_k 20, presence_penalty 1.5. В запросе задан
@@ -125,6 +128,8 @@ Ornith значение неизвестно.
 - Не словарь черновика MTP: с полным словарём (без `--mtp-draft-vocab`) сбои те же (4 из 80).
 - Не экспериментальные флаги: без `STRATA_PROMPT_ATTN_FP16ACC`, `STRATA_ATTN_WINDOW*`, `STRATA_GDN_CHUNKED`,
   `STRATA_IQ3S_MT1` сбои те же (5 из 80). Зато чтение промпта 128K без них медленнее: needle 34.9 с против 20.1 с.
+  (`STRATA_GDN_CHUNKED` на этих моделях ничего не меняет: его ядро есть только для 48 голов value у Flash-Next, а у
+  Qwen3.6 их 32.)
 - Не только presence_penalty: с presence_penalty 0 и temperature 1.0 сбои остались (2 и 1 из 128).
 - Промпт движок читает верно: «повтори дословно» без размышления, greedy, на живом сервере — точная копия обеих
   фраз. С размышлением и тоже greedy Tiel пишет «на улицы» вместо «на улице» уже в размышлении и потом в ответе.
@@ -144,16 +149,15 @@ Ornith значение неизвестно.
 
 ## UD-Q4_K_XL против UD-IQ4_XS (Cyber-Tiel)
 
-Измерено 2026-10-21, `E:\Projects\Strata-main` на коммите `668083c7`, драйвер 617.42, те же настройки, что у
-`run-tiel-main.bat` (с `STRATA_PROMPT_ATTN_DENSE_IMMA=2`, сэмплинг temperature 0.6 / presence_penalty 0), без
-`--conversation-disk-*`.
+Измерено 2026-10-21, сборка форка на коммите `668083c7`, драйвер 617.42, конфиг рабочего сервера на тот день (с
+`STRATA_PROMPT_ATTN_DENSE_IMMA=2`, сэмплинг temperature 0.6 / presence_penalty 0), без `--conversation-disk-*`.
 
 Коротко: **UD-Q4_K_XL не стоит переходить.** По качеству разница в пределах разброса, а работает он медленнее и
 не помещается в свободную память этого ПК.
 
 Файлы: `Cyber-Tiel-Coder-35B-A3B-MTP-UD-Q4_K_XL.gguf` (22 749 880 640 байт, sha256
-`0bbcf3cc9be4c976bad20e641baf629dad9c178d39ebdc9cd72129179943c06a` совпал с Hugging Face, ревизия `fa19d4f3`), пак `D:\Strata-data\packs\cyber-tiel-q4kxl` (`tools/iq_pack.py
---compat-bf16`). Эксперты в UD-Q4_K_XL: gate/up Q4_K (39 слоёв), Q5_K (1), Q3_K (слой MTP); down Q5_K (36), Q6_K
+`0bbcf3cc9be4c976bad20e641baf629dad9c178d39ebdc9cd72129179943c06a` совпал с Hugging Face, ревизия `fa19d4f3`), пак
+`cyber-tiel-q4kxl` (`tools/iq_pack.py --compat-bf16`). Эксперты в UD-Q4_K_XL: gate/up Q4_K (39 слоёв), Q5_K (1), Q3_K (слой MTP); down Q5_K (36), Q6_K
 (4), Q3_K. В UD-IQ4_XS gate/up — IQ3_S, down — IQ4_XS. Движок берёт все эти типы со сборкой
 `STRATA_Q6K_EXPERTS=ON` и `STRATA_MMQ_KQUANTS=ON`.
 
@@ -197,7 +201,9 @@ Q4_K_XL ниже всего на 0–3%, и это того же порядка,
 
 ### Скорость (медиана 3 запросов, без прогревочного)
 
-Движок с `--serve`, запросы через stdin, 256 новых токенов greedy, каждый запрос читается с нуля.
+Движок с `--serve`, запросы через stdin, 256 новых токенов greedy, каждый запрос читается с нуля. Это числа до
+`DENSE_IMMA=4`, `STRATA_ATTN_WINDOW_SMALL` и `STRATA_MMQ_KQ`; нынешние для UD-IQ4_XS:
+[FORK.ru.md](FORK.ru.md#результаты). Сравнение двух квантов между собой от этого не меняется.
 
 | | IQ4_XS | Q4_K_XL | Разница |
 |---|---|---|---|
@@ -246,10 +252,11 @@ VRAM. Конфиг для Q4_K_XL не делался.
 
 ## Как включить рекомендованный сэмплинг
 
-В копии `strata-tiel-main.json` добавить на верхний уровень:
+Setup для `cyber-tiel` и `ornith-abl` пишет его сам. В конфиг, записанный раньше (`strata-<tag>.json` в папке данных
+Strata), добавить на верхний уровень:
 
 ```json
 "sampling": {"temperature": 0.6, "presence_penalty": 0}
 ```
 
-Это действует только на запросы, где клиент сам не задал эти поля. Перезапустить `run-tiel-main.bat`.
+Это действует только на запросы, где клиент сам не задал эти поля. После правки перезапустить Strata.
