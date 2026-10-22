@@ -318,6 +318,9 @@ Cyber-Tiel-Coder UD-IQ4_XS ([QWEN36_PACK.md](QWEN36_PACK.md#what-setup-writes-fo
 
 ## Установка
 
+Самый простой способ (Windows, без вопросов, со значком на рабочем столе): `Strata-Turbo-Install.cmd` из релиза,
+по шагам — [EASY_INSTALL.ru.md](EASY_INSTALL.ru.md).
+
 Способы получить код форка (все берут файлы из [релизов форка](https://github.com/Asofwar/Strata-Turbo/releases)):
 zip релиза `Strata-Turbo-<версия>-windows-cuda13.zip` (Windows, NVIDIA RTX 20 и новее), однострочный установщик
 (`irm https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.ps1 | iex` на Windows, `curl -fsSL
@@ -356,8 +359,14 @@ START-HERE.bat --setup --family ornith-abl
 - `strata-windows-x64.zip` — только папка `engine\`. Setup скачивает её сам, если `engine\` в установке нет или
   он устарел; SHA-256 сверяется с этим релизом через API GitHub.
 - `SHA256SUMS.txt` — контрольные суммы файлов релиза.
+- `Strata-Turbo-Install.cmd` и `easy-install.ps1` — простой установщик ([EASY_INSTALL.ru.md](EASY_INSTALL.ru.md)):
+  `.cmd` скачивает `easy-install.ps1` из того же релиза, сверяет его с `SHA256SUMS.txt` (если он там указан) и
+  запускает.
 
 Как обновить установку:
+
+- Установка через `Strata-Turbo-Install.cmd`: запустить его ещё раз. Новая версия ставится рядом, модель не
+  скачивается заново.
 
 - Установка из zip: скачать новый zip форка, распаковать в новую папку и запустить `START-HERE.bat`. Модели в
   `Strata-data` используются повторно, заново ничего не качается.

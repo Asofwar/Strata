@@ -43,6 +43,10 @@ Agent benchmark: 53 of 60 coding tasks. Every measurement: [docs/FORK.ru.md](doc
 
 ## Install
 
+**The simplest way** (Windows, NVIDIA RTX 20 or newer, 32 GB of RAM): download `Strata-Turbo-Install.cmd` from the
+[latest release](https://github.com/Asofwar/Strata-Turbo/releases/latest) and double-click it. It asks nothing, sets up
+Cyber-Tiel-Coder and puts a "Strata Turbo" icon on the desktop. Step by step: [docs/EASY_INSTALL.md](docs/EASY_INSTALL.md).
+
 **Windows**, NVIDIA RTX 20 or newer (driver 580+), in PowerShell:
 
 ```powershell

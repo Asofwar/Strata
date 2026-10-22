@@ -43,6 +43,10 @@ Codex CLI, Claude Code, OpenCode и другие агенты. Без аккау
 
 ## Установка
 
+**Самый простой способ** (Windows, NVIDIA RTX 20 и новее, 32 ГБ памяти): скачайте `Strata-Turbo-Install.cmd` из
+[последнего релиза](https://github.com/Asofwar/Strata-Turbo/releases/latest) и запустите двойным щелчком. Он ничего не
+спрашивает, ставит Cyber-Tiel-Coder и создаёт значок «Strata Turbo» на рабочем столе. По шагам: [docs/EASY_INSTALL.ru.md](docs/EASY_INSTALL.ru.md).
+
 **Windows**, NVIDIA RTX 20 и новее (драйвер 580+), в PowerShell:
 
 ```powershell

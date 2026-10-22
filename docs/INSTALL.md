@@ -8,7 +8,7 @@ This is Strata Turbo, Asofwar's fork, and it installs from the fork's [releases]
 ways. Take the first one on a Windows PC with an NVIDIA RTX card:
 
 1. **[The release zip](#the-release-zip-windows-nvidia):** the fork's code and a ready engine in one zip. Unzip it and run
-   `START-HERE.bat`.
+   `START-HERE.bat`. The [easy installer](EASY_INSTALL.md) does this for you, with no questions.
 2. **[One line](#one-line):** a script from the same release that does this for you (on Linux it builds from source).
 3. **[From source](#from-source-windows):** `START-HERE.bat` on Windows, `./setup.sh` on Linux and Mac. It builds or
    fetches the engine itself.
@@ -58,6 +58,8 @@ For a Windows 10 / 11 PC with an NVIDIA RTX 20 series card or newer and driver 5
   one, and checks it against the release's SHA-256, so you do not need it.
 - `SHA256SUMS.txt`: the checksums of the release's files.
 - `install.ps1` and `install.sh`: the [one-line installers](#one-line).
+- `Strata-Turbo-Install.cmd` and `easy-install.ps1`: the easy installer. Double-click the `.cmd`: it checks the PC,
+  sets up Cyber-Tiel-Coder with no questions and makes desktop and Start menu icons ([EASY_INSTALL.md](EASY_INSTALL.md)).
 
 1. Unzip the zip into a folder without spaces in its path.
 2. Double-click **`START-HERE.bat`** and answer a few questions, or press Enter each time for the recommended choice
