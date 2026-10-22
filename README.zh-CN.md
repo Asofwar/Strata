@@ -11,6 +11,8 @@
 
 <p align="center">Asofwar 维护的 <a href="https://github.com/Niko1221/Strata">Strata</a> 分支 · Windows + NVIDIA · 免费开源</p>
 
+<p align="center"><b>在 66K 上下文下比 upstream Strata 快 16–18 倍</b>（同一显卡、同一模型）</p>
+
 <p align="center">
   <a href="https://github.com/Asofwar/Strata-Turbo/releases/latest"><img src="https://img.shields.io/github/v/release/Asofwar/Strata-Turbo?label=%E7%89%88%E6%9C%AC" alt="版本"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/Asofwar/Strata-Turbo" alt="MIT 许可证"></a>
@@ -25,12 +27,16 @@ Claude Code、OpenCode 等智能体都能直接连接。无需账号，没有遥
 
 ## 速度
 
-RTX 5080 16 GB、i9-14900K、48 GB DDR5、Windows 11，Cyber-Tiel-Coder UD-IQ4_XS，使用 setup 写入的设置：
+同一台 PC、同一个模型文件、同一天测得（RTX 5080 16 GB、i9-14900K、48 GB DDR5-7600、Windows 11、Cyber-Tiel-Coder UD-IQ4_XS）：Strata Turbo 对比 upstream Strata 针对该模型的原生路径。
 
-| 上下文 | 读取提示词 | 生成 |
+| 上下文 | 读取提示词（Turbo / upstream） | 生成 tokens/s（Turbo / upstream） |
 | ---: | ---: | ---: |
-| 130K | 25.7 秒 | 146-167 token/秒 |
-| 200K | 49.4 秒 | 161-171 token/秒 |
+| 2K | 0.5 s / 4.7 s (9×) | 291 / 71 (4×) |
+| 32K | 4.4 s / 75 s (17×) | 286 / 51 (6×) |
+| 66K | 10 s / 186 s (18×) | 253 / 16 (16×) |
+| 128K | 25 s / 513 s (21×) | 194 / 7 (29×, upstream 仅运行一次) |
+
+在 16 GB 显卡上，upstream 最多只能以 160K 上下文启动；Strata Turbo 可运行 262K（200K 时读取提示词 49 秒，生成 161–171 tokens/s）。方法与日志：[bench/results/2026-10-22-rtx5080-turbo-vs-upstream](bench/results/2026-10-22-rtx5080-turbo-vs-upstream/README.md)。
 
 在另一段对话之后切回约 123K 的对话，只需 2.5 秒，而不是 33 秒（对话会暂存到 NVMe 上）。
 智能体基准测试：60 个编程任务完成 53 个。全部测量数据见 [docs/FORK.ru.md](docs/FORK.ru.md)。

@@ -11,6 +11,8 @@
 
 <p align="center"><a href="https://github.com/Niko1221/Strata">Strata</a> の Asofwar 版フォーク · Windows + NVIDIA · 無料のオープンソース</p>
 
+<p align="center"><b>66K コンテキストで upstream Strata の 16〜18 倍高速</b>（同じカード・同じモデル）</p>
+
 <p align="center">
   <a href="https://github.com/Asofwar/Strata-Turbo/releases/latest"><img src="https://img.shields.io/github/v/release/Asofwar/Strata-Turbo?label=%E3%83%AA%E3%83%AA%E3%83%BC%E3%82%B9" alt="リリース"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/Asofwar/Strata-Turbo" alt="MIT ライセンス"></a>
@@ -25,12 +27,16 @@ Codex CLI、Claude Code、OpenCode などのエージェントから接続でき
 
 ## 速度
 
-RTX 5080 16 GB、i9-14900K、48 GB DDR5、Windows 11、Cyber-Tiel-Coder UD-IQ4_XS、設定は setup が書き出したもの：
+同じ PC・同じモデルファイル・同じ日に計測（RTX 5080 16 GB、i9-14900K、48 GB DDR5-7600、Windows 11、Cyber-Tiel-Coder UD-IQ4_XS）。Strata Turbo と、このモデルに対する upstream Strata 本来の経路を比較しています。
 
-| コンテキスト | プロンプト読み込み | 生成 |
+| コンテキスト | プロンプト読み込み（Turbo / upstream） | 生成 tokens/s（Turbo / upstream） |
 | ---: | ---: | ---: |
-| 130K | 25.7 秒 | 146-167 トークン/秒 |
-| 200K | 49.4 秒 | 161-171 トークン/秒 |
+| 2K | 0.5 s / 4.7 s (9×) | 291 / 71 (4×) |
+| 32K | 4.4 s / 75 s (17×) | 286 / 51 (6×) |
+| 66K | 10 s / 186 s (18×) | 253 / 16 (16×) |
+| 128K | 25 s / 513 s (21×) | 194 / 7 (29×, upstream は 1 回のみ) |
+
+16 GB のカードでは upstream は最大 160K のコンテキストでしか起動しません。Strata Turbo は 262K で動作します（200K ではプロンプト読み込み 49 秒、生成 161〜171 tokens/s）。方法とログ：[bench/results/2026-10-22-rtx5080-turbo-vs-upstream](bench/results/2026-10-22-rtx5080-turbo-vs-upstream/README.md)
 
 別の会話を挟んだあとで約 123K の会話に戻る場合、かかる時間は 33 秒ではなく 2.5 秒です（会話は NVMe に退避されます）。
 エージェントのベンチマーク：コーディングタスク 60 件中 53 件。すべての計測値は [docs/FORK.ru.md](docs/FORK.ru.md) にあります。

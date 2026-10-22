@@ -11,6 +11,8 @@
 
 <p align="center">Asofwars Fork von <a href="https://github.com/Niko1221/Strata">Strata</a> · Windows + NVIDIA · kostenlos und Open Source</p>
 
+<p align="center"><b>16–18× schneller als Upstream-Strata bei 66K Kontext</b>, gleiche Karte und gleiches Modell</p>
+
 <p align="center">
   <a href="https://github.com/Asofwar/Strata-Turbo/releases/latest"><img src="https://img.shields.io/github/v/release/Asofwar/Strata-Turbo?label=release" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/Asofwar/Strata-Turbo" alt="MIT-Lizenz"></a>
@@ -26,12 +28,16 @@ Kein Konto, keine Telemetrie.
 
 ## Geschwindigkeit
 
-RTX 5080 16 GB, i9-14900K, 48 GB DDR5, Windows 11, Cyber-Tiel-Coder UD-IQ4_XS mit den Einstellungen, die das Setup schreibt:
+Gleicher PC, gleiche Modelldatei, gleicher Tag (RTX 5080 16 GB, i9-14900K, 48 GB DDR5-7600, Windows 11, Cyber-Tiel-Coder UD-IQ4_XS): Strata Turbo gegen den eigenen Weg von Upstream-Strata für dieses Modell.
 
-| Kontext | Prompt lesen | Generieren |
+| Kontext | Prompt lesen, Turbo / Upstream | Schreiben, Tokens/s, Turbo / Upstream |
 | ---: | ---: | ---: |
-| 130K | 25.7 s | 146-167 Tokens/s |
-| 200K | 49.4 s | 161-171 Tokens/s |
+| 2K | 0.5 s / 4.7 s (9×) | 291 / 71 (4×) |
+| 32K | 4.4 s / 75 s (17×) | 286 / 51 (6×) |
+| 66K | 10 s / 186 s (18×) | 253 / 16 (16×) |
+| 128K | 25 s / 513 s (21×) | 194 / 7 (29×, ein Upstream-Lauf) |
+
+Auf einer 16-GB-Karte startet Upstream mit höchstens 160K Kontext; Strata Turbo läuft mit 262K (bei 200K liest es den Prompt in 49 s und schreibt 161–171 Tokens/s). Methode und Logs: [bench/results/2026-10-22-rtx5080-turbo-vs-upstream](bench/results/2026-10-22-rtx5080-turbo-vs-upstream/README.md).
 
 Der Wechsel zurück zu einer Unterhaltung mit ~123K Kontext, nachdem eine andere lief, dauert 2.5 s statt 33 s
 (Unterhaltungen werden auf der NVMe abgelegt). Agenten-Benchmark: 53 von 60 Coding-Aufgaben.
