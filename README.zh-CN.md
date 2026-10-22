@@ -1,13 +1,11 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="apps/host/public/brand/strata-lockup-dark.svg">
-    <img src="apps/host/public/brand/strata-lockup-light.svg" alt="Strata" width="380">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/media/strata-turbo-lockup-dark.svg">
+    <img src="docs/media/strata-turbo-lockup-light.svg" alt="Strata Turbo" width="440">
   </picture>
 </p>
 
 <p align="center"><a href="README.md">English</a> · <a href="README.ru.md">Русский</a> · <b>简体中文</b> · <a href="README.ja.md">日本語</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português</a></p>
-
-<h1 align="center">Strata Turbo</h1>
 
 <h3 align="center">在一张 16 GB 显卡上运行 262K 上下文的编程智能体</h3>
 

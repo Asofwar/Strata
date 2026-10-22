@@ -1,13 +1,11 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="apps/host/public/brand/strata-lockup-dark.svg">
-    <img src="apps/host/public/brand/strata-lockup-light.svg" alt="Strata" width="380">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/media/strata-turbo-lockup-dark.svg">
+    <img src="docs/media/strata-turbo-lockup-light.svg" alt="Strata Turbo" width="440">
   </picture>
 </p>
 
 <p align="center"><a href="README.md">English</a> · <a href="README.ru.md">Русский</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <b>Español</b> · <a href="README.pt-BR.md">Português</a></p>
-
-<h1 align="center">Strata Turbo</h1>
 
 <h3 align="center">Agentes de programación con contexto de 262K en una sola tarjeta gráfica de 16 GB</h3>
 
