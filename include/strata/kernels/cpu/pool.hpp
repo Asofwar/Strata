@@ -216,9 +216,29 @@ public:
     /// STRATA_POOL_STATS=1 (a diagnostic, off by default): the tasks each thread ran and the time it spent in them,
     /// accumulated, and how often each worker went to sleep; index workers() is the host.  Tells one slow thread (a
     /// core shared with something else) from a pool that waits between its phases.  Read between batches only.
-    struct ThreadStat { int64_t tasks = 0; double ms = 0; int64_t sleeps = 0; };
+    struct ThreadStat {
+        int64_t tasks = 0; double ms = 0; int64_t sleeps = 0;
+        /// The row phases (run_phase) only: phases this thread took part in, phases it missed (saw the epoch only
+        /// after the phase was over), phases it arrived at with nothing left to claim; its arrival after the publish
+        /// and the wait from its last task to the phase's last task, summed (ms); tasks by duration (<8, <16, <32,
+        /// <64, <128, <256, <512, >=512 us).
+        int64_t phases = 0, missed = 0, empty = 0;
+        double arrive_ms = 0, tail_ms = 0;
+        int64_t hist[8] = {};
+    };
     static bool stats_on();
     std::vector<ThreadStat> thread_stats() const;
+    /// STRATA_POOL_STATS: the row phases' wall (publish to every worker parked again) and publish to last task, summed.
+    struct PhaseStat { int64_t phases = 0; double wall_ms = 0, done_ms = 0; };
+    PhaseStat phase_stats() const { return pstat_; }
+    /// The CPU cycles each worker thread (and the calling thread, last) was given so far (QueryThreadCycleTime,
+    /// TSC units; empty where not available).  Against the TSC this is the share of wall time a thread ran: time a
+    /// spinning worker lost to another thread or to interrupts shows as a share below 1.
+    std::vector<uint64_t> thread_cycles() const;
+    /// The OS thread ids and the kernel / user CPU ms of the workers and the calling thread (last); empty where not
+    /// available.
+    std::vector<uint32_t> thread_ids() const;
+    std::vector<std::pair<double, double>> thread_times() const;
     int64_t multi_bytes = 0;
 
     /// Total `_mm_pause` iterations spent waiting, over all workers, is no longer counted - see the note on the
@@ -315,6 +335,16 @@ private:
     std::vector<ExpertScratch> scratch_;   // one per worker: no allocation, no false sharing of the hot data
     struct alignas(64) ThreadStatSlot { ThreadStat s; };
     std::unique_ptr<ThreadStatSlot[]> tstat_;   // STRATA_POOL_STATS: n_ + 1 slots, each written by its own thread
+    // STRATA_POOL_STATS: each thread's view of the current row phase (its sequence number, arrival, last task end, tasks),
+    // written by that thread and read by the host after the phase; atomics, as a late worker may still write one
+    struct alignas(64) PhaseSlot {
+        std::atomic<int64_t> seq{-1}, arr{0}, end{0};
+        std::atomic<int32_t> tasks{0};
+    };
+    std::unique_ptr<PhaseSlot[]> pslot_;
+    std::atomic<int64_t> trace_seq_{0};
+    int64_t trace_pub_ns_ = 0;
+    PhaseStat pstat_;
     // run_split state: mode 0 = whole experts, 1 = gate/up row parts, 2 = down row parts
     int mode_ = 0;
     int parts_a_ = 1, parts_b_ = 1;

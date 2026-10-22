@@ -489,6 +489,15 @@ bool arena_no_register() {
     return arena_uma_no_register_flag().load(std::memory_order_relaxed);
 }
 
+bool arena_ws_lock() {
+#ifdef _WIN32
+    const char* e = std::getenv("STRATA_ARENA_WSLOCK");
+    return e != nullptr && *e != '\0' && *e != '0';
+#else
+    return false;   // Linux has no working-set trim of page-locked memory
+#endif
+}
+
 int arena_pin_cap_gib() {
     const char* e = std::getenv("STRATA_ARENA_PIN_GIB");
     if (e == nullptr || *e == '\0') return -1;
@@ -589,6 +598,10 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
         if (!capped && e == cudaSuccess) {
             note = "cudaHostRegister PORTABLE ok; " + note;
             registered_bytes = bytes;
+            // STRATA_ARENA_WSLOCK=1: also lock the registered arena in the working set.  The registration keeps the
+            // pages in RAM, but Windows still trims them out of the working set under memory pressure (nothing is
+            // freed by that), and the CPU pool then soft-faults every 4 KB page of each expert it reads.
+            if (arena_ws_lock() && backing != PageBacking::LargePages) lock_from(0);
         } else if (bounds.size() >= 2 && (capped || clear_error())) {
             // Plan v0.3 P5: the whole range is refused, so pin it slice by slice from the start.  The rest stays
             // resident through the working-set lock below.  (P6: slices may differ in size, one per layer.)

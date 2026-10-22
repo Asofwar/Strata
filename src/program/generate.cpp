@@ -14606,6 +14606,13 @@ int main(int argc, char** argv) {
             consumed.reserve((size_t) (n + max_new + S));
             for (int64_t i = 0; i < p; ++i) consumed.push_back((int32_t) ids[(size_t) i]);
             const char* finish = "length";
+#if defined(_WIN32)
+            // STRATA_TEST_TRIM_WS=1 (a test switch): empty the process working set before each decode, as Windows does
+            // to a process when RAM runs short (a long prompt's allocations can be what makes it short).  Pages stay in
+            // RAM and fault back in on their next touch; locked pages (STRATA_ARENA_WSLOCK) are not removed.
+            static const bool test_trim_ws = [] { const char* v = std::getenv("STRATA_TEST_TRIM_WS"); return v != nullptr && std::atoi(v) != 0; }();
+            if (test_trim_ws) (void) SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T) -1, (SIZE_T) -1);
+#endif
             const Clock::time_point d0 = Clock::now();
             // STRATA_DECODE_TIMING=1: where a request's decode time goes (one line per request)
             static const bool dec_timing = std::getenv("STRATA_DECODE_TIMING") != nullptr;
@@ -14623,6 +14630,41 @@ int main(int argc, char** argv) {
             const double pgu0 = pool.ms_multi_gu, pq0 = pool.ms_multi_q, pdown0 = pool.ms_multi_down;
             const int64_t pbytes0 = pool.multi_bytes;
             const std::vector<strata::kernels::cpu::ExpertPool::ThreadStat> pst0 = pool.thread_stats();
+            const strata::kernels::cpu::ExpertPool::PhaseStat pph0 = pool.phase_stats();
+            const std::vector<uint64_t> pcyc0 = strata::kernels::cpu::ExpertPool::stats_on() ? pool.thread_cycles()
+                                                                                              : std::vector<uint64_t>{};
+#if defined(_WIN32)
+            const Clock::time_point pcyc_t0 = Clock::now();
+            const std::vector<std::pair<double, double>> ptim0 = strata::kernels::cpu::ExpertPool::stats_on()
+                                                                      ? pool.thread_times()
+                                                                      : std::vector<std::pair<double, double>>{};
+            PROCESS_MEMORY_COUNTERS pmc0{};
+            if (strata::kernels::cpu::ExpertPool::stats_on()) (void) K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc0, sizeof pmc0);
+            // STRATA_POOL_STATS: the share of the arena's expert pages in the process working set (three pages of
+            // every expert); a page outside it costs the CPU pool a page fault when it reads that expert
+            auto arena_ws_share = [&]() -> double {
+                auto* as = dynamic_cast<strata::core::ArenaExpertSource*>(srcp);
+                if (as == nullptr || !strata::kernels::cpu::ExpertPool::stats_on()) return -1.0;
+                std::vector<PSAPI_WORKING_SET_EX_INFORMATION> q;
+                q.reserve((size_t) (g.n_layers * g.n_expert * 3));
+                for (int64_t l = 0; l < g.n_layers; ++l)
+                    for (int64_t e = 0; e < g.n_expert; ++e) {
+                        const uint8_t* b = as->blob_at(l, e);
+                        if (b == nullptr) continue;
+                        for (const size_t off : {(size_t) 0, (size_t) 512 << 10, (size_t) 1 << 20}) {
+                            PSAPI_WORKING_SET_EX_INFORMATION w{};
+                            w.VirtualAddress = (void*) (b + off);
+                            q.push_back(w);
+                        }
+                    }
+                if (q.empty() || !K32QueryWorkingSetEx(GetCurrentProcess(), q.data(), (DWORD) (q.size() * sizeof q[0])))
+                    return -1.0;
+                size_t valid = 0;
+                for (const auto& w : q) valid += w.VirtualAttributes.Valid ? 1 : 0;
+                return (double) valid / (double) q.size();
+            };
+            const double aws0 = arena_ws_share();
+#endif
             std::array<int, 64> host_cpus{};   // where the host thread ran, sampled twice per window (the pool line)
             auto host_cpu_tick = [&]() {
 #if defined(_WIN32)
@@ -15773,6 +15815,65 @@ int main(int argc, char** argv) {
                             ts += b;
                         }
                         std::fprintf(stderr, "strata decode pool threads (tasks/us per task):%s\n", ts.c_str());
+                        // the row phases: where a phase's wall goes (arrival after the publish, the wait after a
+                        // thread's last task), phases a thread missed or found empty, task durations, CPU share
+                        const strata::kernels::cpu::ExpertPool::PhaseStat pph1 = pool.phase_stats();
+                        const double np = (double) std::max<int64_t>(1, pph1.phases - pph0.phases);
+                        std::string ps;
+                        int64_t hist[8] = {};
+                        for (size_t i = 0; i < pst1.size(); ++i) {
+                            const double ph = (double) std::max<int64_t>(1, pst1[i].phases - pst0[i].phases);
+                            char b[96];
+                            std::snprintf(b, sizeof b, " %s%zu:%.1f/%.1f/%lld/%lld", i + 1 == pst1.size() ? "h" : "w", i,
+                                          (pst1[i].arrive_ms - pst0[i].arrive_ms) * 1000.0 / ph,
+                                          (pst1[i].tail_ms - pst0[i].tail_ms) * 1000.0 / ph,
+                                          (long long) (pst1[i].missed - pst0[i].missed),
+                                          (long long) (pst1[i].empty - pst0[i].empty));
+                            ps += b;
+                            for (int k = 0; k < 8; ++k) hist[k] += pst1[i].hist[k] - pst0[i].hist[k];
+                        }
+                        std::fprintf(stderr, "strata decode pool phases: %lld, wall %.1f us, publish to last task %.1f us; "
+                                             "per thread arrive/tail us, missed, empty:%s; tasks <8/16/32/64/128/256/512/more us: "
+                                             "%lld %lld %lld %lld %lld %lld %lld %lld\n",
+                                     (long long) (pph1.phases - pph0.phases), (pph1.wall_ms - pph0.wall_ms) * 1000.0 / np,
+                                     (pph1.done_ms - pph0.done_ms) * 1000.0 / np, ps.c_str(), (long long) hist[0],
+                                     (long long) hist[1], (long long) hist[2], (long long) hist[3], (long long) hist[4],
+                                     (long long) hist[5], (long long) hist[6], (long long) hist[7]);
+                        const std::vector<uint64_t> pcyc1 = pool.thread_cycles();
+                        if (!pcyc0.empty() && pcyc1.size() == pcyc0.size()) {
+#if defined(_WIN32)
+                            // QueryThreadCycleTime counts TSC ticks, printed per second of wall time: a thread that never
+                            // left its core reaches the TSC rate (about 3,200 M/s on an i9-14900K), one that waited less
+                            const double wall_ms = std::chrono::duration<double, std::milli>(Clock::now() - pcyc_t0).count();
+                            std::string cs;
+                            for (size_t i = 0; i < pcyc1.size(); ++i) {
+                                char b[48];
+                                std::snprintf(b, sizeof b, " %s%zu:%.0f", i + 1 == pcyc1.size() ? "h" : "w", i,
+                                              (double) (pcyc1[i] - pcyc0[i]) / 1e3 / std::max(1e-9, wall_ms));
+                                cs += b;
+                            }
+                            std::fprintf(stderr, "strata decode pool thread cycles (M per s of wall):%s\n", cs.c_str());
+                            const std::vector<std::pair<double, double>> ptim1 = pool.thread_times();
+                            const std::vector<uint32_t> tid = pool.thread_ids();
+                            std::string ks;
+                            for (size_t i = 0; i < ptim1.size() && i < ptim0.size() && i < tid.size(); ++i) {
+                                char b[64];
+                                std::snprintf(b, sizeof b, " %s%zu[%u]:%.0f/%.0f", i + 1 == ptim1.size() ? "h" : "w", i, tid[i],
+                                              ptim1[i].first - ptim0[i].first, ptim1[i].second - ptim0[i].second);
+                                ks += b;
+                            }
+                            PROCESS_MEMORY_COUNTERS pmc1{};
+                            (void) K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc1, sizeof pmc1);
+                            SYSTEMTIME lt;
+                            GetLocalTime(&lt);
+                            std::fprintf(stderr, "strata decode pool thread kernel/user ms over %.0f ms:%s; process page faults %lu, "
+                                                 "working set %.2f GiB, private %.2f GiB; arena pages in the working set "
+                                                 "%.1f%% at the decode's start, %.1f%% at its end; at %02d:%02d:%02d\n",
+                                         wall_ms, ks.c_str(), (unsigned long) (pmc1.PageFaultCount - pmc0.PageFaultCount),
+                                         (double) pmc1.WorkingSetSize / 1073741824.0, (double) pmc1.PagefileUsage / 1073741824.0,
+                                         aws0 * 100.0, arena_ws_share() * 100.0, lt.wHour, lt.wMinute, lt.wSecond);
+#endif
+                        }
                     }
                 }
                 if (aov)

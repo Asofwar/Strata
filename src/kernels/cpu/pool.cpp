@@ -583,6 +583,10 @@ int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
         .count();
 }
+int64_t now_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 }  // namespace
 
 void ExpertPool::diag(std::FILE* f) const {
@@ -629,7 +633,10 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity af
     plan_logical_ = plan_in.logical;
     if (n_ < 1) n_ = 1;
     scratch_.resize((size_t) n_);
-    if (stats_on()) tstat_.reset(new ThreadStatSlot[(size_t) n_ + 1]);
+    if (stats_on()) {
+        tstat_.reset(new ThreadStatSlot[(size_t) n_ + 1]);
+        pslot_.reset(new PhaseSlot[(size_t) n_ + 1]);
+    }
     wstate_.reset(new std::atomic<int32_t>[(size_t) n_]);
     for (int i = 0; i < n_; ++i) wstate_[(size_t) i].store(kParked);
     hstate_ms_.store(now_ms());
@@ -818,8 +825,54 @@ std::vector<ExpertPool::ThreadStat> ExpertPool::thread_stats() const {
     return out;
 }
 
+std::vector<uint64_t> ExpertPool::thread_cycles() const {
+    std::vector<uint64_t> out;
+#if defined(_WIN32)
+    for (size_t i = 0; i < threads_.size(); ++i) {
+        ULONG64 c = 0;
+        if (!QueryThreadCycleTime((HANDLE) const_cast<std::thread&>(threads_[i]).native_handle(), &c)) return {};
+        out.push_back((uint64_t) c);
+    }
+    ULONG64 c = 0;
+    if (!QueryThreadCycleTime(GetCurrentThread(), &c)) return {};
+    out.push_back((uint64_t) c);
+#endif
+    return out;
+}
+
+std::vector<uint32_t> ExpertPool::thread_ids() const {
+    std::vector<uint32_t> out;
+#if defined(_WIN32)
+    for (size_t i = 0; i < threads_.size(); ++i)
+        out.push_back((uint32_t) GetThreadId((HANDLE) const_cast<std::thread&>(threads_[i]).native_handle()));
+    out.push_back((uint32_t) GetCurrentThreadId());
+#endif
+    return out;
+}
+
+std::vector<std::pair<double, double>> ExpertPool::thread_times() const {
+    std::vector<std::pair<double, double>> out;
+#if defined(_WIN32)
+    auto ms = [](const FILETIME& f) { return (double) (((uint64_t) f.dwHighDateTime << 32) | f.dwLowDateTime) / 1e4; };
+    for (size_t i = 0; i <= threads_.size(); ++i) {
+        FILETIME c, e, k, u;
+        const HANDLE h = i < threads_.size() ? (HANDLE) const_cast<std::thread&>(threads_[i]).native_handle() : GetCurrentThread();
+        if (!GetThreadTimes(h, &c, &e, &k, &u)) return {};
+        out.emplace_back(ms(k), ms(u));
+    }
+#endif
+    return out;
+}
+
 void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
     ThreadStat* const st = tstat_ ? &tstat_[(size_t) (id >= 0 ? id : n_)].s : nullptr;
+    PhaseSlot* const ps = pslot_ ? &pslot_[(size_t) (id >= 0 ? id : n_)] : nullptr;
+    if (ps != nullptr) {
+        ps->tasks.store(0, std::memory_order_relaxed);
+        ps->end.store(0, std::memory_order_relaxed);
+        ps->arr.store(now_ns(), std::memory_order_relaxed);
+        ps->seq.store(trace_seq_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    }
     for (;;) {
         const int ci = claim(epoch);
         if (ci < 0) break;
@@ -898,8 +951,16 @@ void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
             }
         }
         if (st != nullptr) {
+            const auto st1 = std::chrono::steady_clock::now();
+            const double us = std::chrono::duration<double, std::micro>(st1 - st0).count();
             ++st->tasks;
-            st->ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - st0).count();
+            st->ms += us / 1000.0;
+            int b = 0;
+            while (b < 7 && us >= (double) (8 << b)) ++b;
+            ++st->hist[b];
+            ps->end.store(std::chrono::duration_cast<std::chrono::nanoseconds>(st1.time_since_epoch()).count(),
+                          std::memory_order_relaxed);
+            ps->tasks.store(ps->tasks.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
         }
         done_.fetch_add(1, std::memory_order_release);
     }
@@ -909,12 +970,35 @@ void ExpertPool::run_phase(int mode, int n_tasks) {
     wait_parked("before a phase");
     mode_ = mode;
     njobs_ = n_tasks;
+    int64_t seq = 0;
+    if (pslot_) {   // STRATA_POOL_STATS: this phase's number and publish time, read by the threads that join it
+        seq = trace_seq_.load(std::memory_order_relaxed) + 1;
+        trace_seq_.store(seq, std::memory_order_relaxed);
+        trace_pub_ns_ = now_ns();
+    }
     const uint32_t e = begin_batch(n_tasks);
     if (host_works_) drain(-1, host_scratch_, e);
     wait_done(n_tasks);
+    const int64_t t_done = pslot_ ? now_ns() : 0;
     wait_parked("after a phase");
     hstate_.store(kIdle, std::memory_order_relaxed);
     hstate_ms_.store(now_ms(), std::memory_order_relaxed);
+    if (pslot_) {
+        const int64_t t_rep = now_ns();
+        ++pstat_.phases;
+        pstat_.wall_ms += (double) (t_rep - trace_pub_ns_) * 1e-6;
+        pstat_.done_ms += (double) (t_done - trace_pub_ns_) * 1e-6;
+        for (int i = 0; i <= n_; ++i) {
+            if (i == n_ && !host_works_) break;
+            const PhaseSlot& ps = pslot_[(size_t) i];
+            ThreadStat& st = tstat_[(size_t) i].s;
+            if (ps.seq.load(std::memory_order_relaxed) != seq) { ++st.missed; continue; }
+            ++st.phases;
+            st.arrive_ms += (double) (ps.arr.load(std::memory_order_relaxed) - trace_pub_ns_) * 1e-6;
+            if (ps.tasks.load(std::memory_order_relaxed) == 0) ++st.empty;
+            else st.tail_ms += (double) (t_done - ps.end.load(std::memory_order_relaxed)) * 1e-6;
+        }
+    }
 }
 
 void ExpertPool::run_split(ExpertJob* jobs, int n) {

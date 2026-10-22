@@ -41,6 +41,8 @@ inline std::atomic<bool>& arena_uma_no_register_flag() {
 /// True when the arena is to stay unregistered: STRATA_ARENA_PIN_GIB=none always, otherwise the flag above unless the user set
 /// STRATA_ARENA_PIN_GIB to a number (STRATA_ARENA_PIN_GIB=0 registers the whole arena as before).
 bool arena_no_register();
+/// STRATA_ARENA_WSLOCK=1 (Windows): lock the registered arena in the working set as well (see pinned.cu).
+bool arena_ws_lock();
 
 struct PinnedArena {
     void* base = nullptr;

@@ -450,7 +450,14 @@ The same switch adds a `strata decode pool:` line: the CPU expert pool's gate/up
 the GB/s it read over the rows phases, and the CPUs the host thread ran on (sampled twice per window, Windows).
 `STRATA_POOL_STATS=1` (a diagnostic, off by default) adds `strata decode pool threads`: for every worker and the host,
 the tasks it ran and its microseconds per task. Equal numbers on every thread with a low GB/s mean the pool waits
-between its phases, not that one core is slow. None of these lines changes what the engine computes.
+between its phases, not that one core is slow. With it come three more lines. `strata decode pool phases` gives the
+row phases' wall time and, per thread, the microseconds from the publish to its arrival, the wait from its last task
+to the phase's last task, the phases it missed and the phases it found empty, and the tasks by duration.
+`strata decode pool thread cycles` gives the CPU cycles each thread got per second of wall time
+(QueryThreadCycleTime): about 3,150 M on this i9-14900K when a thread is never off its core. The last line gives
+each thread's kernel and user milliseconds, the process's page faults and working set over the decode, the share of
+the expert arena's pages in the working set at the decode's start and end, and the time of day. None of these lines
+changes what the engine computes.
 
 A `strata decode commit/emit (ms/window):` line splits the timing line's commit/emit part: starting the adaptive
 tier's thread, the commit and its checks, formatting the window's `T` lines and writing them. The engine's stdout is
@@ -492,12 +499,57 @@ the PCIe share at 0.1 and 0.2 (it moved at most 0.17 experts per layer to the li
 and `--adapt-decay 0.90` (hit rate and CPU time within the control's spread). `--max-context 196608` gives the cache
 513 more slots but refuses a 200K prompt; `--kv-grow` gives more slots without losing context.
 
-Not solved: in about half the requests the pool read only 13-25 GB/s with the same work. Every thread ran its tasks
-at the same speed (`STRATA_POOL_STATS`), but the threads sat idle 30-50% of each pool phase instead of about 10%;
-a request kept its speed until the next long prompt (85K new tokens) and two starts repeated the same pattern. It was
-not other programs (no other process used more than 2.3 cores then), not the workers sleeping (0 sleeps), not the
-host thread moving (always CPU 0), not Windows power throttling, process priority, a fuller VRAM or the CPU clock
-(P-cores at 5.3-5.4 GHz throughout). Compare such runs by medians over several starts, not by one request.
+In about half the requests the pool then read only 13-25 GB/s with the same work. Every thread ran its tasks at the
+same speed (`STRATA_POOL_STATS`), but the threads sat idle 30-50% of each pool phase instead of about 10%; a request
+kept its speed until the next long prompt (85K new tokens). It was not other programs, the workers sleeping, the host
+thread moving, Windows power throttling, process priority, a fuller VRAM or the CPU clock. The cause is below.
+
+**Why the CPU pool slowed down after a long prompt (found 2026-10-22):** Windows took the expert arena out of the
+engine's working set. `cudaHostRegister` keeps the arena's pages in RAM, because the GPU copies from them, but it does
+not keep them in the working set. When RAM runs short, Windows still trims them. That frees no memory, since the
+pages stay locked for the GPU. But every 4 KB page of an expert the pool reads next is then a page fault, about 400
+per expert, taken by 8 threads at once. The PC these numbers come from had 48 GB of RAM and 1-4 GB of it available
+(a WSL and a QEMU virtual machine, browsers, 18-38 GB in the page file). A long prompt is when RAM runs shortest: the
+conversation cache copies the outgoing conversation into ordinary memory (2 GB at 130K tokens) and the K/V grows.
+Measured with the new `STRATA_POOL_STATS` lines (RTX 5080, i9-14900K, Cyber-Tiel-Coder UD-IQ4_XS, the server's
+settings with `STRATA_IQ3S_MT1=1` and `--kv-grow`, `--serve` with 2K, then 130K and 200K in turn, 192 tokens each):
+
+- In a run under such pressure (the PC paged in up to 170,000 pages a second) the engine's working set fell
+  from 17.4 to 9.2 GiB, while the arena alone is 14.1 GiB. The last three requests then took 20,000-247,000 page
+  faults each, against 530-720 before, and the pool read 25-33 GB/s, against 33-43 GB/s earlier in that run.
+- `STRATA_TEST_TRIM_WS=1` (a test switch) empties the engine's working set before every decode, as Windows does when RAM
+  runs short. It gives the same slow mode every time: 0.92-1.35 million page faults per request, none of the arena in
+  the working set at the decode's start and 24-36% at its end, every thread at the same speed but a tenth to a quarter
+  of each 76-146 us pool phase spent waiting for the slowest one, and 18-23 GB/s.
+
+`STRATA_ARENA_WSLOCK=1` (opt-in, Windows) locks the registered arena in the working set as well: it raises the
+working-set minimum and calls `VirtualLock`. The start-up line then says `expert arena: locked 14463 MiB via
+working-set minimum + VirtualLock`. It costs no RAM, because the pages were locked in RAM already. With it the arena
+stayed 100% in the working set in every request, also under `STRATA_TEST_TRIM_WS=1`. Same settings and requests as
+above, each pair of arms in one stop of the server, in the order control, lock, lock, control. Medians of the 6
+requests at 130K and the 8 at 200K after the first long prompt (15K new tokens at 130K, 85K at 200K; in the first
+control run with the working set emptied, 114K at 130K and three of the 200K requests only 3K, because the
+conversation cache kept more):
+
+| | 130K tok/s | 200K tok/s | ms per window, 130K / 200K | CPU ms per window | pool GB/s | page faults per request |
+|---|---|---|---|---|---|---|
+| working set emptied before each decode, control | 124.7 | 129.6 | 13.25 / 16.06 | 4.02 / 5.26 | 19.8 / 20.2 | 0.96-1.35 million |
+| working set emptied before each decode, `STRATA_ARENA_WSLOCK=1` | 161.2 | 166.9 | 10.84 / 13.25 | 1.75 / 2.38 | 53.1 / 53.5 | 7,600-16,000 |
+| no RAM pressure that hour, control | 174.6 | 177.7 | 10.91 / 13.10 | 1.77 / 2.38 | 49.2 / 48.0 | 350-800 |
+| no RAM pressure that hour, `STRATA_ARENA_WSLOCK=1` | 155.9 | 168.6 | 10.59 / 12.81 | 1.49 / 2.08 | 52.2 / 52.4 | 530-840 |
+
+The tokens per second also depend on how many drafted tokens a window keeps, which changed from run to run here
+(1.60-2.33 tokens per window at the same context), so the time per window is the fairer comparison: with the lock it
+was the same or shorter in every case. Without RAM pressure (the arena stayed in the working set in the control too)
+the lock changed nothing beyond that noise. `STRATA_TEST_TRIM_WS` stays a test switch: it trims the whole engine, not
+only the arena.
+
+Not fixed by the lock: when RAM is this short, other waits grow too. The worst request seen (another run, before the
+working-set numbers existed) read 3.5 GB/s and decoded 31.7 tok/s at 200K. Its conversation restore took 968 ms
+instead of 142-217, its GPU-reach wait doubled, and its pool threads got only 33-59% of their CPU cycles because the
+workers fell asleep between layers while the host thread waited. Free RAM on the PC, or a smaller
+`--conversation-cache-mib`, helps there; the lock alone was not measured on such a request. Compare runs by medians
+over several starts, not by one request.
 
 **How good the next-layer expert prediction is (measurement only):** `STRATA_LOOKAHEAD_STATS=1` runs the router look-ahead on any expert tier and
 scores it against the routing of the next layer: every 100 windows the engine log has a `strata lookahead stats:` line with the experts per layer
