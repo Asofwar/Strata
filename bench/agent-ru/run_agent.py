@@ -310,8 +310,8 @@ def run_one(a, t, run_idx, tok, sandbox_root: Path):
     while stats["turns"] < a.max_turns:
         body = {"model": "strata", "messages": messages, "tools": TOOLS, "max_tokens": a.max_tokens,
                 "stream": False, "seed": run_idx + 1}
-        if a.reasoning_effort:
-            body["reasoning_effort"] = a.reasoning_effort
+        if a.reasoning_effort is not None:
+            body["reasoning_effort"] = a.reasoning_effort     # False: thinking off
         if a.reasoning_budget is not None:
             body["reasoning_budget_tokens"] = a.reasoning_budget
         if a.preserve_thinking != "default":
