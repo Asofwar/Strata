@@ -7,13 +7,57 @@
 
 <p align="center"><b>English</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português</a> · <a href="README.ru.md">Русский</a></p>
 
-> **This is Asofwar's fork of [Niko1221/Strata](https://github.com/Niko1221/Strata)**, for coding agents with long
-> contexts on a 16 GB card. Qwen3.6 / Ornith / Cyber-Tiel run on the main engine from a pack (up to 262K context, int8
-> KV, MTP drafts), and setup turns on the fork's long-context kernels for them: on an RTX 5080 Cyber-Tiel UD-IQ4_XS
-> reads a 200K prompt in 49.4 s and writes 161-171 tokens/s at 200K. Also: conversations parked on NVMe, a reasoning
-> loop recovery for agents, a deterministic mode, and Russian quality and agent benchmarks. Overview, measurements and
-> the recommended config: [docs/FORK.ru.md](docs/FORK.ru.md) (Russian); the kernels:
-> [docs/DETAILS.md](docs/DETAILS.md#long-contexts-on-the-pack-path-qwen36--ornith--cyber-tiel-this-fork-opt-in).
+<h2 align="center">Asofwar's fork: coding agents with 262K context on a 16 GB card</h2>
+
+<p align="center">
+  <a href="https://github.com/Asofwar/Strata/releases/latest"><img src="https://img.shields.io/github/v/release/Asofwar/Strata?label=fork%20release" alt="Fork release"></a>
+  <a href="https://github.com/Niko1221/Strata"><img src="https://img.shields.io/badge/upstream-Niko1221%2FStrata-blue" alt="Upstream: Niko1221/Strata"></a>
+  <a href="docs/FORK.ru.md"><img src="https://img.shields.io/badge/docs-FORK.ru.md-2ea44f" alt="Fork docs"></a>
+</p>
+
+This fork of [Niko1221/Strata](https://github.com/Niko1221/Strata) runs the Qwen3.6-35B-A3B models Cyber-Tiel-Coder
+and Ornith on Strata's main engine from a pack: int8 K/V (11 KiB per token instead of 44), MTP drafts and the fork's
+own long-context kernels, so a coding agent gets up to 262K of context on one 16 GB card.
+
+Measured on an RTX 5080 16 GB, i9-14900K, 48 GB DDR5, Windows 11, Cyber-Tiel-Coder UD-IQ4_XS with the settings setup
+writes (2026-10-21/22):
+
+| Context | Reading the prompt from scratch | Writing |
+| ---: | ---: | ---: |
+| 130K | 25.7 s | 146-167 tokens/s |
+| 200K | 49.4 s | 161-171 tokens/s |
+
+**What the fork adds**
+
+- **Long-context speed:** decode attention per verify window, INT8 prompt attention, a kernel for short windows, the
+  Q6_K experts on MMQ and the expert arena locked in RAM. Each is opt-in; setup turns them on for the fork's models.
+- **Conversations on NVMe:** going back to a ~123K conversation after another one takes 2.4-2.6 s instead of 33-34 s.
+- **For agents:** reasoning-loop recovery, `ban_scripts` (no Chinese or Korean tokens inside a Russian answer),
+  grammar-constrained tool calls (opt-in) and a deterministic mode for A/B runs.
+- **Benchmarks:** `bench/eval-ru` (short tasks, Russian prompts) and `bench/agent-ru` (20 multi-turn coding tasks:
+  Cyber-Tiel 53 of 60, Ornith 55 of 60).
+
+### Install the fork
+
+Windows, NVIDIA RTX 20 or newer, driver 580 or newer:
+
+1. Download `Strata-asofwar-<version>-windows-cuda13.zip` from the
+   [fork's latest release](https://github.com/Asofwar/Strata/releases/latest) and unzip it into a folder without
+   spaces in its path. It holds the fork's code and a ready engine.
+2. Run `START-HERE.bat --setup --family cyber-tiel` (or `--family ornith-abl`). Add `--draft-vocab cyrillic` if you
+   chat in Russian.
+
+A clone works the same way and `UPDATE.bat` updates it. On Linux use `./setup.sh` with the same options (the fork has
+not tested Linux). Don't use `strata update` or the upstream installers below for these models: they install
+upstream's engine, which has no pack path for them.
+
+**Read more:** [docs/FORK.ru.md](docs/FORK.ru.md) (overview, every measurement, the recommended config; Russian) ·
+[the kernels](docs/DETAILS.md#long-contexts-on-the-pack-path-qwen36--ornith--cyber-tiel-this-fork-opt-in) ·
+[EVAL.ru.md](docs/EVAL.ru.md) · [AGENT-EVAL.ru.md](docs/AGENT-EVAL.ru.md)
+
+<p align="center"><sub>Everything below is upstream Strata's README.</sub></p>
+
+---
 
 <h3 align="center">Run a state-of-the-art model on your own gaming PC</h3>
 
@@ -70,6 +114,8 @@ Two or three cards of the same make can share a model ([multi-GPU](docs/MULTI_GP
 NVIDIA and AMD cards. Full list: [docs/INSTALL.md](docs/INSTALL.md#what-you-need).
 
 ## Install
+
+> These are upstream Strata's builds, without this fork's changes. For Cyber-Tiel and Ornith with the fork's settings see [Install the fork](#install-the-fork).
 
 Pick one option. They all start the same engine and use the same models.
 

@@ -7,13 +7,58 @@
 
 <p align="center"><a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português</a> · <b>Русский</b></p>
 
-> **Это форк Asofwar от [Niko1221/Strata](https://github.com/Niko1221/Strata)** для агентов с кодом и длинным
-> контекстом на карте 16 GB. Модели Qwen3.6 / Ornith / Cyber-Tiel работают на основном движке из пака (контекст до
-> 262K, int8 KV, MTP-черновики), а setup включает для них ядра форка для длинного контекста: на RTX 5080 Cyber-Tiel
-> UD-IQ4_XS читает промпт 200K за 49.4 с и пишет 161–171 токен/с при 200K. Ещё: разговоры на NVMe, выход из
-> зацикленного рассуждения у агентов, детерминированный режим, проверки качества на русском и агентных задачах.
-> Что добавлено, замеры, рекомендуемый конфиг и установка: [docs/FORK.ru.md](docs/FORK.ru.md); проверки качества:
-> [docs/EVAL.ru.md](docs/EVAL.ru.md) и [docs/AGENT-EVAL.ru.md](docs/AGENT-EVAL.ru.md). Ниже перевод README upstream.
+<h2 align="center">Форк Asofwar: агенты для кода с контекстом 262K на карте 16 GB</h2>
+
+<p align="center">
+  <a href="https://github.com/Asofwar/Strata/releases/latest"><img src="https://img.shields.io/github/v/release/Asofwar/Strata?label=%D1%80%D0%B5%D0%BB%D0%B8%D0%B7%20%D1%84%D0%BE%D1%80%D0%BA%D0%B0" alt="Релиз форка"></a>
+  <a href="https://github.com/Niko1221/Strata"><img src="https://img.shields.io/badge/upstream-Niko1221%2FStrata-blue" alt="Upstream: Niko1221/Strata"></a>
+  <a href="docs/FORK.ru.md"><img src="https://img.shields.io/badge/docs-FORK.ru.md-2ea44f" alt="Документация форка"></a>
+</p>
+
+Этот форк [Niko1221/Strata](https://github.com/Niko1221/Strata) запускает модели Qwen3.6-35B-A3B Cyber-Tiel-Coder и
+Ornith на основном движке Strata из пака: int8 K/V (11 KiB на токен вместо 44), MTP-черновики и собственные ядра форка
+для длинного контекста. Агент для кода получает до 262K контекста на одной карте 16 GB.
+
+Замеры: RTX 5080 16 GB, i9-14900K, 48 GB DDR5, Windows 11, Cyber-Tiel-Coder UD-IQ4_XS с настройками, которые пишет
+setup (2026-10-21/22):
+
+| Контекст | Чтение промпта с нуля | Генерация |
+| ---: | ---: | ---: |
+| 130K | 25.7 с | 146–167 ток/с |
+| 200K | 49.4 с | 161–171 ток/с |
+
+**Что добавляет форк**
+
+- **Скорость на длинном контексте:** внимание окна проверки при генерации, INT8-внимание при чтении промпта, ядро для
+  коротких окон, эксперты Q6_K через MMQ и закреплённая в RAM арена экспертов. Всё включается флагами; для моделей
+  форка setup включает их сам.
+- **Разговоры на NVMe:** возврат к разговору на ~123K токенов после другого такого же — 2.4–2.6 с вместо 33–34 с.
+- **Для агентов:** выход из зацикленного рассуждения, `ban_scripts` (без китайских и корейских токенов в русском
+  ответе), грамматика для вызовов инструментов (по флагу) и детерминированный режим для A/B-замеров.
+- **Бенчмарки:** `bench/eval-ru` (короткие задачи на русском) и `bench/agent-ru` (20 многошаговых задач с кодом:
+  Cyber-Tiel 53 из 60, Ornith 55 из 60).
+
+### Установка форка
+
+Windows, NVIDIA RTX 20 и новее, драйвер 580 и новее:
+
+1. Скачайте `Strata-asofwar-<версия>-windows-cuda13.zip` из
+   [последнего релиза форка](https://github.com/Asofwar/Strata/releases/latest) и распакуйте в папку без пробелов в
+   пути. В архиве код форка и готовый движок.
+2. Запустите `START-HERE.bat --setup --family cyber-tiel` (или `--family ornith-abl`). Если общаетесь на русском,
+   добавьте `--draft-vocab cyrillic`.
+
+Клон репозитория ставится так же, обновляется через `UPDATE.bat`. На Linux — `./setup.sh` с теми же ключами (форк
+Linux не проверял). Не используйте для этих моделей `strata update` и установщики upstream ниже: они ставят движок
+upstream, в котором нет пути `--pack` для этих моделей.
+
+**Подробнее:** [docs/FORK.ru.md](docs/FORK.ru.md) (обзор, все замеры, рекомендуемый конфиг) ·
+[ядра](docs/DETAILS.md#long-contexts-on-the-pack-path-qwen36--ornith--cyber-tiel-this-fork-opt-in) (на английском) ·
+[EVAL.ru.md](docs/EVAL.ru.md) · [AGENT-EVAL.ru.md](docs/AGENT-EVAL.ru.md)
+
+<p align="center"><sub>Ниже — перевод README upstream.</sub></p>
+
+---
 
 <h3 align="center">Современная большая модель на вашем игровом ПК</h3>
 
@@ -73,6 +118,8 @@ Strata запускает **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwe
 (на английском).
 
 ## Установка
+
+> Это сборки upstream Strata, без изменений форка. Для Cyber-Tiel и Ornith с настройками форка см. [Установка форка](#установка-форка).
 
 Выберите один вариант. Все они запускают один и тот же движок и одни и те же модели.
 
