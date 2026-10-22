@@ -151,7 +151,7 @@ class InstallPack(unittest.TestCase):
         self.assertEqual(self.cfg["env"]["STRATA_PROMPT_ATTN_FP16ACC"], "2")
         self.assertEqual(self.cfg["reasoning_loop_recovery"], "resample")
         self.assertIs(self.cfg["reasoning_close_retry"], True)
-        self.assertEqual(self.cfg["env"]["STRATA_PROMPT_ATTN_DENSE_IMMA"], "3")
+        self.assertEqual(self.cfg["env"]["STRATA_PROMPT_ATTN_DENSE_IMMA"], "4")
         self.assertEqual(self.cfg["env"]["STRATA_ATTN_WINDOW_SMALL"], "1")
         self.assertEqual(self.cfg["sampling"], {"temperature": 0.6, "presence_penalty": 0})
 
