@@ -5,7 +5,7 @@ set up Strata on their PC. Strata runs a large mixture-of-experts model locally 
 system RAM, and serves an OpenAI- and Anthropic-compatible API on `http://127.0.0.1:8080`. The human-oriented version of
 everything below is [INSTALL.md](INSTALL.md).
 
-This is **Asofwar's fork** of Strata, and everything is installed from the fork: https://github.com/Asofwar/Strata. The
+This is **Asofwar's fork** of Strata, and everything is installed from the fork: https://github.com/Asofwar/Strata-Turbo. The
 fork's releases carry a ready engine for **Windows with an NVIDIA RTX 20 series card or newer (driver 580 or newer)**. On
 any other system the engine is built from source, which the fork has not tested (Linux, Mac, AMD, Intel). The fork does not
 ship the desktop app installers, the Terminal's installer or its signed update feed, so **do not use `strata launch` or
@@ -64,22 +64,22 @@ If the PC does not meet them, say which part is missing and stop.
 
 ## 2. Get the fork
 
-Clone it (or, without git, download https://github.com/Asofwar/Strata/archive/refs/heads/main.zip and unzip it):
+Clone it (or, without git, download https://github.com/Asofwar/Strata-Turbo/archive/refs/heads/main.zip and unzip it):
 
 ```
-git clone https://github.com/Asofwar/Strata.git
+git clone https://github.com/Asofwar/Strata-Turbo.git
 ```
 
 Pick a drive with enough free space and a folder without spaces in its path. The model files go to a `Strata-data` folder
 next to the Strata folder (or to `--data-dir <path>`, for example on another drive).
 
 - **Windows with an NVIDIA RTX 20 series card or newer:** setup downloads the ready engine (`strata-windows-x64.zip`)
-  from the fork's [latest release](https://github.com/Asofwar/Strata/releases/latest) and checks its SHA-256, so nothing
+  from the fork's [latest release](https://github.com/Asofwar/Strata-Turbo/releases/latest) and checks its SHA-256, so nothing
   is compiled. The release also has `Strata-Turbo-<version>-windows-cuda13.zip`, the fork's code and that engine in one
   zip; unzip it instead of cloning if you prefer.
 - **Linux, Mac, AMD, Intel:** setup builds the engine from source on the PC. The fork has not tested these.
-- The one-line installers (`irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex`,
-  `curl -fsSL https://github.com/Asofwar/Strata/releases/latest/download/install.sh | sh`) get the same files and run
+- The one-line installers (`irm https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.ps1 | iex`,
+  `curl -fsSL https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.sh | sh`) get the same files and run
   `START-HERE.bat` or `./setup.sh`, which ask their questions in the window. You cannot answer those, so use the commands
   in step 4 with flags.
 
@@ -233,7 +233,7 @@ With an API key, add `-H "Authorization: Bearer <key>"`.
 
 More: [TROUBLESHOOTING.md](TROUBLESHOOTING.md) and the [full table](DETAILS.md#troubleshooting). If it still fails,
 collect the output of `START-HERE.bat --check` and the engine log named in the error message, and suggest an issue at
-https://github.com/Asofwar/Strata/issues.
+https://github.com/Asofwar/Strata-Turbo/issues.
 
 ## Alternative: the MCP server
 

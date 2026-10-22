@@ -14,8 +14,8 @@
 <p align="center"><a href="https://github.com/Niko1221/Strata">Strata</a> の Asofwar 版フォーク · Windows + NVIDIA · 無料のオープンソース</p>
 
 <p align="center">
-  <a href="https://github.com/Asofwar/Strata/releases/latest"><img src="https://img.shields.io/github/v/release/Asofwar/Strata?label=%E3%83%AA%E3%83%AA%E3%83%BC%E3%82%B9" alt="リリース"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Asofwar/Strata" alt="MIT ライセンス"></a>
+  <a href="https://github.com/Asofwar/Strata-Turbo/releases/latest"><img src="https://img.shields.io/github/v/release/Asofwar/Strata-Turbo?label=%E3%83%AA%E3%83%AA%E3%83%BC%E3%82%B9" alt="リリース"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Asofwar/Strata-Turbo" alt="MIT ライセンス"></a>
   <a href="docs/FORK.ru.md"><img src="https://img.shields.io/badge/docs-FORK.ru.md-2ea44f" alt="フォークのドキュメント"></a>
   <a href="#支援のお願い"><img src="https://img.shields.io/badge/%E5%AF%84%E4%BB%98-Gram%20(TON)-0098EA" alt="Gram (TON)"></a>
 </p>
@@ -42,10 +42,10 @@ RTX 5080 16 GB、i9-14900K、48 GB DDR5、Windows 11、Cyber-Tiel-Coder UD-IQ4_X
 **Windows**、NVIDIA RTX 20 以降（ドライバー 580 以上）、PowerShell で：
 
 ```powershell
-irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
+irm https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.ps1 | iex
 ```
 
-スクリプトは[最新リリース](https://github.com/Asofwar/Strata/releases/latest)をダウンロードし、`SHA256SUMS.txt` と照合して
+スクリプトは[最新リリース](https://github.com/Asofwar/Strata-Turbo/releases/latest)をダウンロードし、`SHA256SUMS.txt` と照合して
 `%LOCALAPPDATA%\Strata-Turbo` に展開し、setup を起動します。setup はモデルを尋ねてダウンロードします（Cyber-Tiel：約 17 GB）。
 手動の場合は、`Strata-Turbo-<version>-windows-cuda13.zip` をスペースを含まないフォルダーに展開し、
 `START-HERE.bat --setup --family cyber-tiel` を実行してください。
@@ -53,11 +53,11 @@ irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
 **Linux**（フォークでは未検証。エンジンはソースからビルドします）：
 
 ```sh
-curl -fsSL https://github.com/Asofwar/Strata/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.sh | sh
 ```
 
 **コーディングアシスタントに任せる場合：** 次の 1 行を貼り付けてください。
-`Set up Strata on this PC for me: https://github.com/Asofwar/Strata - follow docs/AI_SETUP.md in that repository.`
+`Set up Strata on this PC for me: https://github.com/Asofwar/Strata-Turbo - follow docs/AI_SETUP.md in that repository.`
 
 次回以降の起動は `START-HERE.bat` です。更新は同じワンライナーをもう一度実行します（クローンでは `UPDATE.bat`）。
 `strata update` は使わないでください。このフォークは署名付きフィードを公開していません。全オプション、他のハードウェア、
@@ -88,7 +88,7 @@ curl -fsSL https://github.com/Asofwar/Strata/releases/latest/download/install.sh
 
 - [docs/FORK.ru.md](docs/FORK.ru.md)：フォークの追加内容、すべての計測値、推奨設定（ロシア語）
 - [docs/INSTALL.md](docs/INSTALL.md)：インストールのオプション、AMD / Intel / Mac / 複数カード（upstream の手順で、フォークでは未検証）、設定
-- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)：うまくいかないとき。バグは [issues](https://github.com/Asofwar/Strata/issues) へ
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)：うまくいかないとき。バグは [issues](https://github.com/Asofwar/Strata-Turbo/issues) へ
 - [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md)：大規模モデルが PC に収まる仕組み。各部分と数値の詳細は [DETAILS.md](docs/DETAILS.md)、[論文](docs/paper/Strata-Paper.pdf)
 - [CONTRIBUTING.md](CONTRIBUTING.md)、[SECURITY.md](SECURITY.md)
 

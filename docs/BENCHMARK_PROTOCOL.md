@@ -439,7 +439,7 @@ the draft protocol ID. Existing reports remain welcome under the [community guid
 3. The report states the protocol/status, hardware, model/quant, commit/configuration, actual duration, counts,
    per-case performance, passed/12 sanity score, failures, and limitations. Link raw evidence. Use `not measured`
    in prose and null with a reason in JSON. Do not paste hypothetical performance numbers into examples.
-4. Open a results-only PR against `Asofwar/Strata:main`. Suggested title:
+4. Open a results-only PR against `Asofwar/Strata-Turbo:main`. Suggested title:
    `benchmark: <GPU> / <model> / <quant> / <protocol-id>`. The body links the report, names required versus optional
    stages, and states any failed, skipped, missing, or nonconforming measurements. Keep engine changes separate.
 5. Maintainers check the exact revision, profile and corpus, artifact hashes, counts, formulas, scores, logs,

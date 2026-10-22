@@ -44,8 +44,8 @@ Like any download, each connection below shows the other side your IP address an
 | --- | --- | --- |
 | Model files, the picture reader, the speed-up layer (MTP) | huggingface.co, or the mirror in `HF_ENDPOINT` if you set one | When you install a model |
 | The same files from ModelScope, for PCs that cannot reach Hugging Face | modelscope.cn | Only if you ask for it (`--source modelscope`). Strata never switches to it by itself |
-| The engine zip (`strata-windows-x64.zip`) and its SHA-256 | GitHub Releases of Asofwar/Strata, and api.github.com for the checksum | When `START-HERE.bat` (`setup.py`) finds no engine in the folder, or an outdated one |
-| Engine, Terminal and Control updates (upstream's signed feed) | The signed feed on GitHub Releases of Asofwar/Strata. The fork publishes none, so this finds nothing and changes nothing | When you install an engine, press **Update engine** or **Check for updates**, or run `strata update`. Opening **Settings, Engine** does not connect: it shows the result of your last check |
+| The engine zip (`strata-windows-x64.zip`) and its SHA-256 | GitHub Releases of Asofwar/Strata-Turbo, and api.github.com for the checksum | When `START-HERE.bat` (`setup.py`) finds no engine in the folder, or an outdated one |
+| Engine, Terminal and Control updates (upstream's signed feed) | The signed feed on GitHub Releases of Asofwar/Strata-Turbo. The fork publishes none, so this finds nothing and changes nothing | When you install an engine, press **Update engine** or **Check for updates**, or run `strata update`. Opening **Settings, Engine** does not connect: it shows the result of your last check |
 | App updates (upstream's app) | `latest.json` on the same GitHub Releases, through Tauri's updater. The fork publishes none | When you press **Check for updates** or **Update Strata** |
 | llama.cpp source code (a fixed commit) | github.com/ggml-org/llama.cpp | During a model install, if it is not on your PC yet. Strata uses only its model-preparation scripts |
 | Web search and web pages | DuckDuckGo, with Bing as the second source; or Exa, Perplexity or DeepSeek if you save a key for them. Any page the agent is asked to open goes to that page's site | When the agent uses its search or "open web pages" tool. In Manual mode it asks you first, once per chat |
@@ -138,7 +138,7 @@ check off, and it is never on by default.
 
 **The one-line install** (`curl ... | sh`, `irm ... | iex`) downloads the fork's release zip (Windows) or its source (Linux).
 The Windows script checks the zip against the release's `SHA256SUMS.txt`, which comes from the same release, so the install
-trusts HTTPS and the `Asofwar/Strata` release itself. The fork publishes no signed feed. What that means, and how to read
+trusts HTTPS and the `Asofwar/Strata-Turbo` release itself. The fork publishes no signed feed. What that means, and how to read
 the script first, is in [SECURITY.md](../SECURITY.md#how-far-to-trust-curl--sh-and-irm--iex).
 
 **Code signing.** The Windows installer is not code-signed yet, so Windows shows "Windows protected your PC". The signing and
@@ -183,12 +183,12 @@ The agent runs on a loopback address with a random token, so other programs on t
 
 ## Open source and reporting a problem
 
-Strata is MIT-licensed and the whole code of this fork is at [github.com/Asofwar/Strata](https://github.com/Asofwar/Strata)
+Strata is MIT-licensed and the whole code of this fork is at [github.com/Asofwar/Strata-Turbo](https://github.com/Asofwar/Strata-Turbo)
 (it is a fork of [Niko1221/Strata](https://github.com/Niko1221/Strata)). Read it, build it and compare. Strata has not had an outside security audit yet.
 
 To report a security problem, use GitHub's private reporting (the repository's **Security** tab), as described in
 [SECURITY.md](../SECURITY.md). Ordinary questions and ideas can go to an
-[issue](https://github.com/Asofwar/Strata/issues).
+[issue](https://github.com/Asofwar/Strata-Turbo/issues).
 
 ## Where to check this in the code
 

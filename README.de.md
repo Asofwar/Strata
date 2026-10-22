@@ -14,8 +14,8 @@
 <p align="center">Asofwars Fork von <a href="https://github.com/Niko1221/Strata">Strata</a> · Windows + NVIDIA · kostenlos und Open Source</p>
 
 <p align="center">
-  <a href="https://github.com/Asofwar/Strata/releases/latest"><img src="https://img.shields.io/github/v/release/Asofwar/Strata?label=release" alt="Release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Asofwar/Strata" alt="MIT-Lizenz"></a>
+  <a href="https://github.com/Asofwar/Strata-Turbo/releases/latest"><img src="https://img.shields.io/github/v/release/Asofwar/Strata-Turbo?label=release" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Asofwar/Strata-Turbo" alt="MIT-Lizenz"></a>
   <a href="docs/FORK.ru.md"><img src="https://img.shields.io/badge/docs-FORK.ru.md-2ea44f" alt="Fork-Dokumentation"></a>
   <a href="#unterstützung"><img src="https://img.shields.io/badge/Spenden-Gram%20(TON)-0098EA" alt="Gram (TON)"></a>
 </p>
@@ -44,10 +44,10 @@ Alle Messungen: [docs/FORK.ru.md](docs/FORK.ru.md).
 **Windows**, NVIDIA RTX 20 oder neuer (Treiber 580+), in PowerShell:
 
 ```powershell
-irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
+irm https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.ps1 | iex
 ```
 
-Das Skript lädt das [neueste Release](https://github.com/Asofwar/Strata/releases/latest) herunter, prüft es gegen
+Das Skript lädt das [neueste Release](https://github.com/Asofwar/Strata-Turbo/releases/latest) herunter, prüft es gegen
 `SHA256SUMS.txt`, entpackt es nach `%LOCALAPPDATA%\Strata-Turbo` und startet das Setup, das nach dem Modell fragt und es
 herunterlädt (Cyber-Tiel: etwa 17 GB). Von Hand: `Strata-Turbo-<version>-windows-cuda13.zip` in einen Ordner ohne
 Leerzeichen entpacken und `START-HERE.bat --setup --family cyber-tiel` ausführen.
@@ -55,11 +55,11 @@ Leerzeichen entpacken und `START-HERE.bat --setup --family cyber-tiel` ausführe
 **Linux** (vom Fork nicht getestet; die Engine wird aus dem Quellcode gebaut):
 
 ```sh
-curl -fsSL https://github.com/Asofwar/Strata/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.sh | sh
 ```
 
 **Vom Coding-Assistenten erledigen lassen:** einfach einfügen
-`Set up Strata on this PC for me: https://github.com/Asofwar/Strata - follow docs/AI_SETUP.md in that repository.`
+`Set up Strata on this PC for me: https://github.com/Asofwar/Strata-Turbo - follow docs/AI_SETUP.md in that repository.`
 
 Neu starten: `START-HERE.bat`. Aktualisieren: den Einzeiler noch einmal ausführen (oder `UPDATE.bat` in einem Klon).
 `strata update` nicht verwenden: Der Fork veröffentlicht keinen signierten Feed. Alle Optionen, andere Hardware und
@@ -90,7 +90,7 @@ Der Server lauscht nur auf `127.0.0.1`. Vor dem Öffnen für ein Netzwerk einen 
 
 - [docs/FORK.ru.md](docs/FORK.ru.md) - was der Fork ergänzt, alle Messungen, die empfohlene Konfiguration (auf Russisch)
 - [docs/INSTALL.md](docs/INSTALL.md) - Installationsoptionen, AMD / Intel / Mac / mehrere Karten (Upstream-Pfade, vom Fork nicht getestet), Einstellungen
-- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) - wenn etwas schiefgeht; Fehler gehören in die [Issues](https://github.com/Asofwar/Strata/issues)
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) - wenn etwas schiefgeht; Fehler gehören in die [Issues](https://github.com/Asofwar/Strata-Turbo/issues)
 - [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) - wie ein großes Modell auf einen PC passt; jeder Teil und jede Zahl: [DETAILS.md](docs/DETAILS.md), [das Paper](docs/paper/Strata-Paper.pdf)
 - [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md)
 

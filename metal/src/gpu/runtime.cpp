@@ -614,7 +614,7 @@ Error dispatch(Stream st, MTL::ComputePipelineState* p, const void* args, size_t
                          "strata metal: the kernel %s can run at most %lu threads per threadgroup on this GPU (%s), but the "
                          "launch asks for %lu.\nMetal skips such a dispatch without any error, so every answer would be "
                          "wrong; stopping here instead.  Please report this (the GPU, macOS version and this line) at "
-                         "https://github.com/Asofwar/Strata/issues .  (#2323)\n",
+                         "https://github.com/Asofwar/Strata-Turbo/issues .  (#2323)\n",
                          name.c_str(), (unsigned long) p->maxTotalThreadsPerThreadgroup(),
                          r.dev->name()->utf8String(), (unsigned long) want);
             std::fflush(stderr);

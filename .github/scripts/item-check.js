@@ -175,7 +175,7 @@ function checklist(missing) {
   return missing.map((m) => '- [ ] ' + m).join('\n');
 }
 
-const CONTRIB = 'https://github.com/Asofwar/Strata/blob/main/CONTRIBUTING.md';
+const CONTRIB = 'https://github.com/Asofwar/Strata-Turbo/blob/main/CONTRIBUTING.md';
 
 function intakeComment(isPull, missing) {
   return [

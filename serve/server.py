@@ -588,7 +588,7 @@ def start_exit_note(rc: int | None, exe=None) -> str:
             note += f" ({', '.join(m.upper() for m in missing)} missing; {isa})"
         elif isa:
             note += f"; the CPU reports AVX, AVX2, FMA and F16C ({isa}), so this is a bug in the engine"
-        note += ".  Please report it with the CPU model (github.com/Asofwar/Strata/issues)."
+        note += ".  Please report it with the CPU model (github.com/Asofwar/Strata-Turbo/issues)."
     return note
 
 
@@ -1213,16 +1213,16 @@ class StrataEngine:
         for line in reversed(wide.splitlines()):
             if "issue #29" in line:
                 return ("The engine stopped itself because it had stopped making progress - a hang it caught. Its log "
-                        "line: " + line.strip() + " - please report it at github.com/Asofwar/Strata/issues.")
+                        "line: " + line.strip() + " - please report it at github.com/Asofwar/Strata-Turbo/issues.")
         proc = self.proc                                 # None while a restart has not started the next one yet
         rc = proc.poll() if proc is not None else None
         if rc is not None and rc >= 0 and self.last_err:  # its own last words on stdout: they say why
             return (f"The engine exited (code {rc}) after it reported: {self.last_err} - please report it at "
-                    "github.com/Asofwar/Strata/issues with the log.")
+                    "github.com/Asofwar/Strata-Turbo/issues with the log.")
         last = next((x.strip() for x in reversed(tail.splitlines()) if x.strip().startswith(("strata", "ERR"))), "")
         if rc is not None and rc >= 0 and last:          # it ended by itself: its own last words say why (#215)
             return (f"The engine exited (code {rc}). Its last log line: {last} - if that does not explain it, please "
-                    "report it at github.com/Asofwar/Strata/issues with the log.")
+                    "report it at github.com/Asofwar/Strata-Turbo/issues with the log.")
         rt_note = rttime_limit_note() if rc == -9 else ""
         if rt_note:                                       # #3238: the kernel killed it, but not for RAM
             return ("The engine was ended by signal 9. " + rt_note + " If dmesg (sudo dmesg | grep -i -E 'killed "
@@ -2347,7 +2347,7 @@ class StrataEngine:
         sends), so the next request starts it again: killed now, its GPU and RAM go back with the process."""
         self.silent_note = ("The engine and the server lost step (issue #481; a very slow PC can raise "
                             "\"engine_silence_s\" in the config, 0 = wait forever). If it happens again, please open an "
-                            "issue at github.com/Asofwar/Strata/issues with the end of the engine log (upstream "
+                            "issue at github.com/Asofwar/Strata-Turbo/issues with the end of the engine log (upstream "
                             "tracks it as github.com/Niko1221/Strata/issues/481).")
         self.ended = True                               # not alive from now: the next request restarts it
         proc = self.proc

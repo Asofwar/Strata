@@ -298,7 +298,7 @@ Keep all existing groups: Context & memory, Performance, Sampling, Server and Ad
 | RAW-03 / P0 / Dependency | Visual schema does not represent every possible engine option. | Preserve recognized and unrecognized valid config entries through raw/visual switches and round trips. Do not strip expert `args` or `env` because no form control exists. | Production config adapter; CFG. | A raw-only setting survives a visual edit and export/import cycle. |
 | RAW-04 / P1 / Design | Reload from engine can erase edits without clear scope. | Name source “Reload saved config.” If dirty, offer Keep editing / Discard and reload. Reset-to-recommended stages its declared scope and explains it before saving. | CFG; UI-11. | Reload/reset never discards unsaved content without a specific choice. |
 
-**Production reference:** verify actual config, arguments, environment overrides and runtime controls against the connected engine and [Strata configuration documentation](https://github.com/Asofwar/Strata/blob/main/docs/DETAILS.md). The local design host's llama-server wrapper, catalog and ports are not proof of production parity.
+**Production reference:** verify actual config, arguments, environment overrides and runtime controls against the connected engine and [Strata configuration documentation](https://github.com/Asofwar/Strata-Turbo/blob/main/docs/DETAILS.md). The local design host's llama-server wrapper, catalog and ports are not proof of production parity.
 
 ## 11. Monitor
 

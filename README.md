@@ -14,8 +14,8 @@
 <p align="center">Asofwar's fork of <a href="https://github.com/Niko1221/Strata">Strata</a> · Windows + NVIDIA · free and open source</p>
 
 <p align="center">
-  <a href="https://github.com/Asofwar/Strata/releases/latest"><img src="https://img.shields.io/github/v/release/Asofwar/Strata?label=release" alt="Release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Asofwar/Strata" alt="MIT license"></a>
+  <a href="https://github.com/Asofwar/Strata-Turbo/releases/latest"><img src="https://img.shields.io/github/v/release/Asofwar/Strata-Turbo?label=release" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Asofwar/Strata-Turbo" alt="MIT license"></a>
   <a href="docs/FORK.ru.md"><img src="https://img.shields.io/badge/docs-FORK.ru.md-2ea44f" alt="Fork docs"></a>
   <a href="#support"><img src="https://img.shields.io/badge/donate-Gram%20(TON)-0098EA" alt="Gram (TON)"></a>
 </p>
@@ -42,10 +42,10 @@ Agent benchmark: 53 of 60 coding tasks. Every measurement: [docs/FORK.ru.md](doc
 **Windows**, NVIDIA RTX 20 or newer (driver 580+), in PowerShell:
 
 ```powershell
-irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
+irm https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.ps1 | iex
 ```
 
-It downloads the [latest release](https://github.com/Asofwar/Strata/releases/latest), checks it against
+It downloads the [latest release](https://github.com/Asofwar/Strata-Turbo/releases/latest), checks it against
 `SHA256SUMS.txt`, unpacks it into `%LOCALAPPDATA%\Strata-Turbo` and starts setup, which asks for the model and
 downloads it (Cyber-Tiel: about 17 GB). By hand: unzip `Strata-Turbo-<version>-windows-cuda13.zip` into a folder
 without spaces and run `START-HERE.bat --setup --family cyber-tiel`.
@@ -53,11 +53,11 @@ without spaces and run `START-HERE.bat --setup --family cyber-tiel`.
 **Linux** (not tested by the fork; the engine is built from source):
 
 ```sh
-curl -fsSL https://github.com/Asofwar/Strata/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.sh | sh
 ```
 
 **Let your coding assistant do it:** paste
-`Set up Strata on this PC for me: https://github.com/Asofwar/Strata - follow docs/AI_SETUP.md in that repository.`
+`Set up Strata on this PC for me: https://github.com/Asofwar/Strata-Turbo - follow docs/AI_SETUP.md in that repository.`
 
 Start it again with `START-HERE.bat`; update by running the one-liner again (or `UPDATE.bat` in a clone). Don't use
 `strata update`: the fork publishes no signed feed. Every option, other hardware and where files go:
@@ -89,7 +89,7 @@ The server listens on `127.0.0.1` only. Before opening it to a network set an AP
 - [docs/FORK.ru.md](docs/FORK.ru.md) - what the fork adds, all measurements, the recommended config (Russian)
 - [docs/ROADMAP.ru.md](docs/ROADMAP.ru.md) - plans: pictures, audio and video, speed, quality (Russian)
 - [docs/INSTALL.md](docs/INSTALL.md) - install options, AMD / Intel / Mac / several cards (upstream paths, not tested by the fork), settings
-- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) - when something goes wrong; bugs go to [issues](https://github.com/Asofwar/Strata/issues)
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) - when something goes wrong; bugs go to [issues](https://github.com/Asofwar/Strata-Turbo/issues)
 - [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) - how a big model fits on a PC; every part and number: [DETAILS.md](docs/DETAILS.md), [the paper](docs/paper/Strata-Paper.pdf)
 - [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md)
 

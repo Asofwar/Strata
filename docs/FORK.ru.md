@@ -1,4 +1,4 @@
-# Strata Turbo — форк Asofwar/Strata
+# Strata Turbo — форк Asofwar/Strata-Turbo
 
 Это форк [Niko1221/Strata](https://github.com/Niko1221/Strata). Он стоит на upstream-теге `v0.2.1.1` (коммит
 `9ae93f7b`, движок 0.1.46, Control 0.1.46.1); свои коммиты форка показывает `git log --oneline 9ae93f7b..HEAD`.
@@ -176,7 +176,7 @@ Cyber-Tiel-Coder-35B-A3B UD-IQ4_XS из пака, `--kv int8`, контекст 
   Раньше вся арена уходила на 4 KB страницы. Тестовый переключатель: `STRATA_LARGEPAGES_SIMULATE_1450=N`.
 - **`STRATA_STAGE_PIN`**: в DETAILS.md названа причина порчи данных и описана проверка на RTX 5080. Переключатель
   остаётся opt-in.
-- **Релизы форка**: готовый движок setup, `UPDATE.bat` / `update.sh` и фид обновлений смотрят на Asofwar/Strata
+- **Релизы форка**: готовый движок setup, `UPDATE.bat` / `update.sh` и фид обновлений смотрят на Asofwar/Strata-Turbo
   ([Обновление](#обновление)).
 
 ### Инструменты и бенчмарки
@@ -283,11 +283,11 @@ Cyber-Tiel-Coder UD-IQ4_XS ([QWEN36_PACK.md](QWEN36_PACK.md#what-setup-writes-fo
 
 ## Установка
 
-Способы получить код форка (все берут файлы из [релизов форка](https://github.com/Asofwar/Strata/releases)):
+Способы получить код форка (все берут файлы из [релизов форка](https://github.com/Asofwar/Strata-Turbo/releases)):
 zip релиза `Strata-Turbo-<версия>-windows-cuda13.zip` (Windows, NVIDIA RTX 20 и новее), однострочный установщик
-(`irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex` на Windows, `curl -fsSL
-https://github.com/Asofwar/Strata/releases/latest/download/install.sh | sh` на Linux) или клон
-`git clone https://github.com/Asofwar/Strata.git`. Подробнее: [README.ru.md](../README.ru.md#установка). Установщики
+(`irm https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.ps1 | iex` на Windows, `curl -fsSL
+https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.sh | sh` на Linux) или клон
+`git clone https://github.com/Asofwar/Strata-Turbo.git`. Подробнее: [README.ru.md](../README.ru.md#установка). Установщики
 приложения (`.exe`, `.AppImage`, `.dmg`), Terminal и подписанный фид форк не выпускает.
 
 Из папки репозитория (Windows):
@@ -312,7 +312,7 @@ START-HERE.bat --setup --family ornith-abl
 
 ## Обновление
 
-Релизы форка: https://github.com/Asofwar/Strata/releases. В каждом лежат:
+Релизы форка: https://github.com/Asofwar/Strata-Turbo/releases. В каждом лежат:
 
 - `Strata-Turbo-<версия>-windows-cuda13.zip` — исходники форка и готовый движок в папке `engine\`
   (CUDA 13.4, видеокарты NVIDIA RTX 20 и новее: sm_75, 86, 89, 120 и PTX для более новых). Распаковать в папку
@@ -328,7 +328,7 @@ START-HERE.bat --setup --family ornith-abl
   `Strata-data` используются повторно, заново ничего не качается.
 - Клон репозитория: `UPDATE.bat` (на Linux `update.sh`) делает `git pull` из этого форка и обновляет пакеты Python;
   движок остаётся, пока его версия не ниже `MIN_ENGINE` из `setup.py`. Если setup решит, что движок нужен новый,
-  он скачает его из релизов форка (`PREBUILT_URL`, `REPO` в `setup.py` указывают на Asofwar/Strata).
+  он скачает его из релизов форка (`PREBUILT_URL`, `REPO` в `setup.py` указывают на Asofwar/Strata-Turbo).
 - `strata update` не нужен: у форка нет подписанного фида обновлений, команда ничего не найдёт и ничего не поменяет.
   Не запускайте её с фидом upstream (`--feed`, `STRATA_UPDATE_FEED`): она поставит движок upstream, в котором нет
   пути `--pack` для Qwen3.6, Ornith и Cyber-Tiel.

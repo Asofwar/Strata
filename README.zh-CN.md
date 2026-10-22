@@ -14,8 +14,8 @@
 <p align="center">Asofwar 维护的 <a href="https://github.com/Niko1221/Strata">Strata</a> 分支 · Windows + NVIDIA · 免费开源</p>
 
 <p align="center">
-  <a href="https://github.com/Asofwar/Strata/releases/latest"><img src="https://img.shields.io/github/v/release/Asofwar/Strata?label=%E7%89%88%E6%9C%AC" alt="版本"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Asofwar/Strata" alt="MIT 许可证"></a>
+  <a href="https://github.com/Asofwar/Strata-Turbo/releases/latest"><img src="https://img.shields.io/github/v/release/Asofwar/Strata-Turbo?label=%E7%89%88%E6%9C%AC" alt="版本"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Asofwar/Strata-Turbo" alt="MIT 许可证"></a>
   <a href="docs/FORK.ru.md"><img src="https://img.shields.io/badge/docs-FORK.ru.md-2ea44f" alt="分支文档"></a>
   <a href="#支持本项目"><img src="https://img.shields.io/badge/%E6%8D%90%E8%B5%A0-Gram%20(TON)-0098EA" alt="Gram (TON)"></a>
 </p>
@@ -42,10 +42,10 @@ RTX 5080 16 GB、i9-14900K、48 GB DDR5、Windows 11，Cyber-Tiel-Coder UD-IQ4_X
 **Windows**，NVIDIA RTX 20 或更新的显卡（驱动 580+），在 PowerShell 中运行：
 
 ```powershell
-irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
+irm https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.ps1 | iex
 ```
 
-脚本会下载[最新版本](https://github.com/Asofwar/Strata/releases/latest)，用 `SHA256SUMS.txt` 校验，解压到
+脚本会下载[最新版本](https://github.com/Asofwar/Strata-Turbo/releases/latest)，用 `SHA256SUMS.txt` 校验，解压到
 `%LOCALAPPDATA%\Strata-Turbo`，然后启动 setup；setup 会询问要用的模型并下载（Cyber-Tiel：约 17 GB）。
 手动安装：把 `Strata-Turbo-<version>-windows-cuda13.zip` 解压到不含空格的文件夹，再运行
 `START-HERE.bat --setup --family cyber-tiel`。
@@ -53,11 +53,11 @@ irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
 **Linux**（本分支未测试；引擎需从源码构建）：
 
 ```sh
-curl -fsSL https://github.com/Asofwar/Strata/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.sh | sh
 ```
 
 **让编程助手代劳：** 粘贴下面这句
-`Set up Strata on this PC for me: https://github.com/Asofwar/Strata - follow docs/AI_SETUP.md in that repository.`
+`Set up Strata on this PC for me: https://github.com/Asofwar/Strata-Turbo - follow docs/AI_SETUP.md in that repository.`
 
 之后用 `START-HERE.bat` 再次启动；更新就是再运行一遍上面的单行命令（克隆的仓库里可用 `UPDATE.bat`）。不要使用
 `strata update`：本分支没有发布签名的更新源。全部选项、其他硬件和文件位置见
@@ -88,7 +88,7 @@ curl -fsSL https://github.com/Asofwar/Strata/releases/latest/download/install.sh
 
 - [docs/FORK.ru.md](docs/FORK.ru.md)：分支新增了什么、全部测量数据、推荐配置（俄语）
 - [docs/INSTALL.md](docs/INSTALL.md)：安装选项、AMD / Intel / Mac / 多卡（沿用上游的路径，本分支未测试）、各项设置
-- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)：出问题时看这里；bug 请提交到 [issues](https://github.com/Asofwar/Strata/issues)
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)：出问题时看这里；bug 请提交到 [issues](https://github.com/Asofwar/Strata-Turbo/issues)
 - [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md)：大模型如何放进一台 PC；每个部分和数字见 [DETAILS.md](docs/DETAILS.md)、[论文](docs/paper/Strata-Paper.pdf)
 - [CONTRIBUTING.md](CONTRIBUTING.md)、[SECURITY.md](SECURITY.md)
 

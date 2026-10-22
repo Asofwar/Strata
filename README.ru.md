@@ -14,8 +14,8 @@
 <p align="center">Форк <a href="https://github.com/Niko1221/Strata">Strata</a> от Asofwar · Windows + NVIDIA · бесплатно и с открытым кодом</p>
 
 <p align="center">
-  <a href="https://github.com/Asofwar/Strata/releases/latest"><img src="https://img.shields.io/github/v/release/Asofwar/Strata?label=%D1%80%D0%B5%D0%BB%D0%B8%D0%B7" alt="Релиз"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Asofwar/Strata" alt="Лицензия MIT"></a>
+  <a href="https://github.com/Asofwar/Strata-Turbo/releases/latest"><img src="https://img.shields.io/github/v/release/Asofwar/Strata-Turbo?label=%D1%80%D0%B5%D0%BB%D0%B8%D0%B7" alt="Релиз"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Asofwar/Strata-Turbo" alt="Лицензия MIT"></a>
   <a href="docs/FORK.ru.md"><img src="https://img.shields.io/badge/docs-FORK.ru.md-2ea44f" alt="Документация форка"></a>
   <a href="#поддержать"><img src="https://img.shields.io/badge/%D0%B4%D0%BE%D0%BD%D0%B0%D1%82-Gram%20(TON)-0098EA" alt="Gram (TON)"></a>
 </p>
@@ -42,10 +42,10 @@ RTX 5080 16 GB, i9-14900K, 48 GB DDR5, Windows 11, Cyber-Tiel-Coder UD-IQ4_XS с
 **Windows**, NVIDIA RTX 20 и новее (драйвер 580+), в PowerShell:
 
 ```powershell
-irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
+irm https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.ps1 | iex
 ```
 
-Скрипт скачивает [последний релиз](https://github.com/Asofwar/Strata/releases/latest), сверяет его с
+Скрипт скачивает [последний релиз](https://github.com/Asofwar/Strata-Turbo/releases/latest), сверяет его с
 `SHA256SUMS.txt`, распаковывает в `%LOCALAPPDATA%\Strata-Turbo` и запускает setup: тот спросит модель и скачает её
 (Cyber-Tiel — около 17 GB). Вручную: распакуйте `Strata-Turbo-<версия>-windows-cuda13.zip` в папку без пробелов и
 запустите `START-HERE.bat --setup --family cyber-tiel`.
@@ -53,11 +53,11 @@ irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
 **Linux** (форк не проверял, движок собирается из исходников):
 
 ```sh
-curl -fsSL https://github.com/Asofwar/Strata/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.sh | sh
 ```
 
 **Через ИИ-ассистента:** вставьте в Claude Code, Codex или Cursor
-`Set up Strata on this PC for me: https://github.com/Asofwar/Strata - follow docs/AI_SETUP.md in that repository.`
+`Set up Strata on this PC for me: https://github.com/Asofwar/Strata-Turbo - follow docs/AI_SETUP.md in that repository.`
 
 Следующий запуск — снова `START-HERE.bat`; обновление — ещё раз однострочник (или `UPDATE.bat` в клоне). `strata update`
 не используйте: подписанного фида у форка нет. Все варианты, другое железо и где лежат файлы:
@@ -89,7 +89,7 @@ curl -fsSL https://github.com/Asofwar/Strata/releases/latest/download/install.sh
 - [docs/FORK.ru.md](docs/FORK.ru.md) — что добавляет форк, все замеры, рекомендуемый конфиг
 - [docs/ROADMAP.ru.md](docs/ROADMAP.ru.md) — планы: картинки, звук и видео, скорость, качество
 - [docs/INSTALL.md](docs/INSTALL.md) — варианты установки, AMD / Intel / Mac / несколько карт (пути upstream, форк их не проверял), настройки
-- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — если что-то пошло не так; ошибки — в [issues](https://github.com/Asofwar/Strata/issues)
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — если что-то пошло не так; ошибки — в [issues](https://github.com/Asofwar/Strata-Turbo/issues)
 - [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) — как большая модель помещается в ПК; все детали и числа: [DETAILS.md](docs/DETAILS.md), [статья](docs/paper/Strata-Paper.pdf)
 - [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md)
 

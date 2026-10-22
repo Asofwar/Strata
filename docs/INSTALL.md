@@ -4,7 +4,7 @@ Everything about installing, starting, updating and configuring Strata, on Windo
 or an AMD graphics card or an Apple Silicon Mac. The short version is in the [README](../README.md#install). An AI
 coding assistant can do all of this for you with [AI_SETUP.md](AI_SETUP.md).
 
-This is Strata Turbo, Asofwar's fork, and it installs from the fork's [releases](https://github.com/Asofwar/Strata/releases). There are three
+This is Strata Turbo, Asofwar's fork, and it installs from the fork's [releases](https://github.com/Asofwar/Strata-Turbo/releases). There are three
 ways. Take the first one on a Windows PC with an NVIDIA RTX card:
 
 1. **[The release zip](#the-release-zip-windows-nvidia):** the fork's code and a ready engine in one zip. Unzip it and run
@@ -51,7 +51,7 @@ packages during an update.
 ## The release zip (Windows, NVIDIA)
 
 For a Windows 10 / 11 PC with an NVIDIA RTX 20 series card or newer and driver 580 or newer. The files are on the
-[latest release](https://github.com/Asofwar/Strata/releases/latest):
+[latest release](https://github.com/Asofwar/Strata-Turbo/releases/latest):
 
 - `Strata-Turbo-<version>-windows-cuda13.zip`: the fork's code and a ready engine (CUDA 13). This is the one to download.
 - `strata-windows-x64.zip`: the engine alone. Setup downloads it by itself when the folder has no engine or an outdated
@@ -72,7 +72,7 @@ Setup sees the ready engine and neither compiles nor downloads another. The rest
 Windows (PowerShell), NVIDIA RTX 20 or newer:
 
 ```powershell
-irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
+irm https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.ps1 | iex
 ```
 
 It downloads `Strata-Turbo-<version>-windows-cuda13.zip` from the latest release, checks it against `SHA256SUMS.txt`,
@@ -81,7 +81,7 @@ unzips it and runs `START-HERE.bat`.
 Linux (the fork has not tested Linux):
 
 ```sh
-curl -fsSL https://github.com/Asofwar/Strata/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.sh | sh
 ```
 
 It downloads the release's source and runs `./setup.sh`, which builds the engine on your PC
@@ -99,7 +99,7 @@ or, in PowerShell, `irm <address> -OutFile install.ps1`), read it, then run it. 
 
 The app is the easiest way. It has the engine inside, so there is nothing to build and no setup window.
 
-1. Get the installer for your system. Upstream publishes them; the fork's [releases page](https://github.com/Asofwar/Strata/releases/latest)
+1. Get the installer for your system. Upstream publishes them; the fork's [releases page](https://github.com/Asofwar/Strata-Turbo/releases/latest)
    has none. An installer is for one make of graphics card (NVIDIA or AMD): take the one that matches yours.
    - **Windows 10 / 11:** run the `.exe`. It installs for your user and needs no administrator rights. Windows may
      say "Windows protected your PC", because the installer is not code-signed yet. Choose **More info**, then
@@ -157,8 +157,8 @@ signed feed, so `strata update` finds nothing in it.
 
 ## From source: Windows
 
-1. [Download the fork](https://github.com/Asofwar/Strata/archive/refs/heads/main.zip) and unzip it (or
-   `git clone https://github.com/Asofwar/Strata.git`).
+1. [Download the fork](https://github.com/Asofwar/Strata-Turbo/archive/refs/heads/main.zip) and unzip it (or
+   `git clone https://github.com/Asofwar/Strata-Turbo.git`).
 2. Double-click **`START-HERE.bat`**.
 3. Answer a few questions - or just press Enter each time for the recommended choice ([the questions](#setups-questions)).
 
@@ -197,7 +197,7 @@ You do not need the app or the AppImage for this: the source install builds the 
 everything in the checkout, so you can edit, rebuild and test.
 
 ```bash
-git clone https://github.com/Asofwar/Strata.git && cd Strata
+git clone https://github.com/Asofwar/Strata-Turbo.git && cd Strata
 ./setup.sh              # first run: .venv, the engine build (build/, or build-hip/ on a Radeon), the model, then it serves
 ```
 

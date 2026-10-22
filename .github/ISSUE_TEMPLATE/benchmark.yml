@@ -7,7 +7,7 @@ body:
     value: |
       The title must start with **[Benchmark]**. Keep it, and add the GPU and model after it.
 
-      To share a full report, follow the [community benchmark guide](https://github.com/Asofwar/Strata/blob/main/docs/COMMUNITY_BENCHMARKS.md) and open a results-only pull request. The standard protocol is a [draft](https://github.com/Asofwar/Strata/blob/main/docs/BENCHMARK_PROTOCOL.md); existing tools do not implement it yet. Include poor results and failed requests.
+      To share a full report, follow the [community benchmark guide](https://github.com/Asofwar/Strata-Turbo/blob/main/docs/COMMUNITY_BENCHMARKS.md) and open a results-only pull request. The standard protocol is a [draft](https://github.com/Asofwar/Strata-Turbo/blob/main/docs/BENCHMARK_PROTOCOL.md); existing tools do not implement it yet. Include poor results and failed requests.
   - type: textarea
     id: what
     attributes:

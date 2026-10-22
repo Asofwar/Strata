@@ -4,12 +4,12 @@
 
 Please report anything that should not be public until it is fixed **privately**, through GitHub's private
 vulnerability reporting: the repository's **Security** tab, **Report a vulnerability**
-([direct link](https://github.com/Asofwar/Strata/security/advisories/new)). Say what you found, how to reproduce it
+([direct link](https://github.com/Asofwar/Strata-Turbo/security/advisories/new)). Say what you found, how to reproduce it
 (the request, the config keys involved, the Strata version), and what an attacker gains. We answer there, fix it in
 a release, and credit you in the advisory unless you ask us not to.
 
 Ordinary hardening ideas and findings that are safe to discuss in public are welcome as an
-[issue](https://github.com/Asofwar/Strata/issues) (upstream's [#544](https://github.com/Niko1221/Strata/issues/544)
+[issue](https://github.com/Asofwar/Strata-Turbo/issues) (upstream's [#544](https://github.com/Niko1221/Strata/issues/544)
 collects audit findings) or as a pull request, which we review like our own code.
 
 Supported: the latest release. Fixes go into the next release, not into older ones.
@@ -75,8 +75,8 @@ the model. The section above is about the engine's HTTP server. This is what the
 The fork installs with one line:
 
 ```sh
-curl -fsSL https://github.com/Asofwar/Strata/releases/latest/download/install.sh | sh
-irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
+curl -fsSL https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.sh | sh
+irm https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.ps1 | iex
 ```
 
 Piping a script into a shell runs whatever the server sends, so it deserves the same care as running any downloaded program.
@@ -86,10 +86,10 @@ builds the engine on your PC (the fork has not tested Linux). The fork does not 
 Terminal archive, `install-manifest.txt` or a signed feed.
 
 Those checks have a limit. `SHA256SUMS.txt` comes from the same release as the zip, so all trust rests on HTTPS and on the
-`Asofwar/Strata` GitHub release itself. The check catches a damaged or half-finished download; it does not protect you if the release has
+`Asofwar/Strata-Turbo` GitHub release itself. The check catches a damaged or half-finished download; it does not protect you if the release has
 been replaced by someone who controls it.
 
-If that is not enough: save the script (`curl -fsSLO https://github.com/Asofwar/Strata/releases/latest/download/install.sh`), read it, and
+If that is not enough: save the script (`curl -fsSLO https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.sh`), read it, and
 run it from the file; or clone the repository and build from source, and check the code you build.
 
 Strata has not had an outside security audit yet.

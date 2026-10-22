@@ -1,7 +1,7 @@
 #!/bin/sh
 # Strata Turbo (the fork) - Linux installer.
 # Usage:
-#     curl -fsSL https://github.com/Asofwar/Strata/releases/latest/download/install.sh | sh
+#     curl -fsSL https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.sh | sh
 # What it does: finds the fork's latest release on GitHub, downloads that release's source, unpacks it into
 # ~/Strata-Turbo/<version> and starts ./setup.sh, which builds the engine from source (CUDA toolkit needed) and asks
 # which model to set up. The fork has not tested Linux; Windows has a ready engine in the release.
@@ -12,7 +12,7 @@
 #     STRATA_NO_START=1                unpack only, do not start setup
 set -eu
 
-REPO="Asofwar/Strata"
+REPO="Asofwar/Strata-Turbo"
 die() { echo "strata-turbo installer: $*" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || die "curl is needed."
 command -v tar >/dev/null 2>&1 || die "tar is needed."

@@ -220,12 +220,12 @@ LLAMA_CPP_ZIP = f"https://github.com/ggml-org/llama.cpp/archive/{LLAMA_CPP_COMMI
 # "https://github.com/<you>/Strata/releases/latest/download/" (or pass --prebuilt / set STRATA_PREBUILT_URL).
 # With the default, the release of this checkout's own version (PREBUILT_TAG_URL, the fork's FORK_VERSION) is
 # tried first and the latest release is the fallback (#214): an older checkout keeps the engine it shipped with.
-PREBUILT_URL = "https://github.com/Asofwar/Strata/releases/latest/download/"
+PREBUILT_URL = "https://github.com/Asofwar/Strata-Turbo/releases/latest/download/"
 # The repository the release assets and their SHA-256 come from; `engine_digest` reads the API here even
 # when --prebuilt points the download somewhere else, because the hash is only worth having if it comes
 # from somewhere the download does not.
-REPO = "Asofwar/Strata"
-PREBUILT_TAG_URL = "https://github.com/Asofwar/Strata/releases/download/v{version}/"
+REPO = "Asofwar/Strata-Turbo"
+PREBUILT_TAG_URL = "https://github.com/Asofwar/Strata-Turbo/releases/download/v{version}/"
 # The fork's own release version: semver, independent of upstream's numbers (base: upstream 0.2.1.1, engine
 # 0.1.46.1).  Its release is tagged v<FORK_VERSION> and carries the engine this checkout was tested with; bump it
 # with every release (MAJOR.MINOR.PATCH: incompatible change / new feature or speed-up / fix only).

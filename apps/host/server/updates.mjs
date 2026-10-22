@@ -1,8 +1,8 @@
 import { OFFLINE_MESSAGE, looksOffline, plainUpdateError } from './update-messages.mjs';
 
 /** Read-only release checks. Installing/rolling back needs a managed installer. */
-const RELEASES = 'https://api.github.com/repos/Asofwar/Strata/releases?per_page=30';
-const RELEASE_PREFIX = 'https://github.com/Asofwar/Strata/releases/';
+const RELEASES = 'https://api.github.com/repos/Asofwar/Strata-Turbo/releases?per_page=30';
+const RELEASE_PREFIX = 'https://github.com/Asofwar/Strata-Turbo/releases/';
 
 function versionParts(value) {
   const match = /^v?(\d+)\.(\d+)\.(\d+)(?:\+[\w.-]+)?$/.exec(value ?? '');

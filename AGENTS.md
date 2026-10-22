@@ -15,18 +15,18 @@ releases have their own versions from v1.0.0). It has three parts:
 
 ## Installing Strata for a user
 
-This is Strata Turbo, Asofwar's fork (https://github.com/Asofwar/Strata). Follow **[docs/AI_SETUP.md](docs/AI_SETUP.md)**. For an agent
+This is Strata Turbo, Asofwar's fork (https://github.com/Asofwar/Strata-Turbo). Follow **[docs/AI_SETUP.md](docs/AI_SETUP.md)**. For an agent
 that has a shell, the short version is:
 
 1. Get the fork. Setup downloads the ready engine on Windows with an NVIDIA RTX 20 series card or newer (driver 580 or newer);
    on other systems it builds the engine from source, which the fork has not tested.
 
    ```sh
-   git clone https://github.com/Asofwar/Strata.git
+   git clone https://github.com/Asofwar/Strata-Turbo.git
    ```
 
-   Without git, download https://github.com/Asofwar/Strata/archive/refs/heads/main.zip and unzip it. On Windows the release
-   zip `Strata-Turbo-<version>-windows-cuda13.zip` from https://github.com/Asofwar/Strata/releases/latest holds the same
+   Without git, download https://github.com/Asofwar/Strata-Turbo/archive/refs/heads/main.zip and unzip it. On Windows the release
+   zip `Strata-Turbo-<version>-windows-cuda13.zip` from https://github.com/Asofwar/Strata-Turbo/releases/latest holds the same
    code and a ready engine.
 2. Check the PC. Nothing is installed except Python and the `.venv`:
 

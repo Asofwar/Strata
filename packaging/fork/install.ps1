@@ -1,6 +1,6 @@
 # Strata Turbo (the fork) - Windows installer.
 # Usage (PowerShell):
-#     irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
+#     irm https://github.com/Asofwar/Strata-Turbo/releases/latest/download/install.ps1 | iex
 # What it does: finds the fork's release on GitHub, downloads Strata-Turbo-<version>-windows-cuda13.zip (the fork's
 # code with a ready engine for NVIDIA RTX 20 and newer), checks it against the release's SHA256SUMS.txt, unpacks it into
 # %LOCALAPPDATA%\Strata-Turbo\<version> and starts START-HERE.bat, which asks which model to set up.
@@ -16,7 +16,7 @@ $ProgressPreference = 'SilentlyContinue'
 
 function Die([string]$msg) { [Console]::Error.WriteLine("strata-turbo installer: $msg"); throw "strata-turbo installer stopped" }
 
-$repo = 'Asofwar/Strata'
+$repo = 'Asofwar/Strata-Turbo'
 if ([Environment]::OSVersion.Platform -ne 'Win32NT') { Die 'this is the Windows installer; on Linux use install.sh.' }
 $arch = $env:PROCESSOR_ARCHITEW6432; if (-not $arch) { $arch = $env:PROCESSOR_ARCHITECTURE }
 if ($arch -ne 'AMD64') { Die "this release has an engine for Windows on x64 only (this PC: $arch)." }

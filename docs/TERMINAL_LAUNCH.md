@@ -6,7 +6,7 @@ in the Terminal's look, with presets, an Advanced table, an access choice and a 
 
 ## Install
 
-> **The Asofwar fork does not ship this.** Its releases (`https://github.com/Asofwar/Strata/releases/latest/download`) carry no
+> **The Asofwar fork does not ship this.** Its releases (`https://github.com/Asofwar/Strata-Turbo/releases/latest/download`) carry no
 > Terminal archive, no `install-manifest.txt` and no signed feed. The release assets `install.ps1` and `install.sh` are the fork's own
 > one-line installers: they fetch the fork's code and run setup ([INSTALL.md](INSTALL.md#one-line)), and they do not put `strata`
 > on your PATH. `strata update` finds nothing in the fork's releases and changes nothing; do not point it at upstream's feed, which
