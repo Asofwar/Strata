@@ -21,7 +21,7 @@ direction: *your assistant* manages Strata.
 
 ## Add it
 
-You need a copy of Strata: the zip from GitHub, or `git clone https://github.com/Niko1221/Strata`. Below,
+You need a copy of Strata: the zip from GitHub, or `git clone https://github.com/Asofwar/Strata`. Below,
 `C:\Users\you\Strata` (Windows) and `/home/you/Strata` (Linux) stand for that folder. Use `python3` on Linux. On
 Windows, use `py` if `python` is not on your PATH.
 

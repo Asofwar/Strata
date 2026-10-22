@@ -1,3 +1,5 @@
+> These are the release notes of upstream's 0.2.1 release ([Niko1221/Strata](https://github.com/Niko1221/Strata)), kept for reference. The links and files they name are upstream's. The Asofwar fork ships none of the app installers, the Terminal, the signed feed or the Docker images described here; its install options are in the [README](../README.md#install).
+
 **0.2.1: a task board in the app, pictures on the Mac and on Intel Arc cards, `strata bench run` with a fixed standard benchmark, faster downloads, Docker images, and your own engine settings are no longer overwritten.** It also fixes the crashes, stuck downloads and GPU-choice bugs reported on 0.2.0-beta. Each new default below says what it was measured on and whether the answers are identical to 0.2.0. The engine packages are version 0.1.46 (0.2.0 had 0.1.45.3) and the update feed has sequence number 102. Update with `strata update` (Terminal), Settings > Update (app), or `UPDATE.bat` / `./update.sh` (source installs).
 
 ## Which file to download

@@ -4,13 +4,13 @@
 
 Please report anything that should not be public until it is fixed **privately**, through GitHub's private
 vulnerability reporting: the repository's **Security** tab, **Report a vulnerability**
-([direct link](https://github.com/Niko1221/Strata/security/advisories/new)). Say what you found, how to reproduce it
+([direct link](https://github.com/Asofwar/Strata/security/advisories/new)). Say what you found, how to reproduce it
 (the request, the config keys involved, the Strata version), and what an attacker gains. We answer there, fix it in
 a release, and credit you in the advisory unless you ask us not to.
 
 Ordinary hardening ideas and findings that are safe to discuss in public are welcome as an
-[issue](https://github.com/Niko1221/Strata/issues) (#544 collects audit findings) or as a pull request, which we
-review like our own code.
+[issue](https://github.com/Asofwar/Strata/issues) (upstream's [#544](https://github.com/Niko1221/Strata/issues/544)
+collects audit findings) or as a pull request, which we review like our own code.
 
 Supported: the latest release. Fixes go into the next release, not into older ones.
 
@@ -67,29 +67,30 @@ the model. The section above is about the engine's HTTP server. This is what the
   one it accepted (a replayed old feed) or expired, and checks every engine package against its SHA-256, its signed manifest and the
   card in your PC before it test-starts it and switches to it. Any failure keeps the engine you had. The app installer itself is signed
   with a separate key (Tauri's minisign key) that the app and the Terminal both check. The private keys are kept offline by the owner.
-  See [packaging/UPDATES.md](packaging/UPDATES.md).
+  See [packaging/UPDATES.md](packaging/UPDATES.md). The Asofwar fork publishes no signed feed, so none of this applies to it:
+  `strata update` finds nothing there and changes nothing.
 
 ### How far to trust `curl | sh` and `irm | iex`
 
-The Terminal installs with one line:
+The fork installs with one line:
 
 ```sh
-curl -fsSL https://github.com/Niko1221/Strata/releases/latest/download/install.sh | sh
-irm https://github.com/Niko1221/Strata/releases/latest/download/install.ps1 | iex
+curl -fsSL https://github.com/Asofwar/Strata/releases/latest/download/install.sh | sh
+irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
 ```
 
 Piping a script into a shell runs whatever the server sends, so it deserves the same care as running any downloaded program.
-What the script does is short and written at its top: it fetches the Terminal archive named in the release's `install-manifest.txt`,
-checks its SHA-256, unpacks it into your home folder (no administrator rights, nothing outside your home), checks the release's signed feed
-with the Terminal it just unpacked and removes it again if that fails, and puts `strata` on your PATH.
+The Windows script downloads `Strata-Asofwar-<version>-windows-cuda13.zip` from the latest release, checks it against the release's
+`SHA256SUMS.txt`, unzips it and runs `START-HERE.bat`. The Linux script downloads the release's source and runs `./setup.sh`, which
+builds the engine on your PC (the fork has not tested Linux). The fork does not publish the
+Terminal archive, `install-manifest.txt` or a signed feed.
 
-Those checks have a limit. The checksum comes from the same release as the archive, and the public key that checks the feed arrives inside
-that archive, so for the first install all trust rests on HTTPS and on the `Niko1221/Strata` GitHub release itself. The checks catch a
-damaged or half-finished download and a feed that was not signed by the release key; they do not protect you if the release has been replaced
-by someone who controls it. Later updates are checked against the key already on your PC, which is a stronger position.
+Those checks have a limit. `SHA256SUMS.txt` comes from the same release as the zip, so all trust rests on HTTPS and on the
+`Asofwar/Strata` GitHub release itself. The check catches a damaged or half-finished download; it does not protect you if the release has
+been replaced by someone who controls it.
 
-If that is not enough: save the script (`curl -fsSLO https://github.com/Niko1221/Strata/releases/latest/download/install.sh`), read it, and
-run it from the file; or install the desktop app or build from source instead and check the code you build.
+If that is not enough: save the script (`curl -fsSLO https://github.com/Asofwar/Strata/releases/latest/download/install.sh`), read it, and
+run it from the file; or clone the repository and build from source, and check the code you build.
 
 Strata has not had an outside security audit yet.
 What Strata downloads, when it uses the internet, what stays on your PC and how downloads are checked is written up in [docs/SAFETY.md](docs/SAFETY.md).

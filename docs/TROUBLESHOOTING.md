@@ -272,7 +272,7 @@ R9700) in the `env` block of the server JSON, then a restart. Experimental, one 
 ## Still stuck?
 
 Look in the [full troubleshooting table](DETAILS.md#troubleshooting), or open an
-[issue](https://github.com/Niko1221/Strata/issues) and attach the log: in the app, the file Save logs writes (see
+[issue](https://github.com/Asofwar/Strata/issues) and attach the log: in the app, the file Save logs writes (see
 [above](#the-desktop-app-and-the-terminal)); in the Terminal, the output of `strata doctor`; with the installer,
 `strata-<model>.log` from the Strata folder. Say which one you use (app, Terminal or the installer), your Strata and
 engine versions and your card.

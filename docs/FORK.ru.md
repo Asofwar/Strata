@@ -277,6 +277,13 @@ Cyber-Tiel-Coder UD-IQ4_XS ([QWEN36_PACK.md](QWEN36_PACK.md#what-setup-writes-fo
 
 ## Установка
 
+Способы получить код форка (все берут файлы из [релизов форка](https://github.com/Asofwar/Strata/releases)):
+zip релиза `Strata-Asofwar-<версия>-windows-cuda13.zip` (Windows, NVIDIA RTX 20 и новее), однострочный установщик
+(`irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex` на Windows, `curl -fsSL
+https://github.com/Asofwar/Strata/releases/latest/download/install.sh | sh` на Linux) или клон
+`git clone https://github.com/Asofwar/Strata.git`. Подробнее: [README.ru.md](../README.ru.md#установка). Установщики
+приложения (`.exe`, `.AppImage`, `.dmg`), Terminal и подписанный фид форк не выпускает.
+
 Из папки репозитория (Windows):
 
 ```
@@ -301,7 +308,7 @@ START-HERE.bat --setup --family ornith-abl
 
 Релизы форка: https://github.com/Asofwar/Strata/releases. В каждом лежат:
 
-- `Strata-asofwar-<версия>-windows-cuda13.zip` — исходники форка и готовый движок в папке `engine\`
+- `Strata-Asofwar-<версия>-windows-cuda13.zip` — исходники форка и готовый движок в папке `engine\`
   (CUDA 13.4, видеокарты NVIDIA RTX 20 и новее: sm_75, 86, 89, 120 и PTX для более новых). Распаковать в папку
   без пробелов в пути и запустить `START-HERE.bat`: setup видит готовый движок (`engine\BUILD.json`,
   `"source": "release"`) и не собирает и не скачивает другой.

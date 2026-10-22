@@ -48,7 +48,7 @@ with 32 GB and an M1 Max with 34 GB, where the experts stream from the SSD (the 
 ## Install
 
 ```
-git clone https://github.com/Niko1221/Strata && cd Strata
+git clone https://github.com/Asofwar/Strata && cd Strata
 ./setup.sh                 # asks the size; --yes takes the recommended answers
 ```
 

@@ -5,6 +5,11 @@ The images come with Strata's engine already built for your card, so nothing is 
 downloaded on the first start into a volume (a download that stops continues where it stopped), and every later start goes
 straight to serving.
 
+> **The Asofwar fork publishes no Docker images and has not tested Docker.** The image names below (`ghcr.io/asofwar/strata`) are where
+> the repository's workflow would push them. That workflow builds an image from a release's Linux engine packages and signed update
+> feed, and the fork's releases carry neither (the fork ships a Windows engine zip). Until it does, [build the image
+> yourself](#build-it-yourself) and use its tag in place of the image names.
+
 > **On this page:** [Which image](#which-image-for-which-card) · [One command per card](#one-command-per-card) ·
 > [Docker Compose](#docker-compose) · [Settings](#settings) · [The API key](#the-api-key) · [Connect your apps](#connect-your-coding-apps) ·
 > [Watch and stop](#watch-it-and-stop-it) · [Update](#updating) · [Troubleshooting](#troubleshooting) ·
@@ -32,8 +37,8 @@ Size of the images on disk (built from the engine packages of the 0.2.0-beta rel
 Not sure which NVIDIA image? Take `cuda13` when `nvidia-smi` shows driver 580 or newer and the card is an RTX; otherwise `cuda12`.
 A wrong pick does no harm: the container starts, says in plain words that the engine does not fit this card, and stops.
 
-**Ready-made images are published from version 0.2.1 on**, to the GitHub Container Registry: `ghcr.io/niko1221/strata:<version>-<flavor>`
-(for example `0.2.1-cuda13`), and `ghcr.io/niko1221/strata:latest-<flavor>` for the newest release of that flavor. Pin the version
+**Ready-made images would be published** to the GitHub Container Registry as `ghcr.io/asofwar/strata:<version>-<flavor>`
+(for example `0.2.1-cuda13`), and `ghcr.io/asofwar/strata:latest-<flavor>` for the newest release of that flavor. Pin the version
 tag if you want updates only when you decide. The examples below use these images. If you built an image yourself
 ([Build it yourself](#build-it-yourself)), use the tag you gave it (for example `strata:0.2.1-cuda13`) in their place.
 
@@ -49,7 +54,7 @@ Each command runs Strata in the background, keeps your files in the volume `stra
 docker run -d --name strata --gpus all -p 127.0.0.1:8080:8080 \
   --ulimit memlock=-1:-1 --shm-size 2g --stop-timeout 120 \
   -v strata-data:/data -e MODEL=IQ3_XXS -e API_KEY=$(openssl rand -hex 24) \
-  ghcr.io/niko1221/strata:0.2.1-cuda13
+  ghcr.io/asofwar/strata:0.2.1-cuda13
 ```
 
 **AMD**
@@ -59,7 +64,7 @@ docker run -d --name strata --device /dev/kfd --device /dev/dri \
   --group-add video --group-add $(getent group render | cut -d: -f3) -p 127.0.0.1:8080:8080 \
   --ulimit memlock=-1:-1 --shm-size 2g --stop-timeout 120 \
   -v strata-data:/data -e MODEL=IQ3_XXS -e API_KEY=$(openssl rand -hex 24) \
-  ghcr.io/niko1221/strata:0.2.1-rocm-gfx120x
+  ghcr.io/asofwar/strata:0.2.1-rocm-gfx120x
 ```
 
 **Intel Arc**
@@ -68,7 +73,7 @@ docker run -d --name strata --device /dev/kfd --device /dev/dri \
 docker run -d --name strata --device /dev/dri --group-add $(getent group render | cut -d: -f3) \
   -p 127.0.0.1:8080:8080 --ulimit memlock=-1:-1 --shm-size 2g --stop-timeout 120 \
   -v strata-data:/data -e MODEL=IQ3_S -e MODEL_PATH=/models -v /srv/gguf/IQ3_S:/models:ro \
-  -e API_KEY=$(openssl rand -hex 24) ghcr.io/niko1221/strata:0.2.1-sycl
+  -e API_KEY=$(openssl rand -hex 24) ghcr.io/asofwar/strata:0.2.1-sycl
 ```
 
 What the options are for: `--ulimit memlock=-1:-1` lets the engine pin the RAM it uses for the model, `--shm-size 2g` gives
@@ -189,7 +194,7 @@ The health check asks `GET /v1/models` with the key. During the first download t
 ## Updating
 
 ```sh
-docker pull ghcr.io/niko1221/strata:0.2.1-cuda13      # the new tag (with a self-built image, build it again instead)
+docker pull ghcr.io/asofwar/strata:0.2.1-cuda13      # the new tag (with a self-built image, build it again instead)
 docker stop strata && docker rm strata
 # run the same docker run command again with the new tag (compose: docker compose pull && docker compose up -d)
 ```
@@ -293,10 +298,10 @@ files the signed update feed names. Nothing publishes by itself: a maintainer st
    the default branch to show up). Inputs: the release tag (`v0.2.1`), the flavors (empty: every flavor the release has a package
    for), **push** and **latest**. Run it once with **push off**: it builds every image and publishes nothing (a dry run).
 3. Run it again with **push on**. It logs in to `ghcr.io` with the job's `GITHUB_TOKEN` (`packages: write`) and pushes
-   `ghcr.io/niko1221/strata:0.2.1-<flavor>` and `latest-<flavor>`. Turn **latest** off for a pre-release.
+   `ghcr.io/asofwar/strata:0.2.1-<flavor>` and `latest-<flavor>`. Turn **latest** off for a pre-release.
 4. The first push creates each package as private. In the repository's Packages, open every package, **Package settings, Change
    visibility, Public**, and check it is linked to the repository (the image carries the `org.opencontainers.image.source` label).
-5. Check one pull from a computer that is not logged in: `docker pull ghcr.io/niko1221/strata:0.2.1-cuda13`.
+5. Check one pull from a computer that is not logged in: `docker pull ghcr.io/asofwar/strata:0.2.1-cuda13`.
 
 For each flavor the job runs [docker/fetch-engines.py](../docker/fetch-engines.py), which reads the release's signed feed (the
 Ed25519 key in `strata_control/update_keys.json`), downloads the package, and checks the archive's size and SHA-256, the manifest

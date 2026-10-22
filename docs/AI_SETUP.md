@@ -1,31 +1,35 @@
 # Installing Strata for a user (instructions for AI agents)
 
 This page is written for an AI coding assistant (Claude Code, Cursor, Codex, GitHub Copilot, ...) that a user asked to
-set up Strata on their PC. Strata runs the Qwen3.8-Flash-Next model locally on one NVIDIA or AMD graphics card plus
-system RAM (or on an Apple Silicon Mac), and serves an OpenAI- and Anthropic-compatible API on `http://127.0.0.1:8080`.
-The human-oriented version of everything below is [INSTALL.md](INSTALL.md).
+set up Strata on their PC. Strata runs a large mixture-of-experts model locally on one NVIDIA or AMD graphics card plus
+system RAM, and serves an OpenAI- and Anthropic-compatible API on `http://127.0.0.1:8080`. The human-oriented version of
+everything below is [INSTALL.md](INSTALL.md).
 
-You use the **Terminal**: the `strata` command. Install it with one line, then `strata launch` downloads the engine
-for the card and the model, and starts the server. If the Terminal cannot run on this PC, step 9 has the older route
-from source.
+This is **Asofwar's fork** of Strata, and everything is installed from the fork: https://github.com/Asofwar/Strata. The
+fork's releases carry a ready engine for **Windows with an NVIDIA RTX 20 series card or newer (driver 580 or newer)**. On
+any other system the engine is built from source, which the fork has not tested (Linux, Mac, AMD, Intel). The fork does not
+ship the desktop app installers, the Terminal's installer or its signed update feed, so **do not use `strata launch` or
+`strata update`**: you install with setup (`START-HERE.bat` on Windows, `./setup.sh` on Linux and Mac).
 
 Work through the steps in order. Tell the user what you are doing in plain words; they may not be technical.
 
 ## 0. Ground rules
 
-- **Never expose the server without an API key.** Keep the default (`--access local`, the server listens on
-  `127.0.0.1` only). Only if the user asks for access from other devices, use `--access lan`. Strata makes a long
-  random key for you then and will not start on a network without one. Give the user the key
-  (`strata launch --show-key`). Never put a tunnel or port forward in front of a server without a key.
-- Do not change the user's system beyond what Strata does. The Terminal installs into the user's home folder and needs
-  no administrator rights. It does not install drivers, Python packages or compilers. Ask before installing drivers.
-- The model download is ~70 GB (94 GB for Unsloth's UD-IQ4_XS, 111 GB for UD-Q4_K_XL). Confirm the user is fine with
-  that before you start, especially on a metered connection.
-- The first `strata launch` is long-running (an hour or more on a slow connection). Run it in the background or with a
-  long timeout and poll its output; do not kill it because it is quiet for a while. It is resumable: running the same
-  command again continues where it stopped.
-- Piping a script from the internet into a shell runs code you have not read. Tell the user what the line does (step 2).
-  If they prefer, download the script first, show it, and run it only after they agree.
+- **Never expose the server without an API key.** Keep the default (the server listens on `127.0.0.1` only). Only if the
+  user asks for access from other devices, pass `--host 0.0.0.0 --api-key <long random key>` together, and give the user the
+  key. Never put a tunnel or port forward in front of a server without a key.
+- Do not change the user's system beyond what setup does. It installs Python 3.12 for the user if there is none (no
+  administrator rights), a private environment in `.venv/` inside the Strata folder, the engine, the model and the draft
+  layer. It does not install drivers. If no ready engine fits the card it offers to install build tools and compile
+  (it asks first). Ask the user before installing drivers.
+- The model download is large: ~70 GB for the Flash-Next sizes (94 GB for Unsloth's UD-IQ4_XS, 111 GB for UD-Q4_K_XL),
+  18-19 GB for the fork's Cyber-Tiel and Ornith files. Confirm the user is fine with that before you start, especially on
+  a metered connection.
+- The first setup is long-running (an hour or more on a slow connection). Run it in the background or with a long
+  timeout and poll its output; do not kill it because it is quiet for a while. It is resumable: running the same command
+  again continues where it stopped.
+- Piping a script from the internet into a shell runs code you have not read. The one-line installers are for people;
+  you get the code with `git clone` or the zip (step 2), which you can read first.
 
 ## 1. Check the PC
 
@@ -35,7 +39,8 @@ Requirements (details: [INSTALL.md](INSTALL.md#what-you-need)):
   RX 9070 / 9070 XT, Radeon AI PRO R9700, RX 6800 / 6900 series; 12 GB of VRAM or more (an NVIDIA card with 8 GB runs,
   slowly). GTX 10 series and older, and integrated GPUs, are not supported; Pascal / Volta cards (P40, V100) and some
   older AMD cards have experimental paths the user opts into ([OLDER_GPUS.md](OLDER_GPUS.md)). A **Mac** needs Apple
-  Silicon (M1 or newer), macOS 15 or newer and 16 GB of memory or more ([MAC.md](MAC.md)).
+  Silicon (M1 or newer), macOS 15 or newer and 16 GB of memory or more ([MAC.md](MAC.md)). The fork's own models
+  (Cyber-Tiel, Ornith) are measured on a 16 GB NVIDIA card. For AMD, Intel and Mac say that the fork has not tested them.
 - **Driver:** NVIDIA 580 or newer. AMD on Linux: the kernel's amdgpu driver; on Windows: a current AMD Adrenalin
   driver. If the driver is missing or too old, tell the user to update it (NVIDIA App / nvidia.com/drivers, or AMD
   Software) and restart; do not install drivers yourself unless they ask.
@@ -57,101 +62,128 @@ To check by hand:
 
 If the PC does not meet them, say which part is missing and stop.
 
-## 2. Install the Terminal
+## 2. Get the fork
 
-One line. It needs no administrator rights. It checks what kind of PC this is, downloads the Terminal archive, checks
-its SHA-256, unpacks it into the user's home folder, checks the release's signed update feed, and puts `strata` on the
-PATH.
+Clone it (or, without git, download https://github.com/Asofwar/Strata/archive/refs/heads/main.zip and unzip it):
 
 ```
-Linux, Mac:           curl -fsSL https://github.com/Niko1221/Strata/releases/latest/download/install.sh | sh
-Windows (PowerShell): irm https://github.com/Niko1221/Strata/releases/latest/download/install.ps1 | iex
+git clone https://github.com/Asofwar/Strata.git
 ```
 
-On Windows, open a new terminal window afterwards (the PATH changed). Check it: `strata --version`.
+Pick a drive with enough free space and a folder without spaces in its path. The model files go to a `Strata-data` folder
+next to the Strata folder (or to `--data-dir <path>`, for example on another drive).
+
+- **Windows with an NVIDIA RTX 20 series card or newer:** setup downloads the ready engine (`strata-windows-x64.zip`)
+  from the fork's [latest release](https://github.com/Asofwar/Strata/releases/latest) and checks its SHA-256, so nothing
+  is compiled. The release also has `Strata-Asofwar-<version>-windows-cuda13.zip`, the fork's code and that engine in one
+  zip; unzip it instead of cloning if you prefer.
+- **Linux, Mac, AMD, Intel:** setup builds the engine from source on the PC. The fork has not tested these.
+- The one-line installers (`irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex`,
+  `curl -fsSL https://github.com/Asofwar/Strata/releases/latest/download/install.sh | sh`) get the same files and run
+  `START-HERE.bat` or `./setup.sh`, which ask their questions in the window. You cannot answer those, so use the commands
+  in step 4 with flags.
+
+Setup's own check prints the GPU(s), driver, RAM, CPU, free disk and whether this PC can run Strata, and installs nothing
+except Python and the `.venv` it needs to run:
+
+```
+Windows:  START-HERE.bat --check
+Linux:    ./setup.sh --check
+```
 
 ## 3. Pick the model
 
-`strata launch --plan` shows what Strata would do and changes nothing. With no `--model` it picks the model for this
-PC's RAM and prints the exact command line (`same as strata launch --model ...`). Use it as the default, or pick
-yourself by the PC's RAM (ask the user whether they mainly want it for code - then the Coder is a good pick at any RAM
-size):
+Pick by the PC and the use. Ask the user whether they mainly want it for code.
 
-| RAM | `--model` (and `--family`) | Notes |
+| PC | Flags | Notes |
 | --- | --- | --- |
-| 32 GB | `--family coder --model iq1_m` | for code; with a 24 GB card Q2_0 and IQ2_XS also run (Strata picks the low-RAM mode) |
-| 48 GB | `--model iq2_xs` | or `q2_0` (fastest) |
-| 64 GB | `--model iq2_xs` (recommended) | `iq3_xxs` / `iq3_s` are slower and a bit better |
-| 96 GB+ | `--model iq3_s` | `--family unsloth --model ud-iq4_xs` (~4-bit, 94 GB, part of the experts read from the SSD under ~80 GB of RAM); `ud-q4_k_xl` is experimental: NVIDIA only, NVMe SSD, 7-8.5 tokens/s on 64 GB |
+| NVIDIA RTX with 16 GB, 32 GB of RAM or more, for coding agents | `--family cyber-tiel` (or `--family ornith-abl`) | the fork's models: Cyber-Tiel-Coder-35B-A3B (UD-IQ4_XS, the recommended size) and Huihui-Ornith-1.5-35B-A3B-abliterated (IQ4_XS), with the fork's long-context settings. Add `--draft-vocab cyrillic` if the user chats in Russian. No pictures. [FORK.ru.md](FORK.ru.md) (Russian), [QWEN36_PACK.md](QWEN36_PACK.md) |
+| 32 GB of RAM | `--family coder --model IQ1_M` | the Qwen3.8 Coder, for code; with a 24 GB card Q2_0 and IQ2_XS also run (setup picks the low-RAM mode) |
+| 48 GB | `--model IQ2_XS` | or `Q2_0` (fastest) |
+| 64 GB | `--model IQ2_XS` (recommended) | `IQ3_XXS` / `IQ3_S` are slower and a bit better |
+| 96 GB+ | `--model IQ3_S` | `--family unsloth --model UD-IQ4_XS` (~4-bit, 94 GB, part of the experts read from the SSD under ~80 GB of RAM); `UD-Q4_K_XL` is experimental: NVIDIA only, NVMe SSD, 7-8.5 tokens/s on 64 GB |
 
-`--family swift` (Swift 1.5, a fine-tune that thinks shorter; sizes IQ2_XS, IQ3_XXS, IQ3_S) is the
-alternative to `qwen`. A model name is not case sensitive. More: [MODELS.md](MODELS.md).
+`--family swift` (Swift 1.5, a fine-tune of Qwen3.8 that thinks shorter; sizes IQ2_XS, IQ3_XXS, IQ3_S) is the alternative
+to `qwen`. A model name is case sensitive in setup's flags: use the spelling above. More: [MODELS.md](MODELS.md). Without
+`--family` and `--model`, `--yes` takes the recommended answer for this PC.
 
-## 4. Set up and serve, without questions
+## 4. Set up, without questions
+
+Run setup from the Strata folder (Windows: in `cmd`, or `cmd /c START-HERE.bat ...` from PowerShell):
 
 ```
-strata launch --plan --model iq2_xs            # what would happen; nothing is changed
-strata launch --model iq2_xs --yes --no-tui    # do it: download the engine and the model, start the server
+Windows:  START-HERE.bat --yes --family cyber-tiel --no-start
+Linux:    ./setup.sh --yes --family cyber-tiel --no-start
 ```
 
-With `--no-tui` and `--yes` it asks nothing, prints the addresses when the server is ready, and returns. The server
-keeps running in the background. `strata launch` with no `--model`, `--preset` or other choice needs a terminal for
-its screens, so an agent always names the model. Add `--output json` for output a script can read.
+or, for a Flash-Next size:
 
-The flags (all of them, with examples: `strata launch --help`):
+```
+Windows:  START-HERE.bat --yes --family qwen --model IQ2_XS --vision yes --no-start
+Linux:    ./setup.sh --yes --family qwen --model IQ2_XS --vision yes --no-start
+```
+
+The flags (all of them: `START-HERE.bat --help`):
 
 | Flag | Meaning |
 | --- | --- |
-| `--model NAME` | the size: `q2_0`, `iq2_xs`, `iq3_xxs`, `iq3_s`, `iq1_m`, `ud-iq4_xs`, `ud-q4_k_xl`, ... (the error message for a wrong name lists them) |
-| `--family NAME` | the model version when several have that size: `qwen`, `swift`, `coder`, `unsloth` |
-| `--model-path PATH` | files the user already has: a folder of shards or one `.gguf` file |
-| `--data-dir DIR` | where new model files go. Models you already have stay where they are and stay usable; add `--move-data` to move them into DIR |
-| `--context SIZE` | `32k`, `64k`, `128k`, `256k` or a number of tokens |
-| `--vision off\|on\|gpu\|cpu` | read pictures. On by default when the model can read them: the reader runs on the CPU for a card under 24 GB and on the GPU from 24 GB, on NVIDIA and AMD cards. `off` turns it off |
-| `--parallel N` | requests answered at the same time, 1 to 8 (default: fit to the card) |
-| `--gpu LIST` | card numbers, e.g. `0` or `0,1` (several cards share the model) |
-| `--tune quick\|thorough\|skip` | find the fastest settings first (default here: `skip`) |
-| `--access local\|lan\|cloudflare\|tailscale` | who can connect; beyond `local` a key is made for you |
+| `--yes` | take the recommended answer to every question (no prompts) |
+| `--family cyber-tiel\|ornith-abl\|qwen\|swift\|coder\|unsloth` | the model version (the first two are the fork's) |
+| `--model Q2_0\|IQ2_XS\|IQ3_XXS\|IQ3_S\|IQ1_M\|UD-IQ4_XS\|UD-Q4_K_XL` | the size (the Coder is IQ1_M, Unsloth UD-IQ4_XS or UD-Q4_K_XL; the fork's families have their own sizes, the recommended one is the default) |
+| `--context N` | context in tokens; default by VRAM: 32768 under 14 GB, 65536 under 20 GB, else 131072 |
+| `--vision yes\|no\|gpu\|cpu` | read pictures. Pass `yes` to get the best reader for the card (the CPU under 24 GB, the GPU from 24 GB, any make); `no` turns them off. Not available for the fork's families |
+| `--draft-vocab cyrillic` | for the fork's families: draft only tokens that suit Russian |
+| `--gpu N` / `--gpus 0,1` / `--gpus all` | one card, or several sharing the model (default: the card with the most VRAM) |
+| `--backend cuda\|hip` | NVIDIA or AMD engine; chosen by itself on a PC with only one kind of card |
+| `--parallel N` | requests answered at the same time ([BATCHING.md](BATCHING.md)) |
+| `--data-dir PATH` | where new model files go. Nothing is moved unless you add `--move-data`; the saved default folder changes only with `--move-data` or `--set-default-data-dir` |
 | `--port N` | the server port (default 8080) |
-| `--api-key KEY`, `--api-key-env NAME`, `--new-key` | the key clients must send |
-| `--save-preset NAME` | keep these choices; `strata launch --preset NAME` starts them again |
-| `--plan` | show what would happen and exit |
-| `--yes`, `--no-tui` | no questions, no screens |
-| `--status`, `--stop`, `--show-key` | what is serving, stop it, print the key |
+| `--host H --api-key K` | listen beyond this PC; only together with a key |
+| `--no-start` | install only, do not start the server |
+| `--setup` | install another model or change settings of an installed one |
+| `--check` | only check the PC |
+
+`--no-start` is recommended for agents: the server runs in the foreground until its window is closed, which would block your
+shell. Start it separately (step 6).
 
 Notes:
-- **No engine for this PC.** `strata launch` does not refuse. It says "Strata couldn't find an engine for this computer",
-  goes on to download the model (with `--yes` it does not ask), and ends without starting anything (exit code 0; with `--output json` the answer
-  has `"serving": false` and an `engine_problem`). Tell the user which card was not recognised and stop. Updating the
-  engine later with `strata update` can fix it.
-- **Exit codes:** 0 done, 2 a flag or name is wrong, 5 the Terminal or the engine cannot do it, 6 an install or the
-  server start failed (the engine log is named in the message), 130 stopped.
-- **Linux:** nothing needs `sudo`: the Terminal does not install packages. **Windows:** the first start may ask once
-  whether to allow Strata on the network if you used `--access lan`.
-- **AMD on Windows:** only the AMD driver is needed. The AMD engine is a ready-made download. It has not been run with a
-  model on a real AMD card on Windows by us: ask the user to report how it runs ([AMD_HIP.md](AMD_HIP.md)).
-- **Mac:** the Metal engine is fetched like any other. Pictures are on by default and read on the Mac's GPU ([MAC.md](MAC.md)).
+- **Linux:** setup uses `sudo apt` (or dnf/pacman) to install Python with venv if it is missing, and on AMD may need
+  `build-essential` and `git`. You cannot type the user's password: if a `sudo` step is needed, ask the user to run it
+  (e.g. `sudo apt install python3-venv build-essential git`) and then rerun setup.
+- **AMD on Linux:** setup installs ROCm into `.venv` (~10 GB, no sudo) unless a system ROCm 7 exists, and compiles the
+  engine for the card (10-20 minutes, once). The fork has not tested it.
+- **AMD on Windows:** setup downloads upstream's AMD engine (~550 MB, ROCm included) when the release has one. The fork has
+  not tested it ([AMD_HIP.md](AMD_HIP.md)); ask the user to report how it runs.
+- **NVIDIA with no ready-made engine for the card:** setup offers to install build tools and compile (20-40 minutes);
+  `--yes` accepts.
+- **Mac:** `./setup.sh` builds the Metal engine on the Mac (needs Apple's Command Line Tools, `xcode-select --install`).
+  The fork has not tested it.
+- **Do not run `strata update`** (or any `--feed` that points at upstream's releases): it would install upstream's engine,
+  which has no pack path for the fork's models.
 
 ## 5. While it downloads, tell the user
 
-- It downloads about 70 GB from Hugging Face; how long depends on their connection (at 100 Mbit/s roughly 1.5-2
-  hours). It can be stopped and continues where it left off.
+- It downloads the model from Hugging Face (~70 GB for the Flash-Next sizes, 18-19 GB for the fork's); how long depends on
+  their connection (at 100 Mbit/s roughly 1.5-2 hours for 70 GB). It can be stopped and continues where it left off.
 - Then it prepares the model for their PC (a few minutes).
 - **When the model starts, the PC can be slow or stop responding for 1-3 minutes** (longest the first time): Strata
   loads 35-55 GB into RAM and locks part of it for the graphics card. That is normal; they should not close the window.
 - Nothing leaves their PC: the model runs locally.
 
-## 6. Check that it is serving
+## 6. Start the server
 
-`strata launch` prints `Strata is serving.` with the addresses when it is done. Later:
+Setup prints the start script it wrote (`start script: run-<model>.bat`). The name is the family tag plus the size, lower
+case: `run-iq2_xs`, `run-swift-iq2_xs`, `run-coder-iq1_m`, `run-unsloth-ud-iq4_xs`, and the same pattern for the fork's
+families (their tags are `cybertiel-` and `ornithabl-`). Start it so that it keeps running:
 
 ```
-strata launch --status          # lists what is serving, with its address
-strata launch --stop            # stops it and frees the graphics memory
-strata launch --preset NAME     # starts a saved preset again (after --save-preset NAME)
+Windows (PowerShell):  Start-Process -FilePath ".\run-iq2_xs.bat"            (opens its own window)
+Linux:                 nohup ./run-iq2_xs.sh > strata-server.out 2>&1 &
 ```
 
-No browser opens by itself. Add `--open` to `strata launch` if the user wants the web page.
+The engine log is `strata-<model>.log` in the Strata folder. Closing the window (or killing the process) stops the model.
+Later starts: `START-HERE.bat` (or `./setup.sh`) starts it right away and downloads nothing twice. No browser opens by
+itself on a start from a script.
 
 ## 7. Verify
 
@@ -182,105 +214,29 @@ With an API key, add `-H "Authorization: Bearer <key>"`.
   `config.toml`: [DETAILS.md](DETAILS.md#the-responses-api-and-codex-cli)).
 - **Claude Code:** `ANTHROPIC_BASE_URL=http://127.0.0.1:8080`, `ANTHROPIC_MODEL` set to a Claude model name it knows
   (Strata ignores the name), and any `ANTHROPIC_AUTH_TOKEN` (or the configured key).
-- **The easy way for a coding app:** `strata connect` lists them (OpenCode, Codex CLI, Claude Code, oh-my-pi, pi,
-  Hermes Agent, OpenClaw). `strata connect <app>` prints the file and environment for the running server,
-  `strata connect <app> --write` writes it after asking (and keeps a backup), `strata connect <app> --check` sends
-  one prompt and one tool call the way that app does and says whether each worked.
 - **Thinking level:** `"reasoning_effort": "none" | "low" | "medium" | "high"` (default high).
-- Strata answers one request at a time; `--parallel N` in `strata launch` decodes up to N together
+- Strata answers one request at a time; `--parallel N` in setup decodes up to N together
   ([BATCHING.md](BATCHING.md)). API details: [DETAILS.md](DETAILS.md#using-it).
 
-## 9. If the Terminal cannot run: install from source
-
-Use this only when step 2 does not work on the PC (for example a CPU without AVX2, or no internet access to GitHub
-Releases). It needs git or the zip, and on Linux `sudo` for Python and build tools.
-
-```
-git clone https://github.com/Niko1221/Strata.git
-```
-
-Without git: download https://github.com/Niko1221/Strata/archive/refs/heads/main.zip and unzip it. Pick a drive with
-enough free space: the model files go to a `Strata-data` folder next to the Strata folder (or `--data-dir <path>`
-on another drive). Setup's own check prints the GPU(s), driver, RAM, CPU, free disk and whether this PC can run
-Strata, and installs nothing except Python and the `.venv` it needs to run:
-
-```
-Windows:  START-HERE.bat --check
-Linux:    ./setup.sh --check
-```
-
-Run setup without questions, from the Strata folder (Windows: in `cmd`, or `cmd /c START-HERE.bat ...` from PowerShell).
-The model is picked as in step 3, with setup's flag names (`--family qwen|swift|coder|unsloth --model Q2_0|IQ2_XS|...`):
-
-```
-Windows:  START-HERE.bat --yes --family qwen --model IQ2_XS --vision yes --no-start
-Linux:    ./setup.sh --yes --family qwen --model IQ2_XS --vision yes --no-start
-```
-
-The flags (all of them: `START-HERE.bat --help`):
-
-| Flag | Meaning |
-| --- | --- |
-| `--yes` | take the recommended answer to every question (no prompts) |
-| `--family qwen\|swift\|coder\|unsloth` | the model version |
-| `--model Q2_0\|IQ2_XS\|IQ3_XXS\|IQ3_S\|IQ1_M\|UD-IQ4_XS\|UD-Q4_K_XL` | the size (the Coder is IQ1_M, Unsloth UD-IQ4_XS or UD-Q4_K_XL) |
-| `--context N` | context in tokens; default by VRAM: 32768 under 14 GB, 65536 under 20 GB, else 131072 |
-| `--vision yes\|no\|gpu\|cpu` | read pictures. Pass `yes` to get the best reader for the card (the CPU under 24 GB, the GPU from 24 GB, any make); `no` turns them off |
-| `--gpu N` / `--gpus 0,1` / `--gpus all` | one card, or several sharing the model (default: the card with the most VRAM) |
-| `--backend cuda\|hip` | NVIDIA or AMD engine; chosen by itself on a PC with only one kind of card |
-| `--data-dir PATH` | where new model files go. Nothing is moved unless you add `--move-data`; the saved default folder changes only with `--move-data` or `--set-default-data-dir` |
-| `--port N` | the server port (default 8080) |
-| `--host H --api-key K` | listen beyond this PC; only together with a key |
-| `--no-start` | install only, do not start the server |
-| `--setup` | install another model or change settings of an installed one |
-| `--check` | only check the PC |
-
-`--no-start` is recommended for agents: the server runs in the foreground until its window is closed, which would
-block your shell. Start it separately:
-
-```
-Windows (PowerShell):  Start-Process -FilePath ".\run-iq2_xs.bat"            (opens its own window)
-Linux:                 nohup ./run-iq2_xs.sh > strata-server.out 2>&1 &
-```
-
-Setup prints the start script it wrote (`start script: run-<model>.bat`). The name is the family tag plus the size,
-lower case: `run-iq2_xs`, `run-swift-iq2_xs`, `run-coder-iq1_m`, `run-unsloth-ud-iq4_xs`. The engine log is
-`strata-<model>.log` in the Strata folder. Then continue with step 7.
-
-Notes:
-- **Linux:** setup uses `sudo apt` (or dnf/pacman) to install Python with venv if it is missing, and on AMD may need
-  `build-essential` and `git`. You cannot type the user's password: if a `sudo` step is needed, ask the user to run it
-  (e.g. `sudo apt install python3-venv build-essential git`) and then rerun setup.
-- **AMD on Linux:** setup installs ROCm into `.venv` (~10 GB, no sudo) unless a system ROCm 7 exists, and compiles the
-  engine for the card (10-20 minutes, once).
-- **AMD on Windows:** setup downloads the ready-made AMD engine (~550 MB, ROCm included) - nothing is compiled and only
-  the AMD driver is needed. Before the model download it runs `engine\strata-device.exe --list-devices`; if that does
-  not list the card, the driver is the problem (tell the user to update AMD Software). One card per model. Pictures use
-  the 24 GB rule like everywhere else.
-- **NVIDIA with no ready-made engine for the card:** setup offers to install build tools and compile (20-40 minutes);
-  `--yes` accepts.
-- **Mac:** `./setup.sh` builds the Metal engine on the Mac (needs Apple's Command Line Tools, `xcode-select --install`).
-
-## 10. When something fails
+## 9. When something fails
 
 | Symptom | What to do |
 | --- | --- |
 | `the NVIDIA driver is too old` | The user updates the driver (NVIDIA App or nvidia.com/drivers) and restarts; run the command again. |
 | Download or install stopped | Run the same command again; it continues. |
-| `Strata couldn't find an engine for this computer` | The card is not one the engine packages cover, or the update feed was not reachable. Check the card against the list in step 1, check the internet, run `strata doctor`, then `strata update`. |
-| `port 8080 is already in use` | Strata is already running (check `/health` and `strata launch --status`), or use `--port 8081`. |
-| Very slow, disk busy, or "the engine stopped unexpectedly" | Not enough free RAM: close programs, or choose a smaller size (`q2_0` or `iq2_xs`). |
+| No ready engine for this PC, or the engine download failed | Check the internet and the card against the list in step 1, run setup again. On a card or system without a ready engine setup offers to build one; on AMD, Intel and Mac say that the fork has not tested it. Do not run `strata update`. |
+| `port 8080 is already in use` | Strata is already running (check `/health`), or use `--port 8081`. |
+| Very slow, disk busy, or "the engine stopped unexpectedly" | Not enough free RAM: close programs, or choose a smaller size (`Q2_0` or `IQ2_XS`). |
 | `ExpertCache: cudaMalloc(...) failed: out of memory` with free VRAM (Windows) | The page file is off or tiny: set a fixed size (Custom size, the same initial and maximum size, e.g. 65536 MB) and restart; a page file Windows grows on demand ("System managed") may not grow in time (#60). |
-| `prompt ... exceeds the context` | Start again with a bigger `--context`. |
+| `prompt ... exceeds the context` | Run setup again with a bigger `--context` (`START-HERE.bat --setup --context 131072`). |
 | No AMD GPU found (Linux) | The amdgpu driver lists no GPU; check the card and driver. Integrated GPUs are not supported. |
-| A Mac says the app is "damaged" (the app, not the Terminal) | The file is fine: [MAC.md](MAC.md) has the one command. |
 
 More: [TROUBLESHOOTING.md](TROUBLESHOOTING.md) and the [full table](DETAILS.md#troubleshooting). If it still fails,
-run `strata doctor`, collect its output and the engine log named in the error message, and suggest an issue at
-https://github.com/Niko1221/Strata/issues.
+collect the output of `START-HERE.bat --check` and the engine log named in the error message, and suggest an issue at
+https://github.com/Asofwar/Strata/issues.
 
 ## Alternative: the MCP server
 
 Strata also has an MCP server, so an AI tool can check, install, start and stop Strata through tool calls
 (`strata_status`, `strata_models`, `strata_install`, `strata_start`, `strata_stop`, `strata_logs`) instead of the
-shell commands above. See [MCP_SERVER.md](MCP_SERVER.md).
+shell commands above. It runs setup underneath. See [MCP_SERVER.md](MCP_SERVER.md).

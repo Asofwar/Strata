@@ -1,5 +1,11 @@
 # Updates: the signed feed, the component updater, the app updater
 
+> **The Asofwar fork publishes none of this.** Its releases carry no signed feed (`strata-feed.json`, `strata-feed.json.sig`), no
+> `install-manifest.txt`, no Terminal (Control) or app packages and no `latest.json`, so `strata update` and the app's updater find
+> nothing there and change nothing. That is intended: they must not switch the fork to upstream's engine, which has no pack path for
+> the fork's models. The fork is updated with `UPDATE.bat` / `./update.sh` or a newer release zip ([INSTALL.md](../docs/INSTALL.md#updating)).
+> This page describes upstream's update system, which the fork has not tested.
+
 Everything that downloads software on a user's PC lives behind one explicit step: `strata update` in the Terminal, or
 "Update engine" / "Update Strata" in the app's Settings. Starting a model and serving never download anything
 (`STRATA_NO_ACQUIRE` stays on for them; the update step is a separate Control process that is allowed to). Engines are
@@ -172,15 +178,16 @@ was made (a second `sign-and-notarize.sh` run) makes a new archive: sign and add
 `build-feed` leaves a pack in the wrong format out of the manifest and says so. Pack Control for every platform you want the one-line install to cover (`install.sh` knows `linux-x86_64` and `macos-arm64`, `install.ps1` `windows-x86_64`);
 a platform with no line gets "this release has no Terminal for <platform>". Upload `install.sh` and `install.ps1` from `packaging/` unchanged: their built-in address is the release folder.
 
-The feed is hosted as the files of a GitHub release of `Niko1221/Strata`. The built-in address is
-`https://github.com/Niko1221/Strata/releases/latest/download` (`strata_cli/update_cmd.py` `DEFAULT_FEED` adds `/strata-feed.json`; `install.sh`
-and `install.ps1` use the folder). GitHub assets are flat, so build the packages with `--url-prefix ""` and upload every file of the release folder
+The feed is hosted as the files of a GitHub release of `Asofwar/Strata`. The built-in address is
+`https://github.com/Asofwar/Strata/releases/latest/download` (`strata_cli/update_cmd.py` `DEFAULT_FEED` adds `/strata-feed.json`; `install.sh`
+and `install.ps1` use the folder). In the fork the release assets named `install.sh` and `install.ps1` are the fork's one-line
+installers (`packaging/fork/`), not these Terminal installers. GitHub assets are flat, so build the packages with `--url-prefix ""` and upload every file of the release folder
 as an asset: `strata-feed.json`, `strata-feed.json.sig`, `install-manifest.txt`, `install.sh`, `install.ps1`, the engine and Control archives and the
 app installer with `latest.json` (the Tauri updater endpoint). `STRATA_FEED` (installers) and `--feed` / `STRATA_UPDATE_FEED` (`strata update`) override the
 address. Nothing in this tree uploads anything.
 
 Publish as a normal release (latest): a pre-release is not found by `latest/download`, so the installers, `strata update` and the app updater would get a 404. The `latest` release must carry every file listed above, so a later hotfix release repeats them all. The app updater reads
-`https://github.com/Niko1221/Strata/releases/latest/download/latest.json`.
+`https://github.com/Asofwar/Strata/releases/latest/download/latest.json`.
 
 ## Testing locally
 

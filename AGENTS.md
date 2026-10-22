@@ -2,52 +2,56 @@
 
 Strata runs the Qwen3.8-Flash-Next mixture-of-experts model (and its Coder, Swift 1.5, Unsloth, Gyro and NVFP4
 variants, and Qwen3.6-35B-A3B) on a normal PC: one NVIDIA or AMD graphics card plus system RAM on Windows or Linux,
-or an Apple Silicon Mac. Version 0.2.1, engine 0.1.46. It has three parts:
+or an Apple Silicon Mac. It is Asofwar's fork of Niko1221/Strata (base: upstream 0.2.1.1, engine 0.1.46.1; the fork's
+releases have their own versions from v1.0.0). It has three parts:
 
 - **The app** (`apps/desktop`, the Tauri shell; `apps/host`, the Node host and the web UI). It is for people who do
-  not want a terminal. The installer has the engine inside.
+  not want a terminal. The installer has the engine inside; the fork does not publish installers.
 - **The Terminal** (`strata.py`, `strata_cli/`, `strata_control/`): the `strata` command. It sets up a model, serves
-  it and watches it. Agents use this part.
+  it and watches it. The fork ships no installer or signed feed for it.
 - **The engine and the server** (`src/`, `include/`, `metal/`, `sycl/` for the C++/CUDA/HIP/SYCL/Metal engine;
   `serve/` for the Python server with an OpenAI- and Anthropic-compatible API and a web page). `setup.py`, started by
   `START-HERE.bat` or `setup.sh`, is the older one-click installer from source.
 
 ## Installing Strata for a user
 
-Follow **[docs/AI_SETUP.md](docs/AI_SETUP.md)**. For an agent that has a shell, the short version is:
+This is Asofwar's fork (https://github.com/Asofwar/Strata). Follow **[docs/AI_SETUP.md](docs/AI_SETUP.md)**. For an agent
+that has a shell, the short version is:
 
-1. Install the Terminal. It needs no administrator rights.
-
-   ```sh
-   curl -fsSL https://github.com/Niko1221/Strata/releases/latest/download/install.sh | sh                  # Linux, Mac
-   irm https://github.com/Niko1221/Strata/releases/latest/download/install.ps1 | iex                         # Windows PowerShell
-   ```
-
-   On Windows, open a new terminal afterwards so that `strata` is on the PATH.
-2. Check what would happen. Nothing is changed:
+1. Get the fork. Setup downloads the ready engine on Windows with an NVIDIA RTX 20 series card or newer (driver 580 or newer);
+   on other systems it builds the engine from source, which the fork has not tested.
 
    ```sh
-   strata launch --plan --model q2_0
+   git clone https://github.com/Asofwar/Strata.git
    ```
 
-3. Set up and serve without questions. It downloads the engine for the card and the model (tens of GB), starts the
-   server, prints the addresses and returns. The server keeps running.
+   Without git, download https://github.com/Asofwar/Strata/archive/refs/heads/main.zip and unzip it. On Windows the release
+   zip `Strata-Asofwar-<version>-windows-cuda13.zip` from https://github.com/Asofwar/Strata/releases/latest holds the same
+   code and a ready engine.
+2. Check the PC. Nothing is installed except Python and the `.venv`:
 
    ```sh
-   strata launch --model q2_0 --yes --no-tui
+   START-HERE.bat --check      # Windows
+   ./setup.sh --check          # Linux, Mac
    ```
 
-   Useful flags (all of them: `strata launch --help`): `--family`, `--model-path` (files the user already has),
-   `--data-dir`, `--context 32k|64k|128k`, `--vision off|on|gpu|cpu`, `--parallel N`, `--gpu 0,1`,
-   `--access local|lan|cloudflare|tailscale`, `--port`, `--api-key-env NAME`, `--new-key`, `--save-preset NAME`,
-   `--output json`. `strata launch --status` shows what is serving, `strata launch --stop` stops it, and
-   `strata launch --show-key` prints the API key.
-4. Connect the user's apps: `strata connect` lists them, `strata connect <app> --check` sends one prompt and one tool
-   call the way that app does.
+3. Set up without questions. It downloads the engine (if there is none) and the model (tens of GB) and writes a start
+   script. `--no-start` keeps the server from blocking your shell:
 
-Never expose the server beyond `127.0.0.1` without an API key. `--access lan` makes a key for you. The old route (clone
-the repository and run `START-HERE.bat --yes` or `./setup.sh --yes`) still works and is the fallback when the
-Terminal cannot run. Strata's MCP server ([docs/MCP_SERVER.md](docs/MCP_SERVER.md)) offers the same steps as tools.
+   ```sh
+   START-HERE.bat --yes --family cyber-tiel --no-start     # Windows; the fork's model, or --family ornith-abl
+   ./setup.sh --yes --family qwen --model IQ2_XS --no-start # Linux, Mac; a Flash-Next size
+   ```
+
+   All flags: `START-HERE.bat --help` (or `./setup.sh --help`). Then start the script setup printed (`run-<model>.bat` or
+   `run-<model>.sh`) and check `curl http://127.0.0.1:8080/health`.
+4. Connect the user's apps: base URL `http://127.0.0.1:8080/v1` (OpenAI), `http://127.0.0.1:8080` (Anthropic). The steps are in
+   [docs/AI_SETUP.md](docs/AI_SETUP.md).
+
+Do not use `strata launch` or `strata update` to install or update the fork: the fork ships no Terminal installer and no
+signed update feed, and upstream's would install upstream's engine, which has no pack path for the fork's models. Never
+expose the server beyond `127.0.0.1` without an API key (`--host 0.0.0.0 --api-key KEY`). Strata's MCP server
+([docs/MCP_SERVER.md](docs/MCP_SERVER.md)) offers the same steps as tools.
 
 ## Working on the code
 

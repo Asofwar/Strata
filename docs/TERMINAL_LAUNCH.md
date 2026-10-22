@@ -4,18 +4,28 @@ One command for the whole path: choose a model, tune it, start serving, and watc
 in the Terminal's look, with presets, an Advanced table, an access choice and a Connect view for your coding apps. Text previews of every screen are in
 [docs/terminal-previews/](terminal-previews/) (`launch-*.txt`).
 
-## Install (one line)
+## Install
+
+> **The Asofwar fork does not ship this.** Its releases (`https://github.com/Asofwar/Strata/releases/latest/download`) carry no
+> Terminal archive, no `install-manifest.txt` and no signed feed. The release assets `install.ps1` and `install.sh` are the fork's own
+> one-line installers: they fetch the fork's code and run setup ([INSTALL.md](INSTALL.md#one-line)), and they do not put `strata`
+> on your PATH. `strata update` finds nothing in the fork's releases and changes nothing; do not point it at upstream's feed, which
+> would install upstream's engine. This page describes upstream's Terminal, which the fork has not tested. From a checkout the same
+> command is `bin/strata` (`bin/strata launch`).
+
+Upstream's Terminal installs with one line from its own release folder (the scripts are `packaging/install.sh` and `packaging/install.ps1`
+in the repository):
 
 ```sh
-curl -fsSL https://github.com/Niko1221/Strata/releases/latest/download/install.sh | sh          # Linux, macOS
-irm https://github.com/Niko1221/Strata/releases/latest/download/install.ps1 | iex                # Windows PowerShell
+curl -fsSL <release folder>/install.sh | sh          # Linux, macOS
+irm <release folder>/install.ps1 | iex                # Windows PowerShell
 ```
 
 It finds out which computer this is, downloads the Terminal archive named in the release folder's `install-manifest.txt`, checks its SHA-256, unpacks it into your
 home (`~/.local/share/strata/terminal`, `%LOCALAPPDATA%\Strata\terminal`; no administrator rights), checks the release's signed feed with the Terminal it just unpacked
 (`strata update --check`; if that fails it removes what it unpacked), puts `strata` on your PATH and prints `Installed. Run: strata launch`. The engine (the part that talks
 to your graphics card) comes with the first model: `strata launch` fetches the one for your card from the same release folder, signed, and test-starts it before using it.
-The release folder is the latest GitHub release of Niko1221/Strata (`https://github.com/Niko1221/Strata/releases/latest/download`). The script only fetches and checks; read it first if you like (it is the same file as `install.sh` / `install.ps1` in the repository's `packaging` folder and in the release). Set `STRATA_FEED` to another folder to try a local one; `packaging/make_local_feed.py` builds a test-signed one. How far to trust a piped installer is in [SECURITY.md](../SECURITY.md).
+The script only fetches and checks; read it first if you like. Set `STRATA_FEED` to another folder to try a local one; `packaging/make_local_feed.py` builds a test-signed one. How far to trust a piped installer is in [SECURITY.md](../SECURITY.md).
 
 ## The screens (`strata launch`)
 
