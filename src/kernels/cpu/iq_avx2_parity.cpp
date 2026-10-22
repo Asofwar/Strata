@@ -352,6 +352,147 @@ int check_down(int d_type) {
 }
 
 #if !defined(STRATA_IQ_PARITY_DISPATCH_ONLY)
+// STRATA_IQ3S_FAST's kernel (iq256_gu_rows_iq3s) in each variant against the scalar variant's one-token IQ3_S rows (which
+// every variant of iq256_gu_rows gives at every width, check_gate_up), bit for bit: 1..8 tokens, the whole expert and
+// odd row ranges (as the pool's tasks cut an expert).
+int check_iq3s_fast() {
+    cpu::NativeFmt f;
+    std::string err;
+    if (!cpu::native_fmt(21, 20, kH, kFF, f, err)) return 1;
+    std::vector<uint8_t> blob(f.bytes);
+    uint64_t seed = 0x13350000ull;
+    fill_blob(blob.data(), f, seed);
+    const Acts a(f, 4242u);
+    const size_t R = (size_t) kFF;
+    std::vector<float> one(kMaxT * R);
+    for (int t = 0; t < kMaxT; ++t) {
+        float* o = &one[t * R];
+        gu_rows_v(0, 21, blob.data(), f.gu_row, f.up_off, &a.gup[t], 1, &o);
+    }
+    int failures = 0;
+    for (int v : subsets(cpu::iq256_variants() & cpu::kIq256Vnni)) {
+        size_t differ = 0, rows = 0;
+        std::vector<float> got(kMaxT * R);
+        for (int nt = 1; nt <= kMaxT; ++nt) {
+            float* gp[kMaxT];
+            for (int t = 0; t < nt; ++t) gp[t] = &got[t * R];
+            for (int pass = 0; pass < 2; ++pass) {
+                std::fill(got.begin(), got.end(), -1.f);
+                if (pass == 0) {
+                    cpu::iq256_gu_rows_iq3s_v(v, blob.data(), f.gu_row, f.up_off, (int) kH, a.gup, nt, gp, 0, (int) kFF);
+                } else {
+                    for (int r0 = 0; r0 < (int) kFF;) {   // ranges of 1..13 rows
+                        const int r1 = std::min((int) kFF, r0 + 1 + (r0 * 7 + nt) % 13);
+                        cpu::iq256_gu_rows_iq3s_v(v, blob.data(), f.gu_row, f.up_off, (int) kH, a.gup, nt, gp, r0, r1);
+                        r0 = r1;
+                    }
+                }
+                for (int t = 0; t < nt; ++t) differ += rows_differ(gp[t], &one[t * R], R);
+                rows += (size_t) nt * R;
+            }
+        }
+        std::printf("  iq3_s    fast kernel %-6s 1..8 tokens: %zu of %zu gate/up rows differ from the scalar one-token rows\n",
+                    (v & cpu::kIq256Vnni) ? "vnni" : "avx2", differ, rows);
+        if (differ) ++failures;
+    }
+    return failures;
+}
+
+// STRATA_IQ4XS_DOWN's kernel (iq4xs256_down_rows) in each variant against ggml-cpu's own AVX2 IQ4_XS dot, bit for bit:
+// 1..8 tokens, rows of 512 and 1024 values, odd row ranges (two-row groups and their tails).  Only where ggml-cpu
+// runs its AVX2 dot (built for AVX2, not AVX-512); elsewhere the engine does not take the kernel.
+int check_iq4xs_down() {
+    if (!ggml_cpu_has_avx2() || ggml_cpu_has_avx512()) {
+        std::printf("  iq4_xs   down kernel: ggml-cpu is not its AVX2 build here, the engine keeps ggml's dot\n");
+        return 0;
+    }
+    int failures = 0;
+    for (int n : {512, 1024}) {
+        const int rows = 203;   // not a multiple of four
+        const size_t row_bytes = ggml_row_size(GGML_TYPE_IQ4_XS, n);
+        std::vector<uint8_t> w(row_bytes * (size_t) rows);
+        uint64_t seed = 0x1a4c0000ull + (uint64_t) n;
+        fill_blocks(w.data(), w.size(), 23, seed);
+        std::mt19937 rng(9u + (unsigned) n);
+        std::normal_distribution<float> nd(0.f, 0.05f);
+        std::vector<std::vector<uint8_t>> h(kMaxT, std::vector<uint8_t>(ggml_row_size(GGML_TYPE_Q8_K, n)));
+        const void* hp[kMaxT];
+        std::vector<float> x((size_t) n);
+        for (int t = 0; t < kMaxT; ++t) {
+            for (auto& v : x) v = nd(rng);
+            cpu::q8k_quant_avx2(x.data(), h[(size_t) t].data(), n);
+            hp[t] = h[(size_t) t].data();
+        }
+        std::vector<float> ref((size_t) kMaxT * rows);
+        for (int t = 0; t < kMaxT; ++t)
+            for (int r = 0; r < rows; ++r)
+                traits_cpu(23)->vec_dot(n, &ref[(size_t) t * rows + r], 0, w.data() + (size_t) r * row_bytes, 0, hp[t], 0, 1);
+        for (int v : subsets(cpu::iq256_variants() & cpu::kIq256Vnni)) {
+            size_t differ = 0;
+            std::vector<float> o((size_t) kMaxT * rows);
+            for (int nt = 1; nt <= kMaxT; ++nt) {
+                float* op[kMaxT];
+                for (int t = 0; t < nt; ++t) op[t] = &o[(size_t) t * rows];
+                std::fill(o.begin(), o.end(), -1.f);
+                for (int r0 = 0; r0 < rows;) {
+                    const int r1 = std::min(rows, r0 + 1 + (r0 * 5 + nt) % 11);
+                    cpu::iq4xs256_down_rows_v(v, w.data(), row_bytes, n, hp, nt, op, r0, r1);
+                    r0 = r1;
+                }
+                for (int t = 0; t < nt; ++t) differ += rows_differ(op[t], &ref[(size_t) t * rows], (size_t) rows);
+                std::fill(o.begin(), o.end(), -1.f);
+                cpu::iq4xs256_down_rows_v(v, w.data(), row_bytes, n, hp, nt, op, 0, rows);
+                for (int t = 0; t < nt; ++t) differ += rows_differ(op[t], &ref[(size_t) t * rows], (size_t) rows);
+            }
+            std::printf("  iq4_xs   down kernel %-6s n=%-4d 1..8 tokens: %zu rows differ from ggml's dot\n",
+                        (v & cpu::kIq256Vnni) ? "vnni" : "avx2", n, differ);
+            if (differ) ++failures;
+        }
+    }
+    return failures;
+}
+
+// The engine's IQ4_XS down rows (native_down_rows: ggml's dot, or iq4xs256_down_rows under STRATA_IQ4XS_DOWN=1) against
+// ggml's dot token by token, bit for bit, at 1..8 tokens: Cyber-Tiel's geometry (2048 x 512).
+int check_engine_down_iq4xs() {
+    if (!ggml_cpu_has_avx2() || ggml_cpu_has_avx512()) return 0;
+    cpu::NativeFmt f;
+    std::string err;
+    if (!cpu::native_fmt(21, 23, 2048, 512, f, err)) {
+        std::printf("  iq4_xs   engine down: %s\n", err.c_str());
+        return 1;
+    }
+    std::vector<uint8_t> blob(f.bytes);
+    uint64_t seed = 0xd4c50000ull;
+    fill_blob(blob.data(), f, seed);
+    std::mt19937 rng(31u);
+    std::normal_distribution<float> nd(0.f, 0.05f);
+    std::vector<std::vector<uint8_t>> h(kMaxT, std::vector<uint8_t>(cpu::kNativeHBytes));
+    const void* hp[kMaxT];
+    std::vector<float> x(512);
+    for (int t = 0; t < kMaxT; ++t) {
+        for (auto& v : x) v = nd(rng);
+        cpu::native_quant_h(f, x.data(), h[(size_t) t].data());
+        hp[t] = h[(size_t) t].data();
+    }
+    const size_t R = 2048;
+    std::vector<float> ref(kMaxT * R), o(kMaxT * R);
+    for (int t = 0; t < kMaxT; ++t)
+        for (size_t r = 0; r < R; ++r)
+            traits_cpu(23)->vec_dot(512, &ref[t * R + r], 0, blob.data() + f.down_off + r * f.d_row, 0, hp[t], 0, 1);
+    size_t differ = 0;
+    for (int nt = 1; nt <= kMaxT; ++nt) {
+        float* op[kMaxT];
+        for (int t = 0; t < nt; ++t) op[t] = &o[t * R];
+        cpu::native_down_rows(f, blob.data(), hp, nt, op, 0, (int) R);
+        for (int t = 0; t < nt; ++t) differ += rows_differ(op[t], &ref[t * R], R);
+    }
+    const char* env = std::getenv("STRATA_IQ4XS_DOWN");
+    std::printf("  iq4_xs   engine down (STRATA_IQ4XS_DOWN %s), 1..8 tokens: %zu rows differ from ggml's dot\n",
+                env ? env : "-", differ);
+    return differ ? 1 : 0;
+}
+
 // #152 through the engine's dispatch: where native_gu_rows gives a format the multi-token kernel from one token on
 // (native_gu_mt_min 1: IQ3_S where its grid is gathered, or every format under STRATA_IQ_MT_MIN=1), each token's
 // gate/up rows must be the same alone and in any group.
@@ -570,6 +711,9 @@ int main(int argc, char** argv) {
     for (int type : {16, 17, 22, 18, 21, 23}) failures += check_gate_up(type);
     for (int type : {20, 42}) failures += check_down(type);
 #if !defined(STRATA_IQ_PARITY_DISPATCH_ONLY)
+    failures += check_iq3s_fast();
+    failures += check_iq4xs_down();
+    failures += check_engine_down_iq4xs();
     for (int type : {16, 17, 22, 18, 21, 23}) failures += check_engine_width(type);
 #endif
     std::printf("iq_avx2_parity: %d failures\n", failures);

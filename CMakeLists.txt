@@ -1659,9 +1659,14 @@ if(STRATA_NATIVE_EXPERTS)
   # MODEL-UPDATE: the pool's expert rows per format on T threads against the RAM bandwidth (a benchmark, no test)
   add_executable(kq_cpu_bench src/kernels/cpu/kq_cpu_bench.cpp)
   target_link_libraries(kq_cpu_bench PRIVATE strata_kernels_cpu)
+  # the decode pool's phases (gate/up, quantize, down) per expert format through ExpertPool itself (a benchmark, no test)
+  add_executable(pool_native_bench src/kernels/cpu/pool_native_bench.cpp)
+  target_link_libraries(pool_native_bench PRIVATE strata_kernels_cpu)
   if(STRATA_BUILD_TESTS)
     add_test(NAME iq_avx2_parity COMMAND iq_avx2_parity)
     add_test(NAME iq_avx2_parity_iq3s_mt1 COMMAND ${CMAKE_COMMAND} -E env STRATA_IQ3S_MT1=1 $<TARGET_FILE:iq_avx2_parity>)
+    add_test(NAME iq_avx2_parity_iq3s_fast_iq4xs_down
+             COMMAND ${CMAKE_COMMAND} -E env STRATA_IQ3S_FAST=1 STRATA_IQ4XS_DOWN=1 $<TARGET_FILE:iq_avx2_parity>)
   endif()
   # the older CPUs' AVX1 expert rows (iq_avx1.cpp) against ggml-cpu's dots and against their own one-token
   # rows at every width; --bench: ms per expert, the weights streamed from DRAM.  Runs on any AVX CPU:

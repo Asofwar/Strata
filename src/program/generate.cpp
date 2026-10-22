@@ -14659,7 +14659,7 @@ int main(int argc, char** argv) {
             const DecSnap ds0 = dec_snap();
             // the CPU pool's own phases over this request (the decode timing's pool line)
             const double pgu0 = pool.ms_multi_gu, pq0 = pool.ms_multi_q, pdown0 = pool.ms_multi_down;
-            const int64_t pbytes0 = pool.multi_bytes;
+            const int64_t pbytes0 = pool.multi_bytes, pgub0 = pool.multi_gu_bytes, pdnb0 = pool.multi_down_bytes;
             const std::vector<strata::kernels::cpu::ExpertPool::ThreadStat> pst0 = pool.thread_stats();
             const strata::kernels::cpu::ExpertPool::PhaseStat pph0 = pool.phase_stats();
             const std::vector<uint64_t> pcyc0 = strata::kernels::cpu::ExpertPool::stats_on() ? pool.thread_cycles()
@@ -15834,9 +15834,12 @@ int main(int argc, char** argv) {
                     for (size_t c = 0; c < host_cpus.size(); ++c)
                         if (host_cpus[c] > 0) hc += " " + std::to_string(c) + ":" + std::to_string(host_cpus[c]);
                     std::fprintf(stderr, "strata decode pool: gate/up %.2f  quantize %.2f  down %.2f ms/window; %.1f GB/s over "
-                                         "the rows phases; %d workers%s; host thread on CPU%s\n", gu / w, q / w, dn / w,
+                                         "the rows phases; %d workers%s; host thread on CPU%s; gate/up %.1f GB/s, down %.1f GB/s\n",
+                                 gu / w, q / w, dn / w,
                                  (double) (pool.multi_bytes - pbytes0) / 1e6 / std::max(1e-9, gu + dn), pool.workers(),
-                                 o.no_host_worker ? "" : " + the host", hc.empty() ? " ?" : hc.c_str());
+                                 o.no_host_worker ? "" : " + the host", hc.empty() ? " ?" : hc.c_str(),
+                                 (double) (pool.multi_gu_bytes - pgub0) / 1e6 / std::max(1e-9, gu),
+                                 (double) (pool.multi_down_bytes - pdnb0) / 1e6 / std::max(1e-9, dn));
                     const std::vector<strata::kernels::cpu::ExpertPool::ThreadStat> pst1 = pool.thread_stats();
                     if (!pst1.empty() && pst1.size() == pst0.size()) {   // STRATA_POOL_STATS: per thread, tasks and us/task
                         std::string ts;

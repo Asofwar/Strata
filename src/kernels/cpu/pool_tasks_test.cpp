@@ -66,21 +66,24 @@ int main(int argc, char** argv) {
         }
         { // The default partition is the arithmetic reference; inactive token slots remain zero.
             cpu::ExpertPool baseline(3, false);
+            baseline.set_fused_phases(false);
             baseline.run_split_multi_native(f, jobs.data(), n);
         }
         const auto ref = out;
         for (float v : ref) if (!std::isfinite(v)) return 1;
-        for (bool host : {false, true}) for (int workers : {1, 3})
+        // STRATA_POOL_FUSED's one phase (set_fused_phases) gives the same bits as the two phases
+        for (bool fused : {false, true}) for (bool host : {false, true}) for (int workers : {1, 3})
             for (int tasks : {0, 1, 41, 128, 192, 256, cpu::ExpertPool::kMaxTasks}) {
                 cpu::ExpertPool pool(workers, false, host, cpu::PoolAffinity::All, tasks);
+                pool.set_fused_phases(fused);
                 for (int repeat = 0; repeat < 2; ++repeat) {
                     std::fill(out.begin(), out.end(), 0.0f);
                     for (const auto& job : jobs) for (int t = 0; t < job.nt; ++t)
                         std::fill(job.out[t], job.out[t] + cpu::H, std::numeric_limits<float>::quiet_NaN());
                     pool.run_split_multi_native(f, jobs.data(), n);
                     if (std::memcmp(ref.data(), out.data(), out.size() * sizeof(float)) != 0) {
-                        std::fprintf(stderr, "mismatch n=%d workers=%d host=%d tasks=%d repeat=%d\n",
-                                     n, workers, host, tasks, repeat);
+                        std::fprintf(stderr, "mismatch n=%d workers=%d host=%d tasks=%d repeat=%d fused=%d\n",
+                                     n, workers, host, tasks, repeat, (int) fused);
                         return 1;
                     }
                     ++checks;

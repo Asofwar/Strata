@@ -338,5 +338,153 @@ STRATA_ROWS_FN void iq4nl_nt(const uint8_t* w, size_t row_bytes, int n, const bl
     }
 }
 
+// ---- IQ3_S gate/up rows (STRATA_IQ3S_FAST): row_dot<121, NT> bit for bit, in fewer instructions.  For a group of
+// tokens gu_rows<121, NT> spends most of its time decoding: every half builds its high index bits with a broadcast and
+// a variable shift and its scale with a broadcast, and loads its four sign bytes alone.  Here the high index bits and
+// the scales come from tables (one load each) and one broadcast serves both halves' sign bytes; each 64-value group is
+// decoded once and applied to every token, one row at a time (the tokens' accumulators are the independent chains).
+// The integer lanes, the block order of the float sums, hsum8 and gu_rows' SwiGLU expression are row_dot's: the same
+// bits.  One token gains nothing (the gathers are its limit: 0.165 against 0.164 ms per expert's gate/up rows on a
+// 14900K P-core), so the engine takes this for groups of two tokens and more.
+template <int NT> STRATA_ROWS_FN
+inline void iq3s_row_nt(const uint8_t* row, int nb, const block_q8_K* const* y, float* res) {
+    const __m256i sel = _mm256_set1_epi64x((long long) 0x8040201008040201ull);
+    const __m256i one = _mm256_set1_epi8(1);
+    const int pf = prefetch_distance();
+    __m256 accf[NT];
+    for (int t = 0; t < NT; ++t) accf[t] = _mm256_setzero_ps();
+    for (int i = 0; i < nb; ++i) {
+        const uint8_t* b = row + (size_t) i * 110;
+        rows_ahead(b, pf);
+        __m256i acc[NT];
+        for (int t = 0; t < NT; ++t) acc[t] = _mm256_setzero_si256();
+        for (int j = 0; j < 4; ++j) {
+            const uint8_t* q = b + 2 + 16 * j;
+            const __m256i g0 = _mm256_i32gather_epi32((const int*) iq3s_grid, _mm256_or_si256(
+                _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*) q)), _mm256_load_si256((const __m256i*) hi_dw.v[b[66 + 2 * j]])), 4);
+            const __m256i g1 = _mm256_i32gather_epi32((const int*) iq3s_grid, _mm256_or_si256(
+                _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*) (q + 8))), _mm256_load_si256((const __m256i*) hi_dw.v[b[67 + 2 * j]])), 4);
+            const __m256i sb = _mm256_set1_epi64x((long long) u64(b + 74 + 8 * j));
+            const __m256i s0 = _mm256_or_si256(_mm256_cmpeq_epi8(_mm256_and_si256(_mm256_shuffle_epi8(sb, _mm256_setr_epi8(
+                0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3)), sel), sel), one);
+            const __m256i s1 = _mm256_or_si256(_mm256_cmpeq_epi8(_mm256_and_si256(_mm256_shuffle_epi8(sb, _mm256_setr_epi8(
+                4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7)), sel), sel), one);
+            const uint8_t s = b[106 + j];
+            const __m256i c0 = scale_vec(scale_vecs.s32[s & 15]), c1 = scale_vec(scale_vecs.s32[s >> 4]);
+            for (int t = 0; t < NT; ++t) {
+                const __m256i y0 = _mm256_loadu_si256((const __m256i*) (y[t][i].qs + 64 * j));
+                const __m256i y1 = _mm256_loadu_si256((const __m256i*) (y[t][i].qs + 64 * j + 32));
+                acc[t] = madd_add(acc[t], _mm256_maddubs_epi16(g0, _mm256_sign_epi8(y0, s0)), c0);
+                acc[t] = madd_add(acc[t], _mm256_maddubs_epi16(g1, _mm256_sign_epi8(y1, s1)), c1);
+            }
+        }
+        const float dx = h2f(u16(b)) * Fmt32<121>::K;
+        for (int t = 0; t < NT; ++t)
+            accf[t] = _mm256_fmadd_ps(_mm256_set1_ps(dx * y[t][i].d), _mm256_cvtepi32_ps(acc[t]), accf[t]);
+    }
+    for (int t = 0; t < NT; ++t) res[t] = hsum8(accf[t]);
+}
+
+template <int NT> STRATA_ROWS_FN
+void gu_iq3s_nt(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const block_q8_K* const* y, float* const* ff,
+                int r0, int r1) {
+    const int nb = n / QK_K;
+    float g[NT], u[NT];
+    for (int r = r0; r < r1; ++r) {
+        iq3s_row_nt<NT>(blob + (size_t) r * gu_row, nb, y, g);
+        iq3s_row_nt<NT>(blob + up_off + (size_t) r * gu_row, nb, y, u);
+        for (int t = 0; t < NT; ++t) ff[t][r] = (g[t] / (1.f + std::exp(-g[t]))) * u[t];
+    }
+}
+
+STRATA_ROWS_FN void gu_iq3s_any(int nt, const uint8_t* blob, size_t gu_row, size_t up_off, int n,
+                                const block_q8_K* const* y, float* const* ff, int r0, int r1) {
+    switch (nt) {
+        case 1: gu_iq3s_nt<1>(blob, gu_row, up_off, n, y, ff, r0, r1); break;
+        case 2: gu_iq3s_nt<2>(blob, gu_row, up_off, n, y, ff, r0, r1); break;
+        case 3: gu_iq3s_nt<3>(blob, gu_row, up_off, n, y, ff, r0, r1); break;
+        case 4: gu_iq3s_nt<4>(blob, gu_row, up_off, n, y, ff, r0, r1); break;
+        default: for (int t0 = 0; t0 < nt; t0 += 4) {
+            const int k = nt - t0 < 4 ? nt - t0 : 4;
+            gu_iq3s_any(k, blob, gu_row, up_off, n, y + t0, ff + t0, r0, r1);
+        }
+    }
+}
+
+// ---- IQ4_XS down rows (type 23, n_ff values against Q8_K; STRATA_IQ4XS_DOWN): ggml_vec_dot_iq4_xs_q8_K's AVX2 path
+// bit for bit, which is what native_down_rows runs for this format on every group size.  ggml computes each row and
+// token in a call of its own; here the NT tokens of a group share each row's decode (nibbles -> kvalues_iq4nl, |w|,
+// one broadcast load and a variable shift instead of two shuffles and an insert), and R rows share each activation
+// load.  Per row and token the arithmetic is ggml's: the same int32 lanes per block (its sumi1 + sumi2 are exact
+// integers, so one accumulator holds the same), one fmadd per block in block order with the same scale (fp16 d times
+// the activation's d), and hsum_float_8's order of additions (ggml_hsum8).
+template <int NT, int R> STRATA_ROWS_FN
+inline void iq4xs_rows_r(const uint8_t* w, size_t row_bytes, int nb, const block_q8_K* const* y, float* const* out,
+                         int r) {
+    const __m256i values = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*) kvalues_iq4nl));
+    const __m256i m4 = _mm256_set1_epi8(0x0f);
+    const __m256i nib = _mm256_setr_epi64x(0, 0, 4, 4);   // low lane: low nibbles (values 0-15), high lane: high ones
+    const int pf = prefetch_distance();
+    __m256 accf[R][NT];
+    for (int k = 0; k < R; ++k)
+        for (int t = 0; t < NT; ++t) accf[k][t] = _mm256_setzero_ps();
+    for (int i = 0; i < nb; ++i) {
+        const uint8_t* blk[R];
+        __m256i acc[R][NT];
+        for (int k = 0; k < R; ++k) {
+            blk[k] = w + (size_t) (r + k) * row_bytes + (size_t) i * 136;
+            rows_ahead(blk[k], pf);
+            for (int t = 0; t < NT; ++t) acc[k][t] = _mm256_setzero_si256();
+        }
+        for (int ib = 0; ib < 8; ++ib) {
+            __m256i yv[NT];
+            for (int t = 0; t < NT; ++t) yv[t] = _mm256_loadu_si256((const __m256i*) (y[t][i].qs + 32 * ib));
+            for (int k = 0; k < R; ++k) {
+                const __m256i bits = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*) (blk[k] + 8 + 16 * ib)));
+                const __m256i q4 = _mm256_shuffle_epi8(values, _mm256_and_si256(_mm256_srlv_epi64(bits, nib), m4));
+                const __m256i aq = _mm256_sign_epi8(q4, q4);
+                const int ls = ((blk[k][4 + (ib >> 1)] >> (4 * (ib & 1))) & 0xf) | (((u16(blk[k] + 2) >> (2 * ib)) & 3) << 4);
+                const __m256i sc = scale_vec(iq4xs_scales.v[ls]);
+                for (int t = 0; t < NT; ++t)
+                    acc[k][t] = madd_add(acc[k][t], _mm256_maddubs_epi16(aq, _mm256_sign_epi8(yv[t], q4)), sc);
+            }
+        }
+        for (int k = 0; k < R; ++k) {
+            const float dx = h2f(u16(blk[k]));
+            for (int t = 0; t < NT; ++t)
+                accf[k][t] = _mm256_fmadd_ps(_mm256_set1_ps(dx * y[t][i].d), _mm256_cvtepi32_ps(acc[k][t]), accf[k][t]);
+        }
+    }
+    for (int k = 0; k < R; ++k)
+        for (int t = 0; t < NT; ++t) out[t][r + k] = ggml_hsum8(accf[k][t]);
+}
+
+template <int NT> STRATA_ROWS_FN
+void iq4xs_rows(const uint8_t* w, size_t row_bytes, int n, const block_q8_K* const* y, float* const* out, int r0,
+                int r1) {
+    // One row at a time at one token: four rows side by side were 30% faster from the caches but 6-9% slower from RAM
+    // (the rows' blocks no longer come in address order), and decode reads its CPU experts from RAM.  Two tokens: two
+    // rows (as fast as one from RAM, faster from the caches).  14900K, pool_native_bench, 2-3 experts per layer.
+    constexpr int R = NT == 2 ? 2 : 1;
+    const int nb = n / QK_K;
+    int r = r0;
+    for (; r + R <= r1; r += R) iq4xs_rows_r<NT, R>(w, row_bytes, nb, y, out, r);
+    for (; r < r1; ++r) iq4xs_rows_r<NT, 1>(w, row_bytes, nb, y, out, r);
+}
+
+STRATA_ROWS_FN void iq4xs_nt(const uint8_t* w, size_t row_bytes, int n, const block_q8_K* const* y, int nt,
+                             float* const* out, int r0, int r1) {
+    switch (nt) {
+        case 1: iq4xs_rows<1>(w, row_bytes, n, y, out, r0, r1); break;
+        case 2: iq4xs_rows<2>(w, row_bytes, n, y, out, r0, r1); break;
+        case 3: iq4xs_rows<3>(w, row_bytes, n, y, out, r0, r1); break;
+        case 4: iq4xs_rows<4>(w, row_bytes, n, y, out, r0, r1); break;
+        default: for (int t0 = 0; t0 < nt; t0 += 4) {
+            const int k = nt - t0 < 4 ? nt - t0 : 4;
+            iq4xs_nt(w, row_bytes, n, y + t0, k, out + t0, r0, r1);
+        }
+    }
+}
+
 #undef STRATA_ROWS_VNNI
 #undef STRATA_ROWS_FN

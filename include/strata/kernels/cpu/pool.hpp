@@ -211,6 +211,12 @@ public:
     /// Plan v0.3 P6: the same for a native pack's layer (ggml-cpu arithmetic, `nact` activations).
     void run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs, int n);
     static constexpr int kMaxSplitMulti = 96;
+    /// STRATA_POOL_FUSED=1 (opt-in): run_split_multi_native's two row phases as ONE phase - the gate/up tasks first, then
+    /// the down tasks, and a down range starts as soon as its own expert's gate/up rows are done and its intermediate
+    /// quantized (by the thread that finished that expert's last gate/up rows), instead of after a second publish and the
+    /// slowest thread of the first phase.  The same kernels and quantizer, so the same bits.  Tests set it directly.
+    void set_fused_phases(bool on) { fused_ = on; }
+    bool fused_phases() const { return fused_; }
     /// run_split_multi's phases, accumulated ms: gate/up rows, the intermediate quantization, down rows.
     double ms_multi_gu = 0, ms_multi_q = 0, ms_multi_down = 0;
     /// STRATA_POOL_STATS=1 (a diagnostic, off by default): the tasks each thread ran and the time it spent in them,
@@ -240,6 +246,8 @@ public:
     std::vector<uint32_t> thread_ids() const;
     std::vector<std::pair<double, double>> thread_times() const;
     int64_t multi_bytes = 0;
+    /// The same bytes split by phase: gate/up rows and down rows (STRATA_DECODE_TIMING's per-phase GB/s).
+    int64_t multi_gu_bytes = 0, multi_down_bytes = 0;
 
     /// Total `_mm_pause` iterations spent waiting, over all workers, is no longer counted - see the note on the
     /// atomics below.  It was a LOCKED read-modify-write in the park loop, so measuring the contention added to
@@ -364,6 +372,14 @@ private:
     };
     const NativeFmt* nfmt_ = nullptr;
     std::vector<SplitBufMulti> split_multi_;
+    // STRATA_POOL_FUSED (mode 7): the gate/up and down row ranges of one phase, per expert the gate/up rows done and
+    // whether its intermediate is quantized, and the latest end of a gate/up task (the phase's split for the timings)
+    bool fused_ = false;
+    int64_t fgu_rows_ = 0, fdn_rows_ = 0;
+    int fgu_tasks_ = 1, fdn_tasks_ = 1;
+    std::unique_ptr<std::atomic<int>[]> fdone_, fready_;
+    std::atomic<int64_t> fgu_end_ns_{0};
+    void fused_quant_h(int e);
     PoolAffinity affinity_ = PoolAffinity::All;
     CpuTopology topo_;
 };

@@ -160,6 +160,29 @@ static_assert(scale_vecs.s32[15][0] == 31 && scale_vecs.s16[0x2F][7] == 31 && sc
 
 inline __m256i scale_vec(const int16_t* lanes) { return _mm256_loadu_si256((const __m256i*) lanes); }
 
+// IQ3_S's 9th index bits as a gather index's high part (iq3s_row_nt): for a qh byte h, dword lane k = bit k of h at bit 8
+// - what Fmt32<121> builds with a broadcast, a variable shift and an AND, in one aligned load.  8 KB, constexpr.
+struct alignas(32) HiDw {
+    uint32_t v[256][8];
+    constexpr HiDw() : v{} {
+        for (int h = 0; h < 256; ++h)
+            for (int k = 0; k < 8; ++k) v[h][k] = (uint32_t) ((h >> k) & 1) << 8;
+    }
+};
+static constexpr HiDw hi_dw{};
+static_assert(hi_dw.v[0x81][0] == 0x100 && hi_dw.v[0x81][1] == 0 && hi_dw.v[0x81][7] == 0x100, "hi_dw: bit k in lane k");
+
+// IQ4_XS's signed 6-bit sub-block scale (ls - 32) in every int16 lane (iq4xs_rows): one load instead of a broadcast.
+struct Iq4xsScales {
+    int16_t v[64][16];
+    constexpr Iq4xsScales() : v{} {
+        for (int s = 0; s < 64; ++s)
+            for (int l = 0; l < 16; ++l) v[s][l] = (int16_t) (s - 32);
+    }
+};
+static constexpr Iq4xsScales iq4xs_scales{};
+static_assert(iq4xs_scales.v[0][3] == -32 && iq4xs_scales.v[63][15] == 31, "iq4xs_scales: ls - 32");
+
 // The low index bytes q[0..7] interleaved with the spread high bits: eight 16-bit grid indices in sp[].
 inline void grid_indices(const uint8_t* q, uint64_t hi, uint16_t* sp) {
     _mm_storeu_si128((__m128i*) sp, _mm_unpacklo_epi8(_mm_cvtsi64_si128((long long) u64(q)),
@@ -551,6 +574,44 @@ void iq4nl256_down_rows_v(int variant, const uint8_t* w, size_t row_bytes, int n
 void iq4nl256_down_rows(const uint8_t* w, size_t row_bytes, int n, const void* const* hq, int nt, float* const* out,
                         int r0, int r1) {
     iq4nl256_down_rows_v(vnni_on() ? kIq256Vnni : 0, w, row_bytes, n, hq, nt, out, r0, r1);
+}
+
+void iq256_gu_rows_iq3s_v(int variant, const uint8_t* blob, size_t gu_row, size_t up_off, int n,
+                          const void* const* act, int nt, float* const* ff, int r0, int r1) {
+    const block_q8_K* y[8];
+    for (int t = 0; t < nt && t < 8; ++t) y[t] = (const block_q8_K*) act[t];
+#if STRATA_AVXVNNI
+    if (variant & kIq256Vnni) {
+        vnni::gu_iq3s_any(nt, blob, gu_row, up_off, n, y, ff, r0, r1);
+        return;
+    }
+#endif
+    (void) variant;
+    plain::gu_iq3s_any(nt, blob, gu_row, up_off, n, y, ff, r0, r1);
+}
+
+void iq256_gu_rows_iq3s(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act, int nt,
+                        float* const* ff, int r0, int r1) {
+    iq256_gu_rows_iq3s_v(vnni_on() ? kIq256Vnni : 0, blob, gu_row, up_off, n, act, nt, ff, r0, r1);
+}
+
+void iq4xs256_down_rows_v(int variant, const uint8_t* w, size_t row_bytes, int n, const void* const* hq, int nt,
+                          float* const* out, int r0, int r1) {
+    const block_q8_K* y[8];
+    for (int t = 0; t < nt && t < 8; ++t) y[t] = (const block_q8_K*) hq[t];
+#if STRATA_AVXVNNI
+    if (variant & kIq256Vnni) {
+        vnni::iq4xs_nt(w, row_bytes, n, y, nt, out, r0, r1);
+        return;
+    }
+#endif
+    (void) variant;
+    plain::iq4xs_nt(w, row_bytes, n, y, nt, out, r0, r1);
+}
+
+void iq4xs256_down_rows(const uint8_t* w, size_t row_bytes, int n, const void* const* hq, int nt, float* const* out,
+                        int r0, int r1) {
+    iq4xs256_down_rows_v(vnni_on() ? kIq256Vnni : 0, w, row_bytes, n, hq, nt, out, r0, r1);
 }
 
 }  // namespace strata::kernels::cpu

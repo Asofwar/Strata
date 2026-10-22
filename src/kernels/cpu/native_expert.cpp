@@ -153,6 +153,14 @@ void native_quant_h(const NativeFmt& f, const float* h, void* dst) {
     traits(f.d_act)->from_float(h, dst, f.n_ff);
 }
 
+namespace {
+// STRATA_IQ3S_FAST set and not 0 (native_gu_mt_min and native_gu_rows read it the same way)
+bool iq3s_fast_on() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_IQ3S_FAST"); return v != nullptr && std::atoi(v) != 0; }();
+    return on;
+}
+}  // namespace
+
 int native_gu_mt_min(int gu_type) {
     // #152: from how many tokens the multi-token kernels run (ggml's vec_dot below that).  The default 2 is the
     // measured-fastest rule, but a token's expert rows then round differently alone than in a group, so greedy output
@@ -167,7 +175,9 @@ int native_gu_mt_min(int gu_type) {
     // wide rule, not a per-core one: every core rounds an expert the same.  Every probe here is in expert_layout.cpp
     // and cpu_avx2_ok() comes first, so no AVX2 code runs before the check.  STRATA_IQ_MT_MIN set keeps its rule.
     // Opt-in (STRATA_IQ3S_MT1=1): it changes a lone token's IQ3_S rounding on those CPUs, so the default stays 0.1.39's.
-    static const bool iq3s_one = env == nullptr && std::getenv("STRATA_IQ3S_MT1") != nullptr && cpu_avx2_ok() && std::getenv("STRATA_NO_IQ256") == nullptr &&
+    // STRATA_IQ3S_FAST=1 (that kernel in fewer instructions from two tokens on, native_gu_rows) takes this rule too.
+    static const bool iq3s_one = env == nullptr && (std::getenv("STRATA_IQ3S_MT1") != nullptr || iq3s_fast_on()) &&
+                                 cpu_avx2_ok() && std::getenv("STRATA_NO_IQ256") == nullptr &&
                                  !cpu_avx512_ok() && iq256_gather_setting() != 0 && cpu_gather_fast();
     return iq3s_one && gu_type == 21 ? 1 : mt_min;
 }
@@ -231,6 +241,15 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
     // it, as before (its rows would round differently).  Each kernel only for the formats it implements: falling
     // through an empty switch would leave ff unwritten instead of falling back to ggml-cpu.
     static const bool cpu512 = cpu_avx512_ok();
+    // STRATA_IQ3S_FAST=1 (opt-in, implies STRATA_IQ3S_MT1's rule): IQ3_S gate/up rows of two tokens and more on
+    // iq256_gu_rows_iq3s, bit for bit what iq256_gu_rows below gives every token, in fewer instructions (14900K P-core,
+    // an expert's gate/up rows at two tokens: 0.192 -> 0.166 ms; one token gains nothing and stays below).  Only on a
+    // core that gathers (iq256_variant); another core keeps iq256_gu_rows, which gives the same bits.
+    static const bool iq3s_fast = iq3s_fast_on() && avx2 && !cpu512;
+    if (iq3s_fast && f.gu_type == 21 && nt >= 2 && nt >= mt_min && (iq256_variant() & kIq256Gather)) {
+        iq256_gu_rows_iq3s(blob, f.gu_row, f.up_off, (int) f.n_embd, act, nt, ff, r0, r1);
+        return;
+    }
     if (nt >= mt_min && (iq512_supported(f.gu_type) || (!cpu512 && iq256_supported(f.gu_type)))) {
         if (avx512 && iq512_supported(f.gu_type)) {
             iq512_gu_rows(f.gu_type, blob, f.gu_row, f.up_off, (int) f.n_embd, act, nt, ff, r0, r1);
@@ -304,6 +323,20 @@ void native_down_rows(const NativeFmt& f, const uint8_t* blob, const void* const
     }
     if (cpu_avx2_ok() && nt >= mt_min && f.d_type == 20 && iq4nl_mt) {   // #152: the same rule as the gate/up rows
         iq4nl256_down_rows(blob + f.down_off, f.d_row, (int) f.n_ff, hq, nt, out, r0, r1);
+        return;
+    }
+    // STRATA_IQ4XS_DOWN=1 (opt-in): IQ4_XS down rows (the UD-IQ4_XS models') on iq4xs256_down_rows, ggml-cpu's AVX2 dot
+    // below bit for bit at every group size (no #152 rule needed), each row decoded once for all the tokens of a group.
+    // 14900K P-cores, the pool's 8 threads, down rows from RAM: ggml's dot 64-68 GB/s at one token, 43-44 at two; this
+    // kernel 75-78 and 62-66.  Only where ggml-cpu runs that AVX2 dot (built for AVX2, not AVX-512).
+    // The value is the smallest group that takes it (1: every group, 2: groups of two tokens and more).
+    static const int iq4xs_min = [] {
+        const char* v = std::getenv("STRATA_IQ4XS_DOWN");
+        return v != nullptr && std::atoi(v) > 0 && cpu_avx2_ok() && ggml_cpu_has_avx2() && !ggml_cpu_has_avx512()
+                   ? std::atoi(v) : 0;
+    }();
+    if (iq4xs_min > 0 && nt >= iq4xs_min && f.d_type == 23 && f.tail_off == 0) {
+        iq4xs256_down_rows(blob + f.down_off, f.d_row, (int) f.n_ff, hq, nt, out, r0, r1);
         return;
     }
     // the older-CPU tier: IQ4_NL and Q2_0 down rows in 128-bit (ggml-cpu's dots for both are scalar here)

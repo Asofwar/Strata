@@ -49,4 +49,22 @@ void iq4nl256_down_rows(const uint8_t* w, size_t row_bytes, int n, const void* c
 void iq4nl256_down_rows_v(int variant, const uint8_t* w, size_t row_bytes, int n, const void* const* hq, int nt,
                           float* const* out, int r0, int r1);
 
+/// IQ3_S (type 21) gate/up rows, ff[t][r] = silu(gate_r . a[t]) * (up_r . a[t]): bit for bit iq256_gu_rows (every
+/// variant gives the same bits) in fewer instructions per row, faster from two tokens on.  It gathers, so it is for
+/// the cores where kIq256Gather is set (iq256_variant()).  The caller checks AVX2.
+void iq256_gu_rows_iq3s(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act, int nt,
+                        float* const* ff, int r0, int r1);
+/// The same in a given variant (only the kIq256Vnni bit matters here).
+void iq256_gu_rows_iq3s_v(int variant, const uint8_t* blob, size_t gu_row, size_t up_off, int n,
+                          const void* const* act, int nt, float* const* ff, int r0, int r1);
+
+/// out[t][r] = w_r . h[t] for IQ4_XS (type 23) rows of n values (n % 256 == 0) against Q8_K activations, rows
+/// [r0, r1): bit for bit ggml-cpu's AVX2 ggml_vec_dot_iq4_xs_q8_K for every token, each row decoded once for all the
+/// tokens.  The caller checks AVX2 support (and that ggml-cpu runs its AVX2 dot, not its AVX-512 one).
+void iq4xs256_down_rows(const uint8_t* w, size_t row_bytes, int n, const void* const* hq, int nt, float* const* out,
+                        int r0, int r1);
+/// The same in a given variant (only the kIq256Vnni bit matters here).
+void iq4xs256_down_rows_v(int variant, const uint8_t* w, size_t row_bytes, int n, const void* const* hq, int nt,
+                          float* const* out, int r0, int r1);
+
 }  // namespace strata::kernels::cpu

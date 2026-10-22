@@ -451,7 +451,8 @@ use it to compare, not to measure speed. This works with every pack; `--gpu-stag
 per-layer graphs) refuses a native (IQ) pack, which has no such graphs.
 
 The same switch adds a `strata decode pool:` line: the CPU expert pool's gate/up, quantize and down time per window,
-the GB/s it read over the rows phases, and the CPUs the host thread ran on (sampled twice per window, Windows).
+the GB/s it read over the rows phases, the CPUs the host thread ran on (sampled twice per window, Windows), and at the
+end the GB/s of the gate/up rows and of the down rows apart.
 `STRATA_POOL_STATS=1` (a diagnostic, off by default) adds `strata decode pool threads`: for every worker and the host,
 the tasks it ran and its microseconds per task. Equal numbers on every thread with a low GB/s mean the pool waits
 between its phases, not that one core is slow. With it come three more lines. `strata decode pool phases` gives the
@@ -3390,6 +3391,108 @@ answers differ between arms.
   and not at 110-206K, where this server spends most of its decode. Not applied to the server's config.
 
 Not covered: other cards, Linux, `--spec-min-p` other than 0.50 with deeper caps, greedy requests.
+
+### The CPU pool's own kernels for Cyber-Tiel: `STRATA_IQ3S_FAST`, `STRATA_IQ4XS_DOWN` and `STRATA_POOL_FUSED`
+
+**Measured 2026-10-22 on the same PC (i9-14900K, DDR5-7600 2 x 24 GB, Windows 11).** Cyber-Tiel-Coder UD-IQ4_XS keeps
+gate/up as IQ3_S in all 40 layers and down as IQ4_XS in 37 layers and as Q6_K in layers 34, 38 and 39 (the pack's
+`native_experts.txt`). An expert is 1.458 MB (0.901 MB gate/up, 0.557 MB down), or 1.761 MB with a Q6_K down. For a
+layer's missed experts the pool runs every expert's gate/up rows on all its threads, then quantizes the intermediates
+on the host thread, then runs the down rows. The rows went through these kernels:
+
+| rows | one token | two tokens or more |
+|---|---|---|
+| gate/up IQ3_S | ggml-cpu's dot; Strata's gathered kernel with `STRATA_IQ3S_MT1=1` (the live config) | Strata's gathered kernel |
+| down IQ4_XS | ggml-cpu's AVX2 dot, one call per row and token | the same |
+| down Q6_K | ggml-cpu's AVX2 dot, one call per row and token | the same |
+
+In decode at 130K and 200K a layer and window had 0.8-2.2 missed experts with 1.07-1.15 tokens each: almost every CPU
+expert serves one token. The pool took 1.0-2.4 ms of a 8.4-11.8 ms window and read mostly 47-55 GB/s.
+
+**Where the time goes, without a GPU.** `pool_native_bench` (new, a benchmark, no test) runs the engine's own pool call
+(`ExpertPool::run_split_multi_native`) on random experts quantized by ggml in Cyber-Tiel's geometry: 7 workers and the
+host thread on the P-cores, as the server runs, 1-3 experts of 1 or 2 tokens per layer, 150 us between two layers as
+the host spins on the GPU's flags. Cold: a 1.5 GB arena, every expert comes from RAM. Hot: 4 experts that stay in the
+caches, so only the kernels and the pool's own waits are timed. With `STRATA_IQ3S_MT1=1`, 2 experts of one token per
+layer, medians of 6 interleaved runs (cold) and 3 (hot):
+
+| | gate/up IQ3_S | down IQ4_XS | down Q6_K (one run) | q4_K / q8_0 for comparison |
+|---|---|---|---|---|
+| cold (from RAM) | 32.0 us, 56.2 GB/s | 17.1 us, 65.4 GB/s | 70.0 GB/s | 80.0 / 87.5 GB/s (one run) |
+| hot (from the caches) | 30.3 us, 59.5 GB/s | 12.6 us, 88.5 GB/s | 193 GB/s | 192 / 239 GB/s (one run) |
+
+The same pool reads q4_K and q8_0 experts at up to 80-87 GB/s, so the RAM is not what holds it at ~60 GB/s. IQ3_S gate/up
+is as slow from the caches as from RAM: its kernel is the limit. Each 32 values read 8 entries of IQ3_S's 512-entry grid
+with one `vpgatherdd`, and on a P-core the gathers alone take 0.97 ns per 32 values (a microbenchmark on one thread, hot
+data); a one-token loop like the kernel's took 1.47 ns. With scalar loads instead of the gather it took 2.75 ns, with two
+128-bit gathers 1.71 ns, so the gather stays. IQ4_XS down is bound half by its kernel (88 GB/s hot) and half by RAM; Q6_K down is bound by
+RAM. The pool's two phases per layer cost the rest: at 2 experts a row phase took 24.0 us from RAM, of which each thread
+spent 21.1 us in its tasks (`STRATA_POOL_STATS=1`); the remainder is the wait for the slowest thread, twice per layer.
+E-cores did not help: with 15 and 23 workers (P- and E-cores, one run each) a layer took 50.9-51.2 us at 2 experts and
+70.0-71.2 us at 3, against 49.8 and 72.4 us with the 7 workers of the interleaved runs, and the phases' tails grew from
+3-6 to 7-9 us. More tasks per phase (96, 192) did not make a layer faster either.
+
+**Three opt-in switches, each computing the same bits as the control:**
+
+- `STRATA_IQ3S_FAST=1`: IQ3_S gate/up rows of two tokens and more on `iq256_gu_rows_iq3s`, the gathered kernel in fewer
+  instructions. The 9th index bits and the scales come from tables (one load instead of a broadcast and a shift), and one
+  broadcast serves both halves' sign bytes. The integer lanes, the order of the float sums and the SwiGLU expression are
+  the gathered kernel's, so a token's rows are bit for bit what `STRATA_IQ3S_MT1=1` gives; the switch takes that rule
+  too. One thread, an expert's gate/up rows from the caches: 0.192 -> 0.166 ms at two tokens. At one token the gathers
+  are the limit (0.165 ms either way, also with the gate and up rows run side by side), so one token keeps the gathered
+  kernel. Only on cores that gather (the P-cores here).
+- `STRATA_IQ4XS_DOWN=N`: IQ4_XS down rows of groups of N tokens or more on `iq4xs256_down_rows`: ggml-cpu's AVX2 dot bit
+  for bit (the same int32 lanes per block, one fmadd per block in block order, `hsum_float_8`'s order of additions), with
+  each row decoded once for all the tokens of a group and no call per row. `1` takes every group. Four rows side by side
+  were 30% faster from the caches but 6-9% slower from RAM (the blocks no longer come in address order), so one token
+  takes one row at a time. Only where ggml-cpu runs its AVX2 dot (built for AVX2, not AVX-512).
+- `STRATA_POOL_FUSED=1`: the pool runs a layer's gate/up and down rows as one phase. The gate/up tasks come first, then
+  the down tasks; a down range starts as soon as its own expert's gate/up rows are done, and the thread that finishes an
+  expert's last gate/up rows quantizes its intermediate. That saves a second publish and the wait for the first phase's
+  slowest thread. The kernels and the quantizer are the same, so the bits are too. The decode timing line then counts the
+  time up to the last gate/up task as gate/up and the rest as down, so its down GB/s reads high.
+
+Checked bit for bit by `iq_avx2_parity` (the IQ3_S kernel in both its AVX2 and AVX-VNNI forms against the scalar
+one-token rows at 1-8 tokens and odd row ranges; the IQ4_XS kernel against ggml's dot at 1-8 tokens and rows of 512 and
+1024 values; the engine's own dispatch with the switches on: the ctest `iq_avx2_parity_iq3s_fast_iq4xs_down`) and
+`pool_tasks_test` (the one phase against the two phases, 1-3 workers, with and without the host, 1-4096 tasks).
+
+`pool_native_bench`, per layer, cold, medians, against `STRATA_IQ3S_MT1=1` alone (the runs of one row were interleaved;
+about +-5% between runs of the same arm):
+
+| layer | IQ3S_FAST | IQ4XS_DOWN=1 (4 runs) | POOL_FUSED (6 runs) | all three (3 runs, control 2) |
+|---|---|---|---|---|
+| 1 expert x 1 token | (not used) | | -1.1% | -5.4% |
+| 2 experts x 1 token | (not used) | -6.8% | -4.7% | -5.4% |
+| 3 experts x 1 token | (not used) | -2.8% | -4.4% | -5.7% |
+| 2 experts x 2 tokens | -19% (with IQ4XS_DOWN=2, 4 runs) | -15% (4 runs) | -9% (hot, 3 runs) | -23.7% |
+| 3 experts x 2 tokens | -20% (with IQ4XS_DOWN=2, 4 runs) | -14% (4 runs) | -7% (hot, 3 runs) | -30.3% |
+
+With all three, the down rows read 65-87 GB/s instead of 58-69 at one token and 60-74 instead of 40-44 at two.
+
+**In the engine** (RTX 5080, the server's settings including `STRATA_IQ3S_MT1=1`, `--kv-grow` and `STRATA_ARENA_WSLOCK=1`;
+`--serve` with 2K, then 130K and 200K in turn, 192 tokens each, `STRATA_DECODE_TIMING=1 STRATA_POOL_STATS=1`), the
+control against all three switches, 3 engine starts each in the order control, all, all, control, control, all, one
+downtime; medians of 9 requests at 130K and 12 at 200K after the first long prompt:
+
+| | 130K control | 130K all three | 200K control | 200K all three |
+|---|---|---|---|---|
+| pool GB/s | 49.5 | 58.1 | 51.5 | 60.2 |
+| CPU us per missed expert and token | 28.2 | 23.7 | 26.9 | 22.5 |
+| CPU ms per window | 1.46 | 1.32 | 1.98 | 1.49 |
+| ms per window | 9.09 | 9.05 | 10.83 | 10.48 |
+| tokens per window | 1.63 | 1.83 | 2.20 | 2.13 |
+| decode tok/s | 182.8 | 203.8 | 200.3 | 200.4 |
+
+The pool did each missed expert 16% faster and read 17% more per second. The windows took the same time at 130K and 3%
+less at 200K: the pool is 13-18% of a window here, and part of its time overlaps the GPU's. The tok/s gap at 130K comes
+from the drafts (1.63 against 1.83 tokens per window), not from the pool. These engine runs had one more form of the
+IQ3_S kernel, for one token, which measured the same as the gathered kernel and was then removed (the same bits). An earlier downtime with
+`STRATA_IQ4XS_DOWN=2` (2 starts each) gave the same: pool 49.9 -> 57.6 and 53.1 -> 59.0 GB/s, 28.1 -> 23.5 and 25.8 ->
+23.3 us per expert and token. In a third one, the first of the day, both arms ran in the pool's slow mode (18-54 GB/s from
+request to request, two QEMU virtual machines busy on the PC); there the medians differed both ways (130K: control 32.2,
+all three 23.0 GB/s; 200K: 29.2 and 31.6) and nothing can be read from them. The switches stay off by default: the gain
+is a few percent of the CPU's share of a window, measured on one PC.
 
 ## CUDA opt-in switches measured for 0.1.45 (RTX 3060 and RTX A4000, sm_86; all off unless you set them)
 
