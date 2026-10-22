@@ -229,7 +229,7 @@ PREBUILT_TAG_URL = "https://github.com/Asofwar/Strata/releases/download/v{versio
 # The fork's own release version: semver, independent of upstream's numbers (base: upstream 0.2.1.1, engine
 # 0.1.46.1).  Its release is tagged v<FORK_VERSION> and carries the engine this checkout was tested with; bump it
 # with every release (MAJOR.MINOR.PATCH: incompatible change / new feature or speed-up / fix only).
-FORK_VERSION = "1.0.0"
+FORK_VERSION = "1.1.0"
 PREBUILT_ASSET = "strata-windows-x64.zip" if WIN else "strata-linux-x64.zip"
 # the CUDA libraries the ready-made engine loads (the same CUDA 13.0 it is built with), from NVIDIA's pip packages
 CUDA_WHEELS = ["nvidia-cublas==13.0.2.14", "nvidia-cuda-runtime==13.0.96"]
