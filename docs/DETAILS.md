@@ -100,6 +100,10 @@ the keys at 8 bits and stores the values as rotated 4-bit: 23% less KV memory th
 VRAM. RTX 3090, the Coder at 198K context: 99 instead of 85 tokens/s output, the same needle results, prompts 2-5%
 slower. It streams its KV cache like the other formats (`--kv-resident N`): on an RTX 2060 SUPER 8 GB at 128K with
 20,480 resident cells, +780 expert slots over resident K8V4, and it scores better than 4-bit KV on long documents.
+On the fork's pack path it is slower: the window and `DENSE_IMMA` attention kernels take int8 K/V only. RTX 5080,
+Cyber-Tiel with the fork's live config: 184-298 more expert slots, but prompts 7-9 times slower at 130K-200K, decode
+168.8 -> 107.9 tok/s at 130K and 180.1 -> 75.1 at 200K, KL 1.5-2.1 times the noise floor
+([bench/results/2026-10-22-rtx5080-tiel-kv-k8v4](../bench/results/2026-10-22-rtx5080-tiel-kv-k8v4/README.md)).
 
 **Reproducible greedy output (0.1.30, opt-in, `STRATA_IQ_MT_MIN=1`):** with the IQ models, the CPU computes an
 expert for one token with ggml's dot product and for several tokens with Strata's multi-token kernels, which round

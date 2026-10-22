@@ -1,0 +1,27 @@
+﻿16:51:31 [d1] lock taken
+16:51:31 [d1] waiting for the server to be idle
+17:10:32 [d1] DOWNTIME START (server stopped)
+17:10:32 [d1] start d1-ctl (seq_speed.txt)
+17:10:32 [d1] d1-ctl pid 24004 no-throttle=True
+17:14:36 [d1] end d1-ctl exit=0
+17:14:36 [d1] start d1-k8 (seq_speed.txt)
+17:14:36 [d1] d1-k8 pid 27592 no-throttle=True
+17:31:50 [d1] end d1-k8 exit=1
+17:31:50 [d1] start d1-ctl_2 (seq_speed.txt)
+17:31:50 [d1] d1-ctl_2 pid 2668 no-throttle=True
+17:35:53 [d1] end d1-ctl_2 exit=0
+17:35:53 [d1] start d1-k8_2 (seq_speed.txt)
+17:35:53 [d1] d1-k8_2 pid 35132 no-throttle=True
+17:35:53 [d1] end d1-k8_2 exit=1
+17:35:53 [d1] start d1-klc (seq_kl.txt)
+17:35:53 [d1] d1-klc pid 19316 no-throttle=True
+17:37:39 [d1] end d1-klc exit=0
+17:37:39 [d1] start d1-klk (seq_kl.txt)
+17:37:39 [d1] d1-klk pid 11576 no-throttle=True
+17:49:46 [d1] end d1-klk exit=0
+17:49:46 [d1] start d1-klc_2 (seq_kl.txt)
+17:49:46 [d1] d1-klc_2 pid 22264 no-throttle=True
+17:49:47 [d1] end d1-klc_2 exit=1
+17:49:47 [d1] restarting the server
+17:50:07 [d1] DOWNTIME END (server loaded)
+17:50:07 [d1] lock released
