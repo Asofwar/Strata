@@ -114,9 +114,9 @@ VOLUME ["/data"]
 EXPOSE 8080
 
 LABEL org.opencontainers.image.title="Strata" \
-      org.opencontainers.image.source="https://github.com/Niko1221/Strata" \
-      org.opencontainers.image.url="https://github.com/Niko1221/Strata" \
-      org.opencontainers.image.documentation="https://github.com/Niko1221/Strata/blob/main/docs/DOCKER.md" \
+      org.opencontainers.image.source="https://github.com/Asofwar/Strata" \
+      org.opencontainers.image.url="https://github.com/Asofwar/Strata" \
+      org.opencontainers.image.documentation="https://github.com/Asofwar/Strata/blob/main/docs/DOCKER.md" \
       org.opencontainers.image.description="Strata local LLM server (Terminal + engine package), flavor ${FLAVOR}" \
       org.opencontainers.image.version="${STRATA_VERSION}" \
       org.opencontainers.image.licenses="see LICENSE" \

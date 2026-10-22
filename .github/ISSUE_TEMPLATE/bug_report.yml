@@ -5,9 +5,9 @@ labels: ["bug"]
 body:
   - type: markdown
     value: |
-      Thanks for the report. Please read [CONTRIBUTING.md](https://github.com/Niko1221/Strata/blob/main/CONTRIBUTING.md) first.
+      Thanks for the report. Please read [CONTRIBUTING.md](https://github.com/Asofwar/Strata/blob/main/CONTRIBUTING.md) first.
 
-      Search the [open and closed issues](https://github.com/Niko1221/Strata/issues?q=is%3Aissue) first: this may already be tracked, and new evidence belongs in that thread.
+      Search the [open and closed issues](https://github.com/Asofwar/Strata/issues?q=is%3Aissue) first: this may already be tracked, and new evidence belongs in that thread.
 
       Write only what you saw. Do not guess at steps, errors, hardware or severity.
 
@@ -98,4 +98,4 @@ body:
     value: |
       A couple of extras that help a lot:
 
-      - Check the [troubleshooting page](https://github.com/Niko1221/Strata/blob/main/docs/TROUBLESHOOTING.md) first, many reports are already solved there.
+      - Check the [troubleshooting page](https://github.com/Asofwar/Strata/blob/main/docs/TROUBLESHOOTING.md) first, many reports are already solved there.

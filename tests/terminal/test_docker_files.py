@@ -140,8 +140,8 @@ class Document(unittest.TestCase):
         doc = (ROOT / "docs" / "DOCKER.md").read_text(encoding="utf-8")
         for tag in ("0.2.1-cuda13", "0.2.1-cuda12", "0.2.1-rocm-gfx120x", "0.2.1-rocm-gfx110x", "0.2.1-rocm-gfx1151", "0.2.1-sycl"):
             self.assertIn(tag, doc)
-        for name, tag in (("docker-compose.nvidia.yml", "ghcr.io/niko1221/strata:0.2.1-cuda13"), ("docker-compose.amd.yml", "ghcr.io/niko1221/strata:0.2.1-rocm-gfx120x"),
-                          ("docker-compose.intel.yml", "ghcr.io/niko1221/strata:0.2.1-sycl")):
+        for name, tag in (("docker-compose.nvidia.yml", "ghcr.io/asofwar/strata:0.2.1-cuda13"), ("docker-compose.amd.yml", "ghcr.io/asofwar/strata:0.2.1-rocm-gfx120x"),
+                          ("docker-compose.intel.yml", "ghcr.io/asofwar/strata:0.2.1-sycl")):
             self.assertIn(tag, (DOCKER / "compose" / name).read_text(encoding="utf-8"))
 
     def test_the_user_doc_says_images_are_published_from_0_2_1(self):
@@ -197,7 +197,7 @@ class Publishing(unittest.TestCase):
         self.assertEqual(data["permissions"], {"contents": "read"})
         self.assertEqual(data["jobs"]["image"]["permissions"], {"contents": "read", "packages": "write"})
         text = self.WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("ghcr.io/niko1221/strata", text)
+        self.assertIn("ghcr.io/asofwar/strata", text)
         self.assertIn("docker/publish.sh", text)
         self.assertNotIn("${{ secrets.GITHUB_TOKEN }}\" |", text)   # the token goes through an env variable, not into the command line
 

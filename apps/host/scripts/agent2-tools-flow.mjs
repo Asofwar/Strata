@@ -107,7 +107,7 @@ try {
   // 2. web search with no key
   if (!SKIP.has('search')) {
     await newChat();
-    await send('Use the web_search tool to find the GitHub page of the Strata local LLM engine by Niko1221. Tell me its address.');
+    await send('Use the web_search tool to find the GitHub page of the Strata local LLM engine by Asofwar. Tell me its address.');
     await started().catch(() => {});
     const r = await approveUntilIdle('05');
     await idle();
@@ -115,7 +115,7 @@ try {
     const body = await chatText();
     check(/Searched the web/.test(body), 'a "Searched the web" card appeared');
     check(r.asked === 0, 'searching asked nothing (it only reads)');
-    check(/github\.com\/Niko1221\/Strata/i.test(body), 'the answer names the real GitHub address from the results');
+    check(/github\.com\/Asofwar\/Strata/i.test(body), 'the answer names the real GitHub address from the results');
   }
 
   // 3. my own tools

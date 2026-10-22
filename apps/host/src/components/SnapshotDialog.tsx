@@ -32,7 +32,7 @@ export function SnapshotDialog({ open, data, pending, error, onClose, onRetry }:
     onRetry: () => void;
 }) {
     const caption = 'My local AI performance with Strata';
-    const project = 'https://github.com/Niko1221/Strata';
+    const project = 'https://github.com/Asofwar/Strata';
     return <Dialog open={open} title={tr("Monitor screenshot")} onClose={onClose} actions={<><Btn onClick={onClose}>{tr("Close")}</Btn><Btn icon="download" variant="primary" disabled={!data || pending} onClick={() => saveSnapshotWithNotice(data)}>{tr("Download")}</Btn></>}>
     <div className="snapshot-preview" aria-busy={pending}>
       {tr(pending ? <p className="small muted" role="status">{tr("Preparing your screenshot\u2026")}</p> : data ? <img src={data} alt={tr("Captured Strata Monitor readings")}/> : <div><p className="inline-error" role="alert">{tr(error || 'Screenshot could not be prepared.')}</p><Btn onClick={onRetry}>{tr("Try again")}</Btn></div>)}

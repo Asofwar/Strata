@@ -65,7 +65,7 @@ export function nvidiaDriverVersion() {
 }
 
 /** Where the builds are published; the wrong-make sentence points here. */
-export const RELEASES_URL = 'https://github.com/Niko1221/Strata/releases';
+export const RELEASES_URL = 'https://github.com/Asofwar/Strata/releases';
 
 /**
  * The engine family this PC's graphics card needs ('cuda', 'hip', 'sycl'), or null when it cannot be told. The same order as Control

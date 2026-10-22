@@ -169,7 +169,7 @@ void require_fit(const Pipeline& p, uint32_t threads, const char* where) {
                  "strata metal: the kernel %s can run at most %d threads per threadgroup on this GPU (%s), but the %s asks "
                  "for %u.\nMetal skips such a dispatch without any error, so every answer would be wrong; stopping here "
                  "instead.  Please report this (the GPU, macOS version and this line) at "
-                 "https://github.com/Niko1221/Strata/issues .  (#2323)\n",
+                 "https://github.com/Asofwar/Strata/issues .  (#2323)\n",
                  p.name.empty() ? "?" : p.name.c_str(), p.max_threads, g_device_name.c_str(), where, threads);
     std::fflush(stderr);
     std::exit(6);
