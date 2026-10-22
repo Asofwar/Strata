@@ -172,7 +172,7 @@ __global__ void iota_kernel(int32_t* dst, int64_t n) {
     if (i < n) dst[i] = (int32_t) i;
 }
 
-// #820: the dense-MMQ path (Gemm::native_mmq, STRATA_DENSE_MMQ=1, HIP and CUDA) uses these two
+#if defined(__HIPCC__)   // #820: only the HIP dense-MMQ path (Gemm::native_mmq) uses these two
 __global__ void f16_to_f32_kernel(const uint16_t* __restrict__ x, float* __restrict__ y, int64_t n) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) y[i] = __half2float(__ushort_as_half(x[i]));
@@ -183,42 +183,6 @@ __global__ void set_bounds_kernel(int32_t* d, int32_t rows) {
     d[1] = rows;
 }
 
-#if !defined(__HIPCC__)
-// STRATA_DENSE_MMQ on CUDA: llama.cpp's quantize_mmq_q8_1<MMQ_Q8_1_DS_LAYOUT_D4, false> (quantize.cu) reading the FP16
-// activations themselves - the same arithmetic on the same values (FP16 widens to FP32 exactly), so the same q8_1
-// blocks as f16_to_f32_kernel and then quantize(), without the FP32 copy in between.  One channel, no ids.
-__global__ void quantize_f16_mmq_d4_kernel(const uint16_t* __restrict__ x, void* __restrict__ vy, int64_t ne00,
-                                           int64_t s01, int64_t ne0, int ne1) {
-    const int64_t i0 = ((int64_t) blockDim.x * blockIdx.y + threadIdx.x) * 4;
-    if (i0 >= ne0) return;
-    const int64_t base = (int64_t) blockIdx.x * s01;
-    block_q8_1_mmq* y = (block_q8_1_mmq*) vy;
-    const int64_t k_block = i0 / QK8_1_MMQ;   // column block in the channel
-    const int64_t iqs = i0 % QK8_1_MMQ;       // quant index in block
-    float4 xi = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-    if (i0 < ne00) {
-        const uint2 h = *(const uint2*) (x + base + i0);   // 4 halves
-        const float2 a = __half22float2(*(const __half2*) &h.x), b = __half22float2(*(const __half2*) &h.y);
-        xi = make_float4(a.x, a.y, b.x, b.y);
-    }
-    float amax = fabsf(xi.x);
-    amax = fmaxf(amax, fabsf(xi.y));
-    amax = fmaxf(amax, fabsf(xi.z));
-    amax = fmaxf(amax, fabsf(xi.w));
-#pragma unroll
-    for (int offset = 32 / 8; offset > 0; offset >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, offset, WARP_SIZE));
-    const float d_inv = 127.0f / amax;
-    char4 q;
-    q.x = roundf(xi.x * d_inv);
-    q.y = roundf(xi.y * d_inv);
-    q.z = roundf(xi.z * d_inv);
-    q.w = roundf(xi.w * d_inv);
-    const float d = 1.0f / d_inv;
-    const int64_t ib = k_block * ne1 + blockIdx.x;
-    char4* yqs4 = (char4*) y[ib].qs;
-    yqs4[iqs / 4] = q;
-    if (iqs % 32 == 0) y[ib].d4[iqs / 32] = d;
-}
 #endif
 
 unsigned blocks(int64_t n) { return (unsigned) ((n + 255) / 256); }
@@ -707,6 +671,7 @@ void iota(int32_t* dst, int64_t n, void* stream) {
     ck(cudaGetLastError(), "iota");
 }
 
+#if defined(__HIPCC__)
 void f16_to_f32(const uint16_t* x, float* y, int64_t n, void* stream) {
     if (n <= 0) return;
     f16_to_f32_kernel<<<blocks(n), 256, 0, (cudaStream_t) stream>>>(x, y, n);
@@ -717,22 +682,6 @@ void set_bounds(int32_t* dst, int32_t rows, void* stream) {
     set_bounds_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(dst, rows);
     ck(cudaGetLastError(), "set_bounds");
 }
-
-bool quantize_f16(const uint16_t* x, void* xq, int t, int64_t cols, int64_t rows, void* stream) {
-#if defined(__HIPCC__)
-    (void) x; (void) xq; (void) t; (void) cols; (void) rows; (void) stream;
-    return false;
-#else
-    if (rows <= 0) return true;
-    if (fp4_activations(t) || mmq_get_q8_1_ds_layout((ggml_type) t) != MMQ_Q8_1_DS_LAYOUT_D4 || cols % 4 != 0 ||
-        (uintptr_t) x % 8 != 0)
-        return false;
-    const int64_t ne0 = pad512(cols);
-    const dim3 grid((unsigned) rows, (unsigned) ((ne0 + 4 * CUDA_QUANTIZE_BLOCK_SIZE_MMQ - 1) / (4 * CUDA_QUANTIZE_BLOCK_SIZE_MMQ)), 1);
-    quantize_f16_mmq_d4_kernel<<<grid, CUDA_QUANTIZE_BLOCK_SIZE_MMQ, 0, (cudaStream_t) stream>>>(x, xq, cols, cols, ne0, (int) rows);
-    ck(cudaGetLastError(), "quantize_f16");
-    return true;
 #endif
-}
 
 }  // namespace strata::prefill::mmq

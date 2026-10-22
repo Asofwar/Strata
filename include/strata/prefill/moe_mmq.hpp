@@ -135,9 +135,6 @@ void iota(int32_t* dst, int64_t n, void* stream);
 void f16_to_f32(const uint16_t* x, float* y, int64_t n, void* stream);
 /// dst = {0, rows} (the bounds of one matrix; dst on the device).
 void set_bounds(int32_t* dst, int32_t rows, void* stream);
-/// quantize() of `rows` contiguous FP16 rows of `cols` values, read as FP16 (the same q8_1 blocks as f16_to_f32 and
-/// then quantize()).  CUDA, the activation layout of Q8_0-style types (D4) only: false when it does not apply.
-bool quantize_f16(const uint16_t* x, void* xq, int t, int64_t cols, int64_t rows, void* stream);
 
 // ---- STRATA_MMQ_DIRECT: the prompt MMQ reads resident experts in place (docs/DETAILS.md, "STRATA_MMQ_DIRECT") ----
 /// This build has the pointer-table MMQ (CUDA, the build option STRATA_MMQ_TAB on - off by default - and the
