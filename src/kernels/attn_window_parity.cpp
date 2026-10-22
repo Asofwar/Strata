@@ -6,8 +6,8 @@
 // size 4 with a shuffled page table (and, in one case, pages that are not resident: those cells are masked). A window of
 // T queries attends causally: query i sees cells [0, n - T + 1 + i). For each context and T it prints the max and mean
 // error of both kernels against FP64 (relative to the largest output value) and the window kernel against the default.
-// Usage: attn_window_parity [prec 0..3] [cells,cells,...] [small]   (STRATA_ATTN_WINDOW_PREC; default 0, and
-// 2048,66000,200000; small: the windows also through STRATA_ATTN_WINDOW_SMALL's kernel)
+// Usage: attn_window_parity [prec 0..2] [cells,cells,...] [small]   (STRATA_ATTN_WINDOW_PREC, 3 runs 2; default 0, and
+// 2048,66000,200000; small: windows of 1-4 queries also through STRATA_ATTN_WINDOW_SMALL's kernel)
 #include "strata/kernels/f16_bits.hpp"
 #include "strata/kernels/kv_q8.hpp"
 #include "strata/kernels/qsa.hpp"
@@ -112,7 +112,7 @@ void run_small(int T, int cells, const Case& c, const std::vector<int>& width, c
                float* d_b, float* d_c, int prec) {
     auto launch = [&](int which) -> bool {   // 0 default, 1 window, 2 small
         if (which == 0) { k::qsa_decode_attn_batch(d_q, pools, d_ids, d_steps, cells, s, d_scr, d_a, T, nullptr); return true; }
-        k::qsa_decode_attn_window_set_small(which == 2 ? 8 : 0);
+        k::qsa_decode_attn_window_set_small(which == 2 ? 1 : 0);
         const bool ok = k::qsa_decode_attn_window(d_q, pools, d_steps, s, d_scr, stride * T, which == 2 ? d_c : d_b, T, nullptr);
         k::qsa_decode_attn_window_set_small(-1);
         return ok;
@@ -228,7 +228,8 @@ void run(const Case& c, int n_q_max, int prec) {
     float *d_a = dalloc<float>(q.size()), *d_b = dalloc<float>(q.size()), *d_c = dalloc<float>(q.size());
     int32_t* d_steps = dalloc<int32_t>((size_t) n_q_max * k::kStepCount);
 
-    for (int T = 1; T <= n_q_max; ++T) {
+    // small: the data of 8 queries as before, windows of up to 4 (the small kernel's largest; more run the window kernel)
+    for (int T = 1; T <= (g_small ? std::min(n_q_max, 4) : n_q_max); ++T) {
         std::vector<int32_t> steps((size_t) T * k::kStepCount);
         std::vector<int> width(T);
         for (int i = 0; i < T; ++i) {

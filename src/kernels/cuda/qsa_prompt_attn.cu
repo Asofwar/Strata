@@ -1572,9 +1572,9 @@ __device__ __forceinline__ void h2_to_f4(const uint32_t* c, float* f) {
 //   2: as 1, and int8 V: each chunk's p.v (32 cells) in an FP16 accumulator, added to the FP32 sum per chunk. p
 //      carries 2^3 / the chunk's largest V scale instead of 2^14, so 32 cells x |code| <= 128 x |p| < 2^3 stays below
 //      FP16's 65504.
-//   3: as 2, and int8 K: each 64-dim group's q.k in an FP16 accumulator, times the K scale in FP32. q carries 2^2 /
-//      its row's largest value instead of 2^14: 64 dims x 128 x 2^2 < 65504.
-// The softmax (max, exp, sum) stays FP32 in every mode. FP16 K/V take mode 1 at most (their values have no bound).
+// (A mode 3 with q.k in an FP16 accumulator too was removed: STRATA_PROMPT_ATTN_FP16ACC=3 and STRATA_ATTN_WINDOW_PREC=3
+// run mode 2.) The softmax (max, exp, sum) stays FP32 in every mode. FP16 K/V take mode 1 at most (their values have no
+// bound).
 // SPLIT (STRATA_ATTN_WINDOW, decode): the cells split into gridDim.z ranges of whole chunks, one block per (query group,
 // KV head, range); each block writes its rows' unnormalized sums and (max, sum) to `part` in decode_attn_merge_kernel's
 // layout instead of `attn`, and a cell whose page is not resident is masked.  SPLIT = false is the prompt kernel as is.
@@ -1588,7 +1588,7 @@ __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const flo
     using Sm = SmemD<KV_MODE, LO>;
     constexpr int GQ = 8, PIECES = Sm::PIECES, ROWB = PIECES * 16;
     static_assert(PREC <= 1 || KV_MODE == 1, "FP16 accumulation needs int8 K/V");
-    constexpr int QEXP = PREC >= 3 ? 2 : 14;          // q's largest value per row lands near 2^QEXP
+    constexpr int QEXP = 14;                          // q's largest value per row lands near 2^QEXP
     constexpr int VEXP = PREC >= 2 ? 3 : 14;          // p times the V scale stays below 2^VEXP
     extern __shared__ __align__(16) unsigned char smem_raw[];
     Sm& S = *reinterpret_cast<Sm*>(smem_raw);
@@ -1702,9 +1702,6 @@ __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const flo
             float tg[DCH / 8][4];
 #pragma unroll
             for (int nt = 0; nt < DCH / 8; ++nt) tg[nt][0] = tg[nt][1] = tg[nt][2] = tg[nt][3] = 0.0f;
-            uint32_t th[DCH / 8][2];   // PREC 3: the group's FP16 accumulator
-#pragma unroll
-            for (int nt = 0; nt < DCH / 8; ++nt) th[nt][0] = th[nt][1] = 0u;
 #pragma unroll
             for (int kq = 0; kq < 4; ++kq) {
                 const int kk = g * 4 + kq;   // 16-dim step
@@ -1734,18 +1731,10 @@ __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const flo
                         uint32_t b[2];
                         b[0] = i8x2_to_h2(*reinterpret_cast<const uint16_t*>(rowp));
                         b[1] = i8x2_to_h2(*reinterpret_cast<const uint16_t*>(rowp + 8));
-                        if constexpr (PREC >= 3) {
-                            mma16816_h(th[nt], ah, b);
-                        } else {
-                            mma16816(tg[nt], ah, b);
-                            if constexpr (LO) mma16816(tg[nt], al, b);
-                        }
+                        mma16816(tg[nt], ah, b);
+                        if constexpr (LO) mma16816(tg[nt], al, b);
                     }
                 }
-            }
-            if constexpr (PREC >= 3) {
-#pragma unroll
-                for (int nt = 0; nt < DCH / 8; ++nt) h2_to_f4(th[nt], tg[nt]);
             }
 #pragma unroll
             for (int nt = 0; nt < DCH / 8; ++nt) {
@@ -1846,7 +1835,7 @@ __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const flo
             float tmp[8][4];
 #pragma unroll
             for (int j = 0; j < 8; ++j) tmp[j][0] = tmp[j][1] = tmp[j][2] = tmp[j][3] = 0.0f;
-            uint32_t tmph[8][2];   // PREC 2+: the chunk's FP16 accumulator
+            uint32_t tmph[8][2];   // PREC 2: the chunk's FP16 accumulator
 #pragma unroll
             for (int j = 0; j < 8; ++j) tmph[j][0] = tmph[j][1] = 0u;
 #pragma unroll
@@ -1949,7 +1938,7 @@ __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const flo
     }
 }
 
-// ---- dense causal prompt attention on INT8 tensor cores (opt-in STRATA_PROMPT_ATTN_DENSE_IMMA=2, int8 K/V) ---------
+// ---- dense causal prompt attention on INT8 tensor cores (opt-in STRATA_PROMPT_ATTN_DENSE_IMMA=4, int8 K/V) ---------
 // prompt_attn_dense_kernel's block (8 queries x 8 heads = 64 MMA rows, warp w the 16 rows of queries 2w and 2w + 1, a
 // chunk of 32 cells read once for the 8 queries, the online softmax in registers), with both products as mma
 // m16n8k32 s8 (int32 accumulation, exact): K and V enter as their int8 codes - no int8 -> FP16 conversion per warp and
@@ -1957,19 +1946,31 @@ __global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_kernel(const flo
 // low one (16 bits, a u8 x s8 MMA for the low part). INT8 MMA runs ~3.1x the FP16-accumulate rate on sm_120 and ~6x
 // the FP32-accumulate rate of the default kernel's q.k.
 //  - q: scaled per row (its largest |value|); the scale goes onto the scores once, with scale_log2.
-//  - q.k: per 64-dim group the two parts' int32 sums meet as 256 h + l in FP32 (join16, exact), times the cell's K
-//    scale.
+//  - q.k: per 64-dim group the two parts' int32 sums join as one integer 256 h + l (one IMAD, exact: |256 h + l| < 2^31
+//    for 64 dims) and one I2F, times the cell's K scale.
 //  - p * v_scale: quantized per (row, chunk, 64-dim V group) against a bound, the chunk's largest p of the row
-//    (exp2(chunk max - running max), from the softmax) times the chunk's largest V scale of the group; rounding by a
-//    magic-number add, packing by byte permutes. p.v's k dimension is the chunk's cells in the order the q.k
-//    accumulator hands them to a thread (k 4t..4t+3 = cells 2t, 2t + 1, 2t + 8, 2t + 9, and the same + 16), so p's A
-//    fragments come straight from the softmax registers; V's B fragments are built by each warp: n-tile j of a group
-//    is the dims 64g + 8n + j, so a thread reads 8 bytes of each of its 8 cells' V rows and byte-transposes them.
+//    (exp2(chunk max - running max), from the softmax) times the chunk's largest V scale of the group: p carries QM / its
+//    chunk max, v_scale 1 / that largest scale (one MUFU, rcp.approx), and one FMA with the magic number rounds the
+//    product; packing by byte permutes. p.v's k dimension is the chunk's cells in the order the q.k accumulator hands
+//    them to a thread (k 4t..4t+3 = cells 2t, 2t + 1, 2t + 8, 2t + 9, and the same + 16), so p's A fragments come
+//    straight from the softmax registers; V's B fragments are built by each warp from 4 bytes of each of its cells' V
+//    rows, byte-transposed. The high parts' p.v sum, times 256, is the low parts' MMA accumulator (the join is a shift).
 //  - the running sums are rescaled only when some row's max moved (a warp-uniform test; late in a long prompt it rarely
 //    does).
-// Accuracy (qsa_prompt_attn_parity, 64K cells, 8192 queries): row rel L2 vs the FP32 dense kernel 8.9e-5 mean, against
-// 6.3e-4 for STRATA_PROMPT_ATTN_FP16ACC=2. Needs int8 KV scales >= 0 (they are amax / 127). 49,664 bytes of shared
-// memory: two blocks an SM.
+//  - two barriers a chunk: K(c) and the end of p.v(c - 1) meet at one, after which V(c) loads during q.k(c) and the
+//    softmax; V(c) and the end of q.k(c) at the other, after which K(c + 1) loads during p.v(c). Warp 0 computes the
+//    chunk's 32 row indices once (lane = cell), its page-table load issued a chunk ahead, and keeps them in shared
+//    memory for both issues; a thread reads its 4 cells' rows with one 16-byte load (cell c at int (c & 7) * 4 + c / 8)
+//    and adds one product per piece. The swizzled shared-memory addresses are 4 per-thread offsets plus constants.
+//  - the blocks run the latest queries (the widest rows) first, so the short ones fill the tail, and the last partial
+//    wave's items split over the cells (prompt_attn_tail_merge_kernel; STRATA_PROMPT_ATTN_TAIL=0: off).
+// Needs int8 KV scales >= 0 (they are amax / 127). 49,920 bytes of shared memory: two blocks an SM.
+// Measured on the kernels it replaced (qsa_prompt_attn_parity, RTX 5080, 8192 queries): =2 (the first version: joins by
+// two magic-number conversions and an FMA, four barriers a chunk, row addresses per piece) had a row rel L2 against the
+// FP32 dense kernel of 8.9e-5 mean at 64K cells (6.3e-4 for STRATA_PROMPT_ATTN_FP16ACC=2) and 92-95 ms per chunk; =3
+// (the joins and barriers above) 80-82 ms with the same errors against FP32 and FP64; this kernel (=4) 62.2-62.3 ms
+// against =3's 72.9-73.1 at 64K in a later run, errors against FP64 unchanged. =2 and =3 were removed:
+// STRATA_PROMPT_ATTN_DENSE_IMMA=2 and =3 run this kernel.
 // MMAs with a zero accumulator in (RZ): no register zeroing before the first product of a sum
 __device__ __forceinline__ void imma16832_z(int* c, const uint32_t* a, const uint32_t* b) {
 #if !STRATA_PA_SM80
@@ -1991,18 +1992,12 @@ __device__ __forceinline__ void imma16832_us_z(int* c, const uint32_t* a, const 
                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]), "r"(0));
 #endif
 }
-// x in [0, 32767): the float's bits after adding 1.5 * 2^23 hold rint(x) in their low 22 bits, so byte 0 is the low
-// part (unsigned) and byte 1 the high part (<= 127) - no F2I
-__device__ __forceinline__ uint32_t q16_bits(float x) { return __float_as_uint(x + 12582912.0f); }
-// four such words -> the four low bytes (lo) and the four second bytes (hi), word i in byte i
+// four words whose low 16 bits hold a 16-bit X (a float after the magic-number FMA: x in [0, 32767) plus 1.5 * 2^23
+// keeps rint(x) in its low 22 bits) -> the four low bytes (lo) and the four second bytes (hi), word i in byte i
 __device__ __forceinline__ void pack_lohi(uint32_t w0, uint32_t w1, uint32_t w2, uint32_t w3, uint32_t& lo, uint32_t& hi) {
     lo = __byte_perm(__byte_perm(w0, w1, 0x0040), __byte_perm(w2, w3, 0x0040), 0x5410);
     hi = __byte_perm(__byte_perm(w0, w1, 0x0051), __byte_perm(w2, w3, 0x0051), 0x5410);
 }
-// an int32 sum of 16-bit X = 256 h + l parts as a float, exactly and without I2F: each part's sum is below 2^22 in
-// magnitude (64 dims x 255 x 127 at most), which a magic-number add turns into a float exactly; one rounding after
-__device__ __forceinline__ float i2f22(int x) { return __int_as_float(x + 0x4B400000) - 12582912.0f; }
-__device__ __forceinline__ float join16(int h, int l) { return fmaf(i2f22(h), 256.0f, i2f22(l)); }
 
 struct SmemDI {
     uint8_t q[2][DQ * 8][HD];   // high and low parts, 64 rows, a row's 16-byte pieces XOR-swizzled by row & 7
@@ -2010,401 +2005,26 @@ struct SmemDI {
     uint8_t v[DCH][HD];         // as k
     uint2 ksc[DCH];             // the cell's 4 fp16 scales
     uint2 vsc[DCH];
+    int rows[2][DCH];           // the chunk's row index per cell (-1 past the block's widest row), double-buffered
 };
-
-__global__ void __launch_bounds__(THREADS, 1) prompt_attn_dense_imma_kernel(const float* __restrict__ q, QsaAttnPools p,
+// a 1-D grid in block order x + y * groups; with tail_k > 1, blocks from tail_m on share an item tail_k ways, each over
+// a range of its chunks, and write unnormalized partials for prompt_attn_tail_merge_kernel
+__global__ void __launch_bounds__(THREADS, 2) prompt_attn_dense_imma_kernel(const float* __restrict__ q, QsaAttnPools p,
                                                                             const int32_t* __restrict__ steps, int n_q,
                                                                             int n_kv_heads, int page_size, int page_shift,
-                                                                            float scale_log2, float* __restrict__ attn) {
-    constexpr int GQ = 8;
-    constexpr float QM = 32766.0f;   // the largest X (one below 32767: a product's rounding stays inside 15 bits)
-    extern __shared__ __align__(16) unsigned char smem_raw[];
-    SmemDI& S = *reinterpret_cast<SmemDI*>(smem_raw);
-    const int q0 = blockIdx.x * DQ, kvh = blockIdx.y, n_head = n_kv_heads * GQ;
-    const int t = threadIdx.x, lane = t & 31, warp = t >> 5, gid = lane >> 2, tig = lane & 3;
-    const int rbase = warp * 16;
-    auto width = [&](int i) { return q0 + i < n_q ? __ldg(steps + (size_t) (q0 + i) * kStepCount + kStepWidth) : 0; };
-    const int na = width(2 * warp), nb = width(2 * warp + 1);
-    int n_max = 0;
-#pragma unroll
-    for (int i = 0; i < DQ; ++i) n_max = max(n_max, width(i));
-
-    // the page size a power of two (page_shift >= 0): the chunk's pages are read once per issue, lane j page j of
-    // the chunk, and handed to the cells by a shuffle (no dependent table read, no division per cell); otherwise a
-    // read and a division per cell
-    const int pps = page_shift < 0 ? 0 : page_shift >= 5 ? 1 : DCH >> page_shift;   // pages per chunk
-    auto issue = [&](int kv, int c0) {
-        const unsigned char* base = reinterpret_cast<const unsigned char*>(kv ? p.v_q : p.k_q);
-        uint8_t* dst = kv ? &S.v[0][0] : &S.k[0][0];
-        int pg0 = 0, pgv = 0;
-        if (pps > 0) {
-            pg0 = c0 >> page_shift;
-            const int last = (n_max - 1) >> page_shift;
-            pgv = lane < pps && pg0 + lane <= last ? __ldg(p.page_table + pg0 + lane) : 0;
-        }
-        auto row_of = [&](int cell) -> long long {   // every lane of the warp calls it (the shuffle)
-            const long long page = __shfl_sync(0xffffffffu, pgv, ((cell >> page_shift) - pg0) & 31);
-            return (page * n_kv_heads + kvh) * page_size + (cell & (page_size - 1));
-        };
-        auto row_of_div = [&](int cell) -> long long {
-            const int pg = cell / page_size;
-            return ((long long) __ldg(p.page_table + pg) * n_kv_heads + kvh) * page_size + (cell - pg * page_size);
-        };
-#pragma unroll
-        for (int i = t; i < DCH * (HD / 16); i += THREADS) {
-            const int c = i / (HD / 16), pc = i % (HD / 16), cell = c0 + c;
-            const bool ok = cell < n_max;
-            const long long r = pps > 0 ? row_of(cell) : (ok ? row_of_div(cell) : 0);
-            cp_async16(dst + c * HD + ((pc ^ (c & 7)) << 4), base + (ok ? (size_t) r * HD + pc * 16 : 0), ok);
-        }
-        {
-            const int cell = c0 + lane;
-            const bool ok = cell < n_max && t < DCH;
-            const long long r = pps > 0 ? row_of(cell) : (ok ? row_of_div(cell) : 0);
-            if (t < DCH)
-                cp_async8(kv ? &S.vsc[t] : &S.ksc[t], (kv ? p.v_scale : p.k_scale) + (ok ? (size_t) r * (HD / KV_Q8_GROUP) : 0), ok);
-        }
-    };
-    if (n_max > 0) {
-        issue(0, 0);
-        cp_async_commit();
-        issue(1, 0);
-        cp_async_commit();
-    }
-
-    // q per row: X = rint(x * QM / max |x|) as a signed high and an unsigned low byte; rows gid, gid + 8 keep
-    // max / QM * scale_log2
-    float qs_a = 0.0f, qs_b = 0.0f;
-#pragma unroll 1
-    for (int r = 0; r < 16; ++r) {
-        const int qi = q0 + 2 * warp + (r >> 3), row = rbase + r;
-        float x[8] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
-        if (qi < n_q) {
-            const float4* src = reinterpret_cast<const float4*>(q + ((size_t) qi * n_head + kvh * GQ + (r & 7)) * HD) + lane * 2;
-            const float4 a = src[0], b = src[1];
-            x[0] = a.x; x[1] = a.y; x[2] = a.z; x[3] = a.w; x[4] = b.x; x[5] = b.y; x[6] = b.z; x[7] = b.w;
-        }
-        float m = 0.0f;
-#pragma unroll
-        for (int j = 0; j < 8; ++j) m = fmaxf(m, fabsf(x[j]));
-#pragma unroll
-        for (int o = 16; o > 0; o >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o));
-        const float up = m > 0.0f ? QM / m : 0.0f;
-        uint32_t w[2][2];
-#pragma unroll
-        for (int h = 0; h < 2; ++h) {
-            int hi[4], lo[4];
-#pragma unroll
-            for (int e = 0; e < 4; ++e) {
-                const int X = __float2int_rn(x[4 * h + e] * up);
-                hi[e] = X >> 8;
-                lo[e] = X & 255;
-            }
-            w[0][h] = pack4(hi[0], hi[1], hi[2], hi[3]);
-            w[1][h] = pack4(lo[0], lo[1], lo[2], lo[3]);
-        }
-        const int off = row * HD + (((lane >> 1) ^ (row & 7)) << 4) + (lane & 1) * 8;
-        *reinterpret_cast<uint2*>(&S.q[0][0][0] + off) = make_uint2(w[0][0], w[0][1]);
-        *reinterpret_cast<uint2*>(&S.q[1][0][0] + off) = make_uint2(w[1][0], w[1][1]);
-        if ((r & 7) == gid) {
-            const float v = m * (1.0f / QM) * scale_log2;
-            if (r < 8) qs_a = v; else qs_b = v;
-        }
-    }
-    __syncwarp();
-
-    float acc[HD / 8][4];
-#pragma unroll
-    for (int j = 0; j < HD / 8; ++j) acc[j][0] = acc[j][1] = acc[j][2] = acc[j][3] = 0.0f;
-    float m_a = -INFINITY, m_b = -INFINITY, l_a = 0.0f, l_b = 0.0f;
-    const uint8_t* Q = &S.q[0][0][0];
-
-#pragma unroll 1
-    for (int c0 = 0; c0 < n_max; c0 += DCH) {
-        const bool more = c0 + DCH < n_max;
-        cp_async_wait1();
-        __syncthreads();   // K in
-        float s[DCH / 8][4];
-#pragma unroll
-        for (int nt = 0; nt < DCH / 8; ++nt) s[nt][0] = s[nt][1] = s[nt][2] = s[nt][3] = 0.0f;
-        uint2 kc[DCH / 8][2];   // this thread's cells' K scales (cells nt*8 + 2tig, + 1)
-#pragma unroll
-        for (int nt = 0; nt < DCH / 8; ++nt) { kc[nt][0] = S.ksc[nt * 8 + 2 * tig]; kc[nt][1] = S.ksc[nt * 8 + 2 * tig + 1]; }
-#pragma unroll
-        for (int g = 0; g < 4; ++g) {
-            int ih[DCH / 8][4], il[DCH / 8][4];
-#pragma unroll
-            for (int ks = 0; ks < 2; ++ks) {
-                const int kk = g * 2 + ks;   // 32-dim step: pieces 2kk, 2kk + 1
-                uint32_t ah[4], al[4];
-                {
-                    const int mi = lane >> 3, rr = rbase + (mi & 1) * 8 + (lane & 7), pc = kk * 2 + (mi >> 1);
-                    const int o = rr * HD + ((pc ^ (rr & 7)) << 4);
-                    ldsm_x4(ah, Q + o);
-                    ldsm_x4(al, Q + DQ * 8 * HD + o);
-                }
-#pragma unroll
-                for (int np = 0; np < DCH / 16; ++np) {
-                    const int mi = lane >> 3, c = 16 * np + (mi >> 1) * 8 + (lane & 7), pc = kk * 2 + (mi & 1);
-                    uint32_t b[4];
-                    ldsm_x4(b, &S.k[c][(pc ^ (c & 7)) << 4]);
-#pragma unroll
-                    for (int h = 0; h < 2; ++h) {
-                        if (ks == 0) {
-                            imma16832_z(ih[2 * np + h], ah, b + 2 * h);
-                            imma16832_us_z(il[2 * np + h], al, b + 2 * h);
-                        } else {
-                            imma16832(ih[2 * np + h], ah, b + 2 * h);
-                            imma16832_us(il[2 * np + h], al, b + 2 * h);
-                        }
-                    }
-                }
-            }
-#pragma unroll
-            for (int nt = 0; nt < DCH / 8; ++nt) {
-                const float k0 = __half2float(reinterpret_cast<const __half*>(&kc[nt][0])[g]);
-                const float k1 = __half2float(reinterpret_cast<const __half*>(&kc[nt][1])[g]);
-                s[nt][0] = fmaf(join16(ih[nt][0], il[nt][0]), k0, s[nt][0]);
-                s[nt][1] = fmaf(join16(ih[nt][1], il[nt][1]), k1, s[nt][1]);
-                s[nt][2] = fmaf(join16(ih[nt][2], il[nt][2]), k0, s[nt][2]);
-                s[nt][3] = fmaf(join16(ih[nt][3], il[nt][3]), k1, s[nt][3]);
-            }
-        }
-        __syncthreads();   // every warp is done with K
-        if (more) {
-            issue(0, c0 + DCH);
-            cp_async_commit();
-        }
-        float alpha_a, alpha_b, pm_a, pm_b;
-        {
-            float mxa = -INFINITY, mxb = -INFINITY;
-#pragma unroll
-            for (int nt = 0; nt < DCH / 8; ++nt) {
-                const int cell = c0 + nt * 8 + 2 * tig;
-                s[nt][0] = cell < na ? s[nt][0] * qs_a : -INFINITY;
-                s[nt][1] = cell + 1 < na ? s[nt][1] * qs_a : -INFINITY;
-                s[nt][2] = cell < nb ? s[nt][2] * qs_b : -INFINITY;
-                s[nt][3] = cell + 1 < nb ? s[nt][3] * qs_b : -INFINITY;
-                mxa = fmaxf(mxa, fmaxf(s[nt][0], s[nt][1]));
-                mxb = fmaxf(mxb, fmaxf(s[nt][2], s[nt][3]));
-            }
-#pragma unroll
-            for (int o = 1; o < 4; o <<= 1) {
-                mxa = fmaxf(mxa, __shfl_xor_sync(0xffffffffu, mxa, o));
-                mxb = fmaxf(mxb, __shfl_xor_sync(0xffffffffu, mxb, o));
-            }
-            const float ma = fmaxf(m_a, mxa), mb = fmaxf(m_b, mxb);
-            alpha_a = m_a == -INFINITY ? 0.0f : exp2f(m_a - ma);
-            alpha_b = m_b == -INFINITY ? 0.0f : exp2f(m_b - mb);
-            pm_a = mxa == -INFINITY ? 0.0f : exp2f(mxa - ma);   // the chunk's largest p of the row
-            pm_b = mxb == -INFINITY ? 0.0f : exp2f(mxb - mb);
-            float sa = 0.0f, sb = 0.0f;
-#pragma unroll
-            for (int nt = 0; nt < DCH / 8; ++nt) {
-                s[nt][0] = exp2f(s[nt][0] - ma);   // -inf -> 0
-                s[nt][1] = exp2f(s[nt][1] - ma);
-                s[nt][2] = exp2f(s[nt][2] - mb);
-                s[nt][3] = exp2f(s[nt][3] - mb);
-                sa += s[nt][0] + s[nt][1];
-                sb += s[nt][2] + s[nt][3];
-            }
-            l_a = fmaf(l_a, alpha_a, sa);
-            l_b = fmaf(l_b, alpha_b, sb);
-            m_a = ma;
-            m_b = mb;
-        }
-        // the running sums times alpha, unless every row of the warp kept its max
-        if (!__all_sync(0xffffffffu, alpha_a == 1.0f && alpha_b == 1.0f)) {
-#pragma unroll
-            for (int j = 0; j < HD / 8; ++j) {
-                acc[j][0] *= alpha_a; acc[j][1] *= alpha_a;
-                acc[j][2] *= alpha_b; acc[j][3] *= alpha_b;
-            }
-        }
-        if (more) cp_async_wait1(); else cp_async_wait0();
-        __syncthreads();   // V in
-        // the V scales of this thread's cells, and the chunk's largest per group (lane = cell)
-        uint2 vc[DCH / 8][2];
-#pragma unroll
-        for (int nt = 0; nt < DCH / 8; ++nt) { vc[nt][0] = S.vsc[nt * 8 + 2 * tig]; vc[nt][1] = S.vsc[nt * 8 + 2 * tig + 1]; }
-        __half2 vm01, vm23;
-        {
-            const uint2 mine = S.vsc[lane];
-            uint32_t x0 = mine.x & 0x7fff7fffu, x1 = mine.y & 0x7fff7fffu;
-            vm01 = *reinterpret_cast<__half2*>(&x0);
-            vm23 = *reinterpret_cast<__half2*>(&x1);
-#pragma unroll
-            for (int o = 16; o > 0; o >>= 1) {
-                vm01 = __hmax2(vm01, __shfl_xor_sync(0xffffffffu, vm01, o));
-                vm23 = __hmax2(vm23, __shfl_xor_sync(0xffffffffu, vm23, o));
-            }
-        }
-#pragma unroll
-        for (int g = 0; g < 4; ++g) {
-            const float vmax = g == 0 ? __low2float(vm01) : g == 1 ? __high2float(vm01) : g == 2 ? __low2float(vm23) : __high2float(vm23);
-            const float ba = pm_a * vmax, bb = pm_b * vmax;   // bounds of p * v_scale per row
-            const float ua = ba > 0.0f ? QM / ba : 0.0f, ub = bb > 0.0f ? QM / bb : 0.0f;
-            const float ra = ba * (1.0f / QM), rb = bb * (1.0f / QM);
-            uint32_t w[DCH / 8][4];
-#pragma unroll
-            for (int nt = 0; nt < DCH / 8; ++nt) {
-                // the scales are amax / 127 (>= 0), so p * v_scale * u lies in [0, QM]
-                const float v0 = __half2float(reinterpret_cast<const __half*>(&vc[nt][0])[g]);
-                const float v1 = __half2float(reinterpret_cast<const __half*>(&vc[nt][1])[g]);
-                w[nt][0] = q16_bits(s[nt][0] * v0 * ua);
-                w[nt][1] = q16_bits(s[nt][1] * v1 * ua);
-                w[nt][2] = q16_bits(s[nt][2] * v0 * ub);
-                w[nt][3] = q16_bits(s[nt][3] * v1 * ub);
-            }
-            // a[0]: row a, cells 2t, 2t+1, 2t+8, 2t+9; a[1]: row b; a[2], a[3]: + 16
-            uint32_t ah[4], al[4];
-            pack_lohi(w[0][0], w[0][1], w[1][0], w[1][1], al[0], ah[0]);
-            pack_lohi(w[0][2], w[0][3], w[1][2], w[1][3], al[1], ah[1]);
-            pack_lohi(w[2][0], w[2][1], w[3][0], w[3][1], al[2], ah[2]);
-            pack_lohi(w[2][2], w[2][3], w[3][2], w[3][3], al[3], ah[3]);
-            // the B fragments of the group's 8 n-tiles from 8 bytes (dims 64g + 8gid ..) of each of the thread's cells
-            uint32_t bk[2][8];   // [k half][n-tile]
-#pragma unroll
-            for (int kh = 0; kh < 2; ++kh) {
-                uint2 w4[4];
-#pragma unroll
-                for (int j = 0; j < 4; ++j) {
-                    const int c = 16 * kh + 2 * tig + (j & 1) + (j >> 1) * 8, d = 64 * g + 8 * gid;
-                    w4[j] = *reinterpret_cast<const uint2*>(&S.v[c][(((d >> 4) ^ (c & 7)) << 4) + (d & 15)]);
-                }
-                tr4x4(w4[0].x, w4[1].x, w4[2].x, w4[3].x, &bk[kh][0]);
-                tr4x4(w4[0].y, w4[1].y, w4[2].y, w4[3].y, &bk[kh][4]);
-            }
-#pragma unroll
-            for (int j = 0; j < 8; ++j) {
-                int ih[4], il[4];
-                const uint32_t bb2[2] = {bk[0][j], bk[1][j]};
-                imma16832_z(ih, ah, bb2);
-                imma16832_us_z(il, al, bb2);
-                const int jj = 8 * g + j;
-                acc[jj][0] = fmaf(join16(ih[0], il[0]), ra, acc[jj][0]);
-                acc[jj][1] = fmaf(join16(ih[1], il[1]), ra, acc[jj][1]);
-                acc[jj][2] = fmaf(join16(ih[2], il[2]), rb, acc[jj][2]);
-                acc[jj][3] = fmaf(join16(ih[3], il[3]), rb, acc[jj][3]);
-            }
-        }
-        __syncthreads();   // every warp is done with V
-        if (more) {
-            issue(1, c0 + DCH);
-            cp_async_commit();
-        }
-    }
-#pragma unroll
-    for (int o = 1; o < 4; o <<= 1) {
-        l_a += __shfl_xor_sync(0xffffffffu, l_a, o);
-        l_b += __shfl_xor_sync(0xffffffffu, l_b, o);
-    }
-    const int qa = q0 + 2 * warp, qb = qa + 1;
-    float* oa = attn + ((size_t) qa * n_head + kvh * GQ + gid) * HD;
-    float* ob = attn + ((size_t) qb * n_head + kvh * GQ + gid) * HD;
-    const float ia = l_a > 0.0f ? 1.0f / l_a : 0.0f, ib = l_b > 0.0f ? 1.0f / l_b : 0.0f;
-    // acc[8g + j]: columns 2tig, 2tig + 1 = dims 64g + 16tig + j, + 8
-#pragma unroll
-    for (int g = 0; g < 4; ++g)
-#pragma unroll
-        for (int e = 0; e < 2; ++e) {
-            const int d = 64 * g + 16 * tig + 8 * e;
-            const float* A = &acc[8 * g][0];
-            if (qa < n_q) {
-                *reinterpret_cast<float4*>(oa + d) = make_float4(A[0 + e] * ia, A[4 + e] * ia, A[8 + e] * ia, A[12 + e] * ia);
-                *reinterpret_cast<float4*>(oa + d + 4) = make_float4(A[16 + e] * ia, A[20 + e] * ia, A[24 + e] * ia, A[28 + e] * ia);
-            }
-            if (qb < n_q) {
-                *reinterpret_cast<float4*>(ob + d) = make_float4(A[2 + e] * ib, A[6 + e] * ib, A[10 + e] * ib, A[14 + e] * ib);
-                *reinterpret_cast<float4*>(ob + d + 4) = make_float4(A[18 + e] * ib, A[22 + e] * ib, A[26 + e] * ib, A[30 + e] * ib);
-            }
-        }
-}
-
-bool launch_dense_imma(const float* q, const QsaAttnPools& pools, const int32_t* steps, const QsaShapes& s, float* attn,
-                       int64_t n_q, cudaStream_t st) {
-    static bool attr[64] = {};   // per device, as launch_dense
-    int dev = 0;
-    cudaGetDevice(&dev);
-    const int bytes = (int) sizeof(SmemDI);
-    if (dev < 0 || dev >= 64 || n_q > (int64_t) 0x7fffffff - DQ) return false;
-    if (!attr[dev]) {
-        if (cudaFuncSetAttribute(prompt_attn_dense_imma_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) != cudaSuccess) {
-            cudaGetLastError();
-            return false;
-        }
-        // all of the SM's shared memory for blocks, so two fit (a hint; ignored if refused)
-        if (cudaFuncSetAttribute(prompt_attn_dense_imma_kernel, cudaFuncAttributePreferredSharedMemoryCarveout,
-                                 (int) cudaSharedmemCarveoutMaxShared) != cudaSuccess)
-            cudaGetLastError();
-        attr[dev] = true;
-    }
-    int shift = -1;   // the page size's log2 when it is a power of two
-    for (int b = 0; b < 31; ++b)
-        if (s.page_size == ((int64_t) 1 << b)) shift = b;
-    const float scale_log2 = 1.4426950408889634f / sqrtf((float) HD);
-    prompt_attn_dense_imma_kernel<<<dim3((unsigned) ((n_q + DQ - 1) / DQ), (unsigned) s.n_head_kv), THREADS, bytes, st>>>(
-        q, pools, steps, (int) n_q, (int) s.n_head_kv, (int) s.page_size, shift, scale_log2, attn);
-    const cudaError_t e = cudaGetLastError();
-    if (e != cudaSuccess) {
-        std::fprintf(stderr, "qsa_prompt_attn_batch (dense imma): %s\n", cudaGetErrorString(e));
-        std::exit(1);
-    }
-    return true;
-}
-
-// ---- dense causal prompt attention on INT8 tensor cores, fewer instructions (opt-in STRATA_PROMPT_ATTN_DENSE_IMMA=3) --
-// prompt_attn_dense_imma_kernel's block, layout and arithmetic (8 queries x 8 heads, a 32-cell chunk, q and p * v_scale
-// quantized to the same 16-bit parts against the same bounds, the same int8 K/V codes and exact int32 sums) with fewer
-// instructions per cell. That kernel issues ~14 ALU instructions per MMA and waits
-// on them, not on its tensor cores (25% of their INT8 rate). Here:
-//  - a pair of int32 part sums (h, l) joins as one integer 256 h + l (one IMAD: |256 h + l| < 2^31 for 32 cells or 64
-//    dims) and one I2F, instead of two magic-number conversions and an FMA; in p.v the high parts' sum, times 256, is
-//    the low parts' MMA accumulator, so the join costs a shift;
-//  - p * v_scale is rounded by one FMA with the magic number (p carries QM / its chunk max, v_scale 1 / the chunk's
-//    largest scale of the group);
-//  - two barriers a chunk instead of four: K(c) and the end of p.v(c - 1) meet at one, after which V(c) loads during
-//    q.k(c) and the softmax; V(c) and the end of q.k(c) at the other, after which K(c + 1) loads during p.v(c);
-//  - the swizzled shared-memory addresses are 4 per-thread offsets plus constants, not recomputed per load;
-//  - the blocks run the latest queries (the widest rows) first, so the short ones fill the tail.
-// 49,664 bytes of shared memory: two blocks an SM. qsa_prompt_attn_parity (RTX 5080, 8192 queries at 64K cells): 80-82
-// ms per chunk against 92-95 ms for =2, the same error against FP32 and FP64.
-//
-// V = 4 (opt-in STRATA_PROMPT_ATTN_DENSE_IMMA=4): =3 with cheaper loads. Nsight Compute on =3 (RTX 5080, 64K cells, 8192
-// queries) put 24% of the warp samples and 15% of the instructions in the cp.async address arithmetic: per 16-byte piece
-// a shuffle of the page (which waits on the page-table load issued just before it) and 64-bit row products, computed
-// twice per chunk (K, then V of the same cells). Here warp 0 computes the chunk's 32 row indices once (lane = cell),
-// its page-table load issued a chunk ahead, and keeps them in shared memory for both issues; a thread reads its 4 cells'
-// rows with one 16-byte load (cell c at int (c & 7) * 4 + c / 8) and adds one product per piece. The V scale's
-// reciprocal is one MUFU (rcp.approx) instead of the IEEE division. 256 more bytes of shared memory (still two blocks).
-struct SmemDI4 : SmemDI {
-    int rows[2][DCH];   // the chunk's row index per cell (-1 past the block's widest row), double-buffered
-};
-template <int V = 3>
-__global__ void __launch_bounds__(THREADS, 2) prompt_attn_dense_imma3_kernel(const float* __restrict__ q, QsaAttnPools p,
-                                                                             const int32_t* __restrict__ steps, int n_q,
-                                                                             int n_kv_heads, int page_size, int page_shift,
-                                                                             float scale_log2, float* __restrict__ attn,
-                                                                             int tail_m, int tail_k, float* __restrict__ tail_part) {
+                                                                            float scale_log2, float* __restrict__ attn,
+                                                                            int tail_m, int tail_k, float* __restrict__ tail_part) {
     constexpr int GQ = 8;
     constexpr float QM = 32766.0f;
     extern __shared__ __align__(16) unsigned char smem_raw[];
-    using SM = typename std::conditional<V >= 4, SmemDI4, SmemDI>::type;
-    SM& S = *reinterpret_cast<SM*>(smem_raw);
-    // V = 4: a 1-D grid in =3's block order (x + y * groups); with tail_k > 1, blocks from tail_m on share an item tail_k
-    // ways, each over a range of its chunks, and write unnormalized partials for prompt_attn_tail_merge_kernel
-    int bx = blockIdx.x, by = blockIdx.y, split = -1;
-    const int n_groups = V >= 4 ? (n_q + DQ - 1) / DQ : (int) gridDim.x;
-    if constexpr (V >= 4) {
-        int item = blockIdx.x;
-        if (tail_k > 1 && item >= tail_m) {
-            split = (item - tail_m) % tail_k;
-            item = tail_m + (item - tail_m) / tail_k;
-        }
-        bx = item % n_groups;
-        by = item / n_groups;
+    SmemDI& S = *reinterpret_cast<SmemDI*>(smem_raw);
+    int item = blockIdx.x, split = -1;
+    if (tail_k > 1 && item >= tail_m) {
+        split = (item - tail_m) % tail_k;
+        item = tail_m + (item - tail_m) / tail_k;
     }
-    const int q0 = (n_groups - 1 - bx) * DQ, kvh = by, n_head = n_kv_heads * GQ;
+    const int n_groups = (n_q + DQ - 1) / DQ;
+    const int q0 = (n_groups - 1 - item % n_groups) * DQ, kvh = item / n_groups, n_head = n_kv_heads * GQ;
     const int t = threadIdx.x, lane = t & 31, warp = t >> 5, gid = lane >> 2, tig = lane & 3;
     const int rbase = warp * 16;
     auto width = [&](int i) { return q0 + i < n_q ? __ldg(steps + (size_t) (q0 + i) * kStepCount + kStepWidth) : 0; };
@@ -2412,92 +2032,47 @@ __global__ void __launch_bounds__(THREADS, 2) prompt_attn_dense_imma3_kernel(con
     int n_max = 0;
 #pragma unroll
     for (int i = 0; i < DQ; ++i) n_max = max(n_max, width(i));
-    int cb = 0, ce = n_max;   // V = 4: a split block's cells (whole chunks)
-    if constexpr (V >= 4) {
-        if (split >= 0) {
-            const int per = ((n_max + DCH - 1) / DCH + tail_k - 1) / tail_k;
-            cb = split * per * DCH < n_max ? split * per * DCH : n_max;
-            ce = cb + per * DCH < n_max ? cb + per * DCH : n_max;
-        }
+    int cb = 0, ce = n_max;   // a split block's cells (whole chunks)
+    if (split >= 0) {
+        const int per = ((n_max + DCH - 1) / DCH + tail_k - 1) / tail_k;
+        cb = split * per * DCH < n_max ? split * per * DCH : n_max;
+        ce = cb + per * DCH < n_max ? cb + per * DCH : n_max;
     }
 
-    // as prompt_attn_dense_imma_kernel: the chunk's pages read once per issue and handed to the cells by a shuffle when
-    // the page size is a power of two, otherwise a table read and a division per cell
-    const int pps = page_shift < 0 ? 0 : page_shift >= 5 ? 1 : DCH >> page_shift;   // pages per chunk
-    auto issue = [&](int kv, int c0) {
-        const unsigned char* base = reinterpret_cast<const unsigned char*>(kv ? p.v_q : p.k_q);
-        uint8_t* dst = kv ? &S.v[0][0] : &S.k[0][0];
-        int pg0 = 0, pgv = 0;
-        if (pps > 0) {
-            pg0 = c0 >> page_shift;
-            const int last = (n_max - 1) >> page_shift;
-            pgv = lane < pps && pg0 + lane <= last ? __ldg(p.page_table + pg0 + lane) : 0;
-        }
-        auto row_of = [&](int cell) -> long long {   // every lane of the warp calls it (the shuffle)
-            const long long page = __shfl_sync(0xffffffffu, pgv, ((cell >> page_shift) - pg0) & 31);
-            return (page * n_kv_heads + kvh) * page_size + (cell & (page_size - 1));
-        };
-        auto row_of_div = [&](int cell) -> long long {
-            const int pg = cell / page_size;
-            return ((long long) __ldg(p.page_table + pg) * n_kv_heads + kvh) * page_size + (cell - pg * page_size);
-        };
-#pragma unroll
-        for (int i = t; i < DCH * (HD / 16); i += THREADS) {
-            const int c = i / (HD / 16), pc = i % (HD / 16), cell = c0 + c;
-            const bool ok = cell < n_max;
-            const long long r = pps > 0 ? row_of(cell) : (ok ? row_of_div(cell) : 0);
-            cp_async16(dst + c * HD + ((pc ^ (c & 7)) << 4), base + (ok ? (size_t) r * HD + pc * 16 : 0), ok);
-        }
-        {
-            const int cell = c0 + lane;
-            const bool ok = cell < n_max && t < DCH;
-            const long long r = pps > 0 ? row_of(cell) : (ok ? row_of_div(cell) : 0);
-            if (t < DCH)
-                cp_async8(kv ? &S.vsc[t] : &S.ksc[t], (kv ? p.v_scale : p.k_scale) + (ok ? (size_t) r * (HD / KV_Q8_GROUP) : 0), ok);
-        }
-    };
-    // V = 4: warp 0's page of cell c0 + lane (-1 past n_max), and its row index into rows[buf]
+    // warp 0's page of cell c0 + lane (-1 past n_max), and its row index into rows[buf]
     auto page_load = [&](int c0) -> int {
         const int cell = c0 + lane;
         return cell < n_max ? __ldg(p.page_table + (page_shift >= 0 ? cell >> page_shift : cell / page_size)) : -1;
     };
     auto rows_store = [&](int c0, int pg, int buf) {
-        if constexpr (V >= 4) {
-            const int cell = c0 + lane;
-            const int in = page_shift >= 0 ? cell & (page_size - 1) : cell % page_size;
-            S.rows[buf][(lane & 7) * 4 + (lane >> 3)] = pg < 0 ? -1 : (pg * n_kv_heads + kvh) * page_size + in;
-        }
+        const int cell = c0 + lane;
+        const int in = page_shift >= 0 ? cell & (page_size - 1) : cell % page_size;
+        S.rows[buf][(lane & 7) * 4 + (lane >> 3)] = pg < 0 ? -1 : (pg * n_kv_heads + kvh) * page_size + in;
     };
-    // V = 4: thread t's pieces t % 16 of cells t / 16 + 8 it (as issue's i = t + 128 it), rows from rows[buf]
-    auto issue4 = [&](int kv, int buf) {
-        if constexpr (V >= 4) {
-            const unsigned char* base = reinterpret_cast<const unsigned char*>(kv ? p.v_q : p.k_q) + (t & 15) * 16;
-            uint8_t* dst = (kv ? &S.v[0][0] : &S.k[0][0]) + (t >> 4) * HD + (((t & 15) ^ ((t >> 4) & 7)) << 4);
-            const int4 r4 = *reinterpret_cast<const int4*>(&S.rows[buf][(t >> 4) * 4]);
-            const int rr[4] = {r4.x, r4.y, r4.z, r4.w};
+    // the K (kv 0) or V (kv 1) rows of the chunk whose row indices are in rows[buf]: thread t's pieces t % 16 of cells
+    // t / 16 + 8 it
+    auto issue = [&](int kv, int buf) {
+        const unsigned char* base = reinterpret_cast<const unsigned char*>(kv ? p.v_q : p.k_q) + (t & 15) * 16;
+        uint8_t* dst = (kv ? &S.v[0][0] : &S.k[0][0]) + (t >> 4) * HD + (((t & 15) ^ ((t >> 4) & 7)) << 4);
+        const int4 r4 = *reinterpret_cast<const int4*>(&S.rows[buf][(t >> 4) * 4]);
+        const int rr[4] = {r4.x, r4.y, r4.z, r4.w};
 #pragma unroll
-            for (int it = 0; it < 4; ++it)
-                cp_async16(dst + it * 8 * HD, base + (size_t) (rr[it] >= 0 ? rr[it] : 0) * HD, rr[it] >= 0);
-            if (t < DCH) {
-                const int r = S.rows[buf][(t & 7) * 4 + (t >> 3)];
-                cp_async8(kv ? &S.vsc[t] : &S.ksc[t], (kv ? p.v_scale : p.k_scale) + (size_t) (r >= 0 ? r : 0) * (HD / KV_Q8_GROUP),
-                          r >= 0);
-            }
+        for (int it = 0; it < 4; ++it)
+            cp_async16(dst + it * 8 * HD, base + (size_t) (rr[it] >= 0 ? rr[it] : 0) * HD, rr[it] >= 0);
+        if (t < DCH) {
+            const int r = S.rows[buf][(t & 7) * 4 + (t >> 3)];
+            cp_async8(kv ? &S.vsc[t] : &S.ksc[t], (kv ? p.v_scale : p.k_scale) + (size_t) (r >= 0 ? r : 0) * (HD / KV_Q8_GROUP),
+                      r >= 0);
         }
     };
-    if constexpr (V >= 4) {
-        if (warp == 0) rows_store(cb, page_load(cb), 0);
-        __syncthreads();
-        if (cb < ce) {
-            issue4(0, 0);
-            cp_async_commit();
-        }
-    } else if (n_max > 0) {
+    if (warp == 0) rows_store(cb, page_load(cb), 0);
+    __syncthreads();
+    if (cb < ce) {
         issue(0, 0);
         cp_async_commit();
     }
 
-    // q per row: X = rint(x * QM / max |x|) as a signed high and an unsigned low byte (as the kernel above)
+    // q per row: X = rint(x * QM / max |x|) as a signed high (X >> 8) and an unsigned low byte (X & 255)
     float qs_a = 0.0f, qs_b = 0.0f;
 #pragma unroll 1
     for (int r = 0; r < 16; ++r) {
@@ -2557,19 +2132,15 @@ __global__ void __launch_bounds__(THREADS, 2) prompt_attn_dense_imma3_kernel(con
 #pragma unroll
         for (int go = 0; go < 2; ++go) vx[e][go] = (((4 * go + (gid >> 1)) ^ ((2 * tig + e) & 7)) << 4) + 8 * (gid & 1);
 
-    int rbuf = 0;   // V = 4: rows[rbuf] holds this chunk's rows
+    int rbuf = 0;   // rows[rbuf] holds this chunk's rows
 #pragma unroll 1
-    for (int c0 = V >= 4 ? cb : 0; c0 < (V >= 4 ? ce : n_max); c0 += DCH) {
-        const bool more = c0 + DCH < (V >= 4 ? ce : n_max);
+    for (int c0 = cb; c0 < ce; c0 += DCH) {
+        const bool more = c0 + DCH < ce;
         cp_async_wait0();
         __syncthreads();   // K(c) in; every warp is done with V(c - 1)
-        int pgn = -1;   // V = 4: the next chunk's page (warp 0), loaded during q.k and the softmax
-        if constexpr (V >= 4) {
-            issue4(1, rbuf);
-            if (warp == 0 && more) pgn = page_load(c0 + DCH);
-        } else {
-            issue(1, c0);
-        }
+        int pgn = -1;   // the next chunk's page (warp 0), loaded during q.k and the softmax
+        issue(1, rbuf);
+        if (warp == 0 && more) pgn = page_load(c0 + DCH);
         cp_async_commit();
         // q.k: per 64-dim group g, the int32 sums of the two parts (k-steps of 32 dims) for the chunk's 4 n-tiles
         float s[DCH / 8][4];
@@ -2662,14 +2233,12 @@ __global__ void __launch_bounds__(THREADS, 2) prompt_attn_dense_imma3_kernel(con
                 acc[j][2] *= alpha_b; acc[j][3] *= alpha_b;
             }
         }
-        if constexpr (V >= 4) {   // the next chunk's rows: read after the barrier below (K) and the next one (V)
-            if (warp == 0 && more) rows_store(c0 + DCH, pgn, rbuf ^ 1);
-        }
+        // the next chunk's rows: read after the barrier below (K) and the next one (V)
+        if (warp == 0 && more) rows_store(c0 + DCH, pgn, rbuf ^ 1);
         cp_async_wait0();
         __syncthreads();   // V(c) in; every warp is done with K(c)
         if (more) {
-            if constexpr (V >= 4) issue4(0, rbuf ^ 1);
-            else issue(0, c0 + DCH);
+            issue(0, rbuf ^ 1);
             cp_async_commit();
         }
         rbuf ^= 1;
@@ -2689,17 +2258,13 @@ __global__ void __launch_bounds__(THREADS, 2) prompt_attn_dense_imma3_kernel(con
 #pragma unroll
         for (int g = 0; g < 4; ++g) {
             const float vmax = g == 0 ? __low2float(vm01) : g == 1 ? __high2float(vm01) : g == 2 ? __low2float(vm23) : __high2float(vm23);
-            float iv;
-            if constexpr (V >= 4) {   // within 1 ulp: v_scale * iv <= 1 + 2^-22, p * v_scale * iv still rounds to <= QM
+            float iv;   // within 1 ulp: v_scale * iv <= 1 + 2^-22, p * v_scale * iv still rounds to <= QM
 #if STRATA_PA_SM80
-                asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(iv) : "f"(vmax));
+            asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(iv) : "f"(vmax));
 #else
-                iv = 1.0f / vmax;   // AMD (the kernel is not launched there) and pre-sm_80 builds
+            iv = 1.0f / vmax;   // AMD (the kernel is not launched there) and pre-sm_80 builds
 #endif
-                iv = vmax > 0.0f ? iv : 0.0f;
-            } else {
-                iv = vmax > 0.0f ? 1.0f / vmax : 0.0f;
-            }
+            iv = vmax > 0.0f ? iv : 0.0f;
             const float ra = pm_a * vmax * (1.0f / QM), rb = pm_b * vmax * (1.0f / QM);
             // a[0]: row a, cells 2t, 2t+1, 2t+8, 2t+9; a[1]: row b; a[2], a[3]: + 16. The scales are amax / 127 (>= 0),
             // so p / pm * QM * v_scale / vmax lies in [0, QM]; the magic-number FMA rounds it to an integer in the float's
@@ -2763,16 +2328,14 @@ __global__ void __launch_bounds__(THREADS, 2) prompt_attn_dense_imma3_kernel(con
     float* oa = attn + ((size_t) qa * n_head + kvh * GQ + gid) * HD;
     float* ob = attn + ((size_t) qb * n_head + kvh * GQ + gid) * HD;
     float ia = l_a > 0.0f ? 1.0f / l_a : 0.0f, ib = l_b > 0.0f ? 1.0f / l_b : 0.0f;
-    if constexpr (V >= 4) {
-        if (split >= 0) {   // the partial: rows 16 warp + gid (query a) and + 8 (query b), the sums as they are, (m, l)
-            const int slot = (int) blockIdx.x - tail_m, n_slots = (int) gridDim.x - tail_m;
-            oa = tail_part + ((size_t) slot * 64 + 16 * warp + gid) * HD;
-            ob = oa + 8 * HD;
-            ia = ib = 1.0f;
-            if (tig == 0) {
-                float* ml = tail_part + (size_t) n_slots * 64 * HD + ((size_t) slot * 64 + 16 * warp + gid) * 2;
-                ml[0] = m_a; ml[1] = l_a; ml[16] = m_b; ml[17] = l_b;
-            }
+    if (split >= 0) {   // the partial: rows 16 warp + gid (query a) and + 8 (query b), the sums as they are, (m, l)
+        const int slot = (int) blockIdx.x - tail_m, n_slots = (int) gridDim.x - tail_m;
+        oa = tail_part + ((size_t) slot * 64 + 16 * warp + gid) * HD;
+        ob = oa + 8 * HD;
+        ia = ib = 1.0f;
+        if (tig == 0) {
+            float* ml = tail_part + (size_t) n_slots * 64 * HD + ((size_t) slot * 64 + 16 * warp + gid) * 2;
+            ml[0] = m_a; ml[1] = l_a; ml[16] = m_b; ml[17] = l_b;
         }
     }
     // acc[8g + j]: columns 2tig, 2tig + 1 = dims 64g + 16tig + j, + 8
@@ -2816,29 +2379,28 @@ __global__ void __launch_bounds__(HD) prompt_attn_tail_merge_kernel(const float*
     attn[((size_t) qi * n_kv_heads * GQ + kvh * GQ + row % 8) * HD + d] = l > 0.0f ? o / l : 0.0f;
 }
 
-template <int V = 3>
-bool launch_dense_imma3(const float* q, const QsaAttnPools& pools, const int32_t* steps, const QsaShapes& s, float* attn,
-                        int64_t n_q, cudaStream_t st) {
-    static bool attr[64] = {};   // per device, as launch_dense_imma
-    static int per_sm[64] = {};   // V = 4: blocks an SM
-    static float* tail_buf[64] = {};   // V = 4: the tail's partials (per device; one prompt stream a device)
+bool launch_dense_imma(const float* q, const QsaAttnPools& pools, const int32_t* steps, const QsaShapes& s, float* attn,
+                       int64_t n_q, cudaStream_t st) {
+    static bool attr[64] = {};   // per device, as launch_dense
+    static int per_sm[64] = {};   // blocks an SM
+    static float* tail_buf[64] = {};   // the tail's partials (per device; one prompt stream a device)
     int dev = 0;
     cudaGetDevice(&dev);
-    const int bytes = (int) sizeof(typename std::conditional<V >= 4, SmemDI4, SmemDI>::type);
+    const int bytes = (int) sizeof(SmemDI);
     if (dev < 0 || dev >= 64 || n_q > (int64_t) 0x7fffffff - DQ) return false;
     if (!attr[dev]) {
-        if (cudaFuncSetAttribute(prompt_attn_dense_imma3_kernel<V>, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) != cudaSuccess) {
+        if (cudaFuncSetAttribute(prompt_attn_dense_imma_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) != cudaSuccess) {
             cudaGetLastError();
             return false;
         }
         // all of the SM's shared memory for blocks, so two fit (a hint; ignored if refused)
-        if (cudaFuncSetAttribute(prompt_attn_dense_imma3_kernel<V>, cudaFuncAttributePreferredSharedMemoryCarveout,
+        if (cudaFuncSetAttribute(prompt_attn_dense_imma_kernel, cudaFuncAttributePreferredSharedMemoryCarveout,
                                  (int) cudaSharedmemCarveoutMaxShared) != cudaSuccess)
             cudaGetLastError();
 #if !defined(__HIPCC__)   // (AMD: no tail split; the HIP build does not take this kernel)
-        if (V >= 4) {
+        {
             int nb = 0, sms = 0;
-            if (cudaOccupancyMaxActiveBlocksPerMultiprocessor(&nb, prompt_attn_dense_imma3_kernel<V>, THREADS, bytes) == cudaSuccess &&
+            if (cudaOccupancyMaxActiveBlocksPerMultiprocessor(&nb, prompt_attn_dense_imma_kernel, THREADS, bytes) == cudaSuccess &&
                 cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) == cudaSuccess)
                 per_sm[dev] = nb * sms;   // the blocks of one wave
             cudaGetLastError();
@@ -2851,41 +2413,36 @@ bool launch_dense_imma3(const float* q, const QsaAttnPools& pools, const int32_t
         if (s.page_size == ((int64_t) 1 << b)) shift = b;
     const float scale_log2 = 1.4426950408889634f / sqrtf((float) HD);
     const int groups = (int) ((n_q + DQ - 1) / DQ);
-    if (V >= 4) {
-        // the last partial wave's items (the shortest rows: the blocks run widest first) split over the cells so the wave
-        // is full: T items, each over k = wave / T blocks (STRATA_PROMPT_ATTN_TAIL=0: off, read per call)
-        const int64_t items = (int64_t) groups * s.n_head_kv, wave = per_sm[dev];
-        const char* te = std::getenv("STRATA_PROMPT_ATTN_TAIL");
-        int64_t tail_m = 0, k = 1;
-        bool split = false;
-        if (wave > 0 && !(te && te[0] == '0')) {
-            const int64_t T = items % wave;
-            k = T > 0 ? wave / T : 0;
-            cudaStreamCaptureStatus cs = cudaStreamCaptureStatusNone;
-            if (T > 0 && k >= 2 && cudaStreamIsCapturing(st, &cs) == cudaSuccess && cs == cudaStreamCaptureStatusNone) {
-                if (!tail_buf[dev] && cudaMalloc(&tail_buf[dev], (size_t) wave * 64 * (HD + 2) * sizeof(float)) != cudaSuccess) {
-                    tail_buf[dev] = nullptr;
-                    per_sm[dev] = 0;   // no room: no split from now on
-                }
-                if (tail_buf[dev]) { tail_m = items - T; split = true; }
+    // the last partial wave's items (the shortest rows: the blocks run widest first) split over the cells so the wave
+    // is full: T items, each over k = wave / T blocks (STRATA_PROMPT_ATTN_TAIL=0: off, read per call)
+    const int64_t items = (int64_t) groups * s.n_head_kv, wave = per_sm[dev];
+    const char* te = std::getenv("STRATA_PROMPT_ATTN_TAIL");
+    int64_t tail_m = 0, k = 1;
+    bool split = false;
+    if (wave > 0 && !(te && te[0] == '0')) {
+        const int64_t T = items % wave;
+        k = T > 0 ? wave / T : 0;
+        cudaStreamCaptureStatus cs = cudaStreamCaptureStatusNone;
+        if (T > 0 && k >= 2 && cudaStreamIsCapturing(st, &cs) == cudaSuccess && cs == cudaStreamCaptureStatusNone) {
+            if (!tail_buf[dev] && cudaMalloc(&tail_buf[dev], (size_t) wave * 64 * (HD + 2) * sizeof(float)) != cudaSuccess) {
+                tail_buf[dev] = nullptr;
+                per_sm[dev] = 0;   // no room: no split from now on
             }
-            cudaGetLastError();
+            if (tail_buf[dev]) { tail_m = items - T; split = true; }
         }
-        if (!split) k = 1;
-        const int64_t T = items - tail_m, grid = split ? tail_m + T * k : items;
-        prompt_attn_dense_imma3_kernel<V><<<dim3((unsigned) grid), THREADS, bytes, st>>>(
-            q, pools, steps, (int) n_q, (int) s.n_head_kv, (int) s.page_size, shift, scale_log2, attn, (int) tail_m, (int) k,
-            tail_buf[dev]);
-        if (split)
-            prompt_attn_tail_merge_kernel<<<dim3((unsigned) T, 64), HD, 0, st>>>(tail_buf[dev], (int) tail_m, (int) k, (int) n_q,
-                                                                                 (int) s.n_head_kv, attn);
-    } else {
-        prompt_attn_dense_imma3_kernel<V><<<dim3((unsigned) groups, (unsigned) s.n_head_kv), THREADS, bytes, st>>>(
-            q, pools, steps, (int) n_q, (int) s.n_head_kv, (int) s.page_size, shift, scale_log2, attn, 0, 1, nullptr);
+        cudaGetLastError();
     }
+    if (!split) k = 1;
+    const int64_t T = items - tail_m, grid = split ? tail_m + T * k : items;
+    prompt_attn_dense_imma_kernel<<<dim3((unsigned) grid), THREADS, bytes, st>>>(
+        q, pools, steps, (int) n_q, (int) s.n_head_kv, (int) s.page_size, shift, scale_log2, attn, (int) tail_m, (int) k,
+        tail_buf[dev]);
+    if (split)
+        prompt_attn_tail_merge_kernel<<<dim3((unsigned) T, 64), HD, 0, st>>>(tail_buf[dev], (int) tail_m, (int) k, (int) n_q,
+                                                                             (int) s.n_head_kv, attn);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
-        std::fprintf(stderr, "qsa_prompt_attn_batch (dense imma3): %s\n", cudaGetErrorString(e));
+        std::fprintf(stderr, "qsa_prompt_attn_batch (dense imma): %s\n", cudaGetErrorString(e));
         std::exit(1);
     }
     return true;
@@ -3732,6 +3289,7 @@ bool launch_wmma(const float* q, const QsaAttnPools& pools, const int32_t* ids, 
 
 int g_pa_imma = -1;   // STRATA_PROMPT_ATTN_IMMA: -1 not read yet; qsa_prompt_attn_set_imma (tests) overrides it
 int g_window_small = -1;   // STRATA_ATTN_WINDOW_SMALL: -1 as the variable says; qsa_decode_attn_window_set_small (tests)
+constexpr int kWindowSmallMaxT = 4;   // the small-window kernel's largest window (queries)
 
 // Qwen3.6-35B-A3B on Flash-Next's engine path (--pack): 8 query heads per KV head.  ids null = dense (every cell of the
 // width): 8 queries per block on sm_80+ with fp16 or int8 K/V (STRATA_PROMPT_ATTN_DENSE=0: the per-query kernels, A/B);
@@ -3742,22 +3300,18 @@ bool dispatch_g8(const float* q, const QsaAttnPools& pools, const int32_t* ids, 
     constexpr int GQ = 8;
     const char* dn = std::getenv("STRATA_PROMPT_ATTN_DENSE");   // read per call: the parity test switches it
     if (ids == nullptr && !turing && !(dn && dn[0] == '0') && pools.k_q4 == nullptr && pools.v_q4 == nullptr) {
-        // STRATA_PROMPT_ATTN_FP16ACC=1|2|3 (opt-in, read per call as above): the reduced-precision modes of
-        // prompt_attn_dense_kernel (PREC there); FP16 K/V take mode 1 for 2 and 3
+        // STRATA_PROMPT_ATTN_FP16ACC=1|2 (opt-in, read per call as above): the reduced-precision modes of
+        // prompt_attn_dense_kernel (PREC there); =3 (a removed mode) runs 2; FP16 K/V take mode 1 for 2
         const char* fa = std::getenv("STRATA_PROMPT_ATTN_FP16ACC");
         const int prec = fa && fa[0] >= '1' && fa[0] <= '3' ? fa[0] - '0' : 0;
         if (pools.k_q && pools.v_q && pools.k_scale && pools.v_scale) {
-            // STRATA_PROMPT_ATTN_DENSE_IMMA=2 (opt-in, read per call): both products on INT8 tensor cores, q and
-            // p * v_scale in 16-bit parts (prompt_attn_dense_imma_kernel); it takes precedence over FP16ACC
+            // STRATA_PROMPT_ATTN_DENSE_IMMA=4 (opt-in, read per call): both products on INT8 tensor cores, q and
+            // p * v_scale in 16-bit parts (prompt_attn_dense_imma_kernel); it takes precedence over FP16ACC. =2 and =3
+            // (its removed predecessors) run it too
             const char* im = std::getenv("STRATA_PROMPT_ATTN_DENSE_IMMA");
-            // =3: the same arithmetic in fewer instructions (prompt_attn_dense_imma3_kernel)
-            if (im && im[0] == '3') return launch_dense_imma3(q, pools, steps, s, attn, n_q, st);
-            // =4: =3 with the cp.async addresses computed once per chunk (prompt_attn_dense_imma3_kernel<4>)
-            if (im && im[0] == '4') return launch_dense_imma3<4>(q, pools, steps, s, attn, n_q, st);
-            if (im && im[0] == '2') return launch_dense_imma(q, pools, steps, s, attn, n_q, st);
+            if (im && im[0] >= '2' && im[0] <= '4') return launch_dense_imma(q, pools, steps, s, attn, n_q, st);
             if (prec == 1) return launch_dense<1, 1>(q, pools, steps, s, attn, n_q, st);
-            if (prec == 2) return launch_dense<1, 2>(q, pools, steps, s, attn, n_q, st);
-            if (prec == 3) return launch_dense<1, 3>(q, pools, steps, s, attn, n_q, st);
+            if (prec >= 2) return launch_dense<1, 2>(q, pools, steps, s, attn, n_q, st);
             return launch_dense<1>(q, pools, steps, s, attn, n_q, st);
         }
         if (!pools.k_q && pools.k_pool && pools.v_pool) {
@@ -3840,7 +3394,7 @@ bool qsa_decode_attn_split(const float* q, const QsaAttnPools& pools, const int3
 }
 namespace {
 #if !defined(__HIPCC__)   // CUDA only (the caller returns false on HIP before it)
-// STRATA_ATTN_WINDOW_SMALL=1: a verify window of up to 8 queries on INT8 tensor cores, streaming one range of the cells
+// STRATA_ATTN_WINDOW_SMALL=1: a verify window of up to 4 queries on INT8 tensor cores, streaming one range of the cells
 // per block with K and V read once for the window: prompt_attn_dense_imma_kernel's arithmetic (q and p * v_scale as
 // 16-bit high/low byte parts, K and V as their int8 codes, int32 sums) without the window kernel's 64-row blocks, whose
 // rows a window of 1-2 queries leaves 3/4 empty. Rows: NT = ceil(T / 2) MMA row tiles, tile rt the 8 heads of queries
@@ -4157,7 +3711,7 @@ __global__ void __launch_bounds__(128) decode_attn_window_small_kernel(const flo
 
 template <int NT>
 bool launch_window_small(const float* q, const QsaAttnPools& pools, const int32_t* steps, const QsaShapes& s, float* scratch,
-                         uint64_t scratch_floats, float* attn, int64_t n_q, int splits, int sms, cudaStream_t st) {
+                         uint64_t scratch_floats, float* attn, int64_t n_q, int sms, cudaStream_t st) {
     static int attr[64] = {};   // per device: blocks an SM (0 not asked yet, -1 refused)
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
@@ -4175,9 +3729,9 @@ bool launch_window_small(const float* q, const QsaAttnPools& pools, const int32_
         cudaGetLastError();
     }
     if (attr[dev] < 0) return false;
-    // ranges: one wave of blocks over the KV heads unless set
+    // ranges: one wave of blocks over the KV heads
     const int64_t per_sm = attr[dev];
-    int64_t nsp = splits > 0 ? splits : (per_sm * (int64_t) sms + s.n_head_kv - 1) / s.n_head_kv;
+    int64_t nsp = (per_sm * (int64_t) sms + s.n_head_kv - 1) / s.n_head_kv;
     nsp = std::max<int64_t>(1, std::min<int64_t>(nsp, 65535));
     while (nsp > 1 && (uint64_t) (n_q * nsp * s.n_head * (HD + 2)) > scratch_floats) nsp /= 2;
     if ((uint64_t) (n_q * nsp * s.n_head * (HD + 2)) > scratch_floats) return false;
@@ -4196,13 +3750,12 @@ bool launch_window_small(const float* q, const QsaAttnPools& pools, const int32_
     }
     return true;
 }
+// windows of up to kWindowSmallMaxT queries: one or two row tiles
 bool launch_window_small_t(const float* q, const QsaAttnPools& pools, const int32_t* steps, const QsaShapes& s, float* scratch,
-                           uint64_t scratch_floats, float* attn, int64_t n_q, int splits, int sms, cudaStream_t st) {
+                           uint64_t scratch_floats, float* attn, int64_t n_q, int sms, cudaStream_t st) {
     switch ((n_q + 1) / 2) {
-        case 1: return launch_window_small<1>(q, pools, steps, s, scratch, scratch_floats, attn, n_q, splits, sms, st);
-        case 2: return launch_window_small<2>(q, pools, steps, s, scratch, scratch_floats, attn, n_q, splits, sms, st);
-        case 3: return launch_window_small<3>(q, pools, steps, s, scratch, scratch_floats, attn, n_q, splits, sms, st);
-        case 4: return launch_window_small<4>(q, pools, steps, s, scratch, scratch_floats, attn, n_q, splits, sms, st);
+        case 1: return launch_window_small<1>(q, pools, steps, s, scratch, scratch_floats, attn, n_q, sms, st);
+        case 2: return launch_window_small<2>(q, pools, steps, s, scratch, scratch_floats, attn, n_q, sms, st);
         default: return false;
     }
 }
@@ -4210,7 +3763,7 @@ bool launch_window_small_t(const float* q, const QsaAttnPools& pools, const int3
 
 template <int PREC>
 bool launch_window(const float* q, const QsaAttnPools& pools, const int32_t* steps, const QsaShapes& s, float* scratch,
-                   uint64_t scratch_floats, float* attn, int64_t n_q, int splits, int sms, cudaStream_t st) {
+                   uint64_t scratch_floats, float* attn, int64_t n_q, int sms, cudaStream_t st) {
     static bool attr[64] = {};   // per device
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
@@ -4228,9 +3781,8 @@ bool launch_window(const float* q, const QsaAttnPools& pools, const int32_t* ste
         attr[dev] = true;
     }
     const int64_t groups = (n_q + DQ - 1) / DQ;
-    // ranges: about two waves of blocks (one block per SM at full precision, two in the FP16 modes) unless set
-    int64_t nsp = splits > 0 ? splits : (2 * (int64_t) sms * (PREC > 0 ? 2 : 1) + groups * s.n_head_kv - 1) /
-                                            (groups * s.n_head_kv);
+    // ranges: about two waves of blocks (one block per SM at full precision, two in the FP16 modes)
+    int64_t nsp = (2 * (int64_t) sms * (PREC > 0 ? 2 : 1) + groups * s.n_head_kv - 1) / (groups * s.n_head_kv);
     nsp = std::max<int64_t>(1, std::min<int64_t>(nsp, 65535));
     while (nsp > 1 && (uint64_t) (n_q * nsp * s.n_head * (HD + 2)) > scratch_floats) nsp /= 2;   // the caller's scratch
     if ((uint64_t) (n_q * nsp * s.n_head * (HD + 2)) > scratch_floats) return false;
@@ -4252,8 +3804,9 @@ bool launch_window(const float* q, const QsaAttnPools& pools, const int32_t* ste
 // STRATA_ATTN_WINDOW=1: a verify window's dense decode attention (Qwen3.6 / qwen35moe, 8 query heads per KV head,
 // int8 KV) through prompt_attn_dense_kernel split over the cells: each block holds up to 8 queries x 8 heads of one KV
 // head, so a K/V chunk is read once per window instead of once per query, on the int8 tensor-core path (cp.async,
-// 16-byte loads, page-contiguous rows), merged with decode_attn_merge_kernel.  STRATA_ATTN_WINDOW_PREC=1|2|3 picks the
-// prompt kernel's FP16 modes (fewer MMAs); STRATA_ATTN_WINDOW_SPLITS=N fixes the range count.
+// 16-byte loads, page-contiguous rows), merged with decode_attn_merge_kernel.  STRATA_ATTN_WINDOW_PREC=1|2 picks the
+// prompt kernel's FP16 modes (fewer MMAs; =3, a removed mode, runs 2).  The range count follows the SM count and the
+// window (launch_window, launch_window_small).
 bool qsa_decode_attn_window(const float* q, const QsaAttnPools& pools, const int32_t* steps, const QsaShapes& s,
                             float* scratch, uint64_t scratch_floats, float* attn, int64_t n_q, void* stream) {
 #if defined(__HIPCC__)
@@ -4263,14 +3816,12 @@ bool qsa_decode_attn_window(const float* q, const QsaAttnPools& pools, const int
 #else
     static const int on = [] { const char* v = std::getenv("STRATA_ATTN_WINDOW"); return v != nullptr && std::atoi(v) != 0; }();
     static const int prec = [] { const char* v = std::getenv("STRATA_ATTN_WINDOW_PREC"); return v ? std::atoi(v) : 0; }();
-    static const int splits = [] { const char* v = std::getenv("STRATA_ATTN_WINDOW_SPLITS"); return v ? std::atoi(v) : 0; }();
     // STRATA_ATTN_WINDOW_SMALL=1 (opt-in): windows of up to 4 queries on decode_attn_window_small_kernel, any PREC
     // (RTX 5080, 200K cells: 1.7x the window kernel at precision 2 for 1-2 queries, 1.4x for 3-4, about even at 5-6);
-    // =N (2..8): windows of up to N queries
+    // any value above 1 is 1 (the windows of up to N queries it once picked were removed)
     static const int small_env = [] {
         const char* v = std::getenv("STRATA_ATTN_WINDOW_SMALL");
-        const int n = v ? std::atoi(v) : 0;
-        return n <= 0 ? 0 : n == 1 ? 4 : std::min(n, 8);
+        return v && std::atoi(v) > 0 ? kWindowSmallMaxT : 0;
     }();
     const bool small = n_q <= (g_window_small >= 0 ? g_window_small : small_env);
     // a lone query at full precision: the decode kernel is as fast (RTX 5080, 200K cells: 1.04 vs 1.10 ms)
@@ -4291,17 +3842,16 @@ bool qsa_decode_attn_window(const float* q, const QsaAttnPools& pools, const int
     }
     if (cc[dev] < 80) return false;
     cudaStream_t st = (cudaStream_t) stream;
-    if (small && launch_window_small_t(q, pools, steps, s, scratch, scratch_floats, attn, n_q, splits, sms[dev], st)) return true;
+    if (small && launch_window_small_t(q, pools, steps, s, scratch, scratch_floats, attn, n_q, sms[dev], st)) return true;
     if (prec == 0 && n_q < 2) return false;
-    if (prec == 1) return launch_window<1>(q, pools, steps, s, scratch, scratch_floats, attn, n_q, splits, sms[dev], st);
-    if (prec == 2) return launch_window<2>(q, pools, steps, s, scratch, scratch_floats, attn, n_q, splits, sms[dev], st);
-    if (prec == 3) return launch_window<3>(q, pools, steps, s, scratch, scratch_floats, attn, n_q, splits, sms[dev], st);
-    return launch_window<0>(q, pools, steps, s, scratch, scratch_floats, attn, n_q, splits, sms[dev], st);
+    if (prec == 1) return launch_window<1>(q, pools, steps, s, scratch, scratch_floats, attn, n_q, sms[dev], st);
+    if (prec == 2 || prec == 3) return launch_window<2>(q, pools, steps, s, scratch, scratch_floats, attn, n_q, sms[dev], st);
+    return launch_window<0>(q, pools, steps, s, scratch, scratch_floats, attn, n_q, sms[dev], st);
 #endif
 }
 
 void qsa_prompt_attn_set_imma(int on) { g_pa_imma = on < 0 ? -1 : (on ? 1 : 0); }
-void qsa_decode_attn_window_set_small(int max_t) { g_window_small = max_t < 0 ? -1 : std::min(max_t, 8); }
+void qsa_decode_attn_window_set_small(int on) { g_window_small = on < 0 ? -1 : on ? kWindowSmallMaxT : 0; }
 bool qsa_prompt_attn_matrix_cores_requested() {
 #if defined(__HIPCC__)
     int dev = 0;

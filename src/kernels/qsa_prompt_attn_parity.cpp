@@ -343,9 +343,11 @@ int run(int fmt, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8, 0 fp16, 2
 }
 // Dense (Qwen3.6: 16 query heads, 2 KV heads, no selection - query i reads cells 0..pos): the 8-query kernel against the
 // per-query tensor-core kernel it replaces (STRATA_PROMPT_ATTN_DENSE=0) and an FP64 reference. Same two checks as run().
-// Then the reduced-precision modes (STRATA_PROMPT_ATTN_FP16ACC=1..3) against the FP32 kernel and FP64: reported, a
-// failure only if an output is not finite. sharp: queries share a direction per KV head that cell 0 (a sink) and
-// every 4099th cell (needles) carry, so the softmax is peaked as a model's is, not the near-flat of random data.
+// Then the reduced-precision modes (STRATA_PROMPT_ATTN_FP16ACC=1, 2; int8 K/V also STRATA_PROMPT_ATTN_DENSE_IMMA=4)
+// against the FP32 kernel and FP64: reported, a failure only if an output is not finite. The removed values
+// (FP16ACC=3, DENSE_IMMA=2 and =3) must run a kept mode: their outputs bit for bit that mode's. sharp: queries share a
+// direction per KV head that cell 0 (a sink) and every 4099th cell (needles) carry, so the softmax is peaked as a
+// model's is, not the near-flat of random data.
 int run_dense(int fmt, int64_t ctx, int64_t nq, int reps, bool sharp = false) {   // fmt 1 int8, 0 fp16
 #if defined(__HIPCC__) || defined(STRATA_USE_HIP)
     (void) fmt; (void) ctx; (void) nq; (void) reps;
@@ -429,11 +431,18 @@ int run_dense(int fmt, int64_t ctx, int64_t nq, int reps, bool sharp = false) { 
     std::vector<float> o((size_t) (nq * NH * HD)), nw(o.size());
     ck(cudaMemcpy(o.data(), d_old, o.size() * 4, cudaMemcpyDeviceToHost), "down");
     ck(cudaMemcpy(nw.data(), d_new, nw.size() * 4, cudaMemcpyDeviceToHost), "down");
-    // modes 1..3: STRATA_PROMPT_ATTN_FP16ACC=1..3; int8 K/V also 4, 5, 6: STRATA_PROMPT_ATTN_DENSE_IMMA=2, 3, 4
+    // modes 1, 2: STRATA_PROMPT_ATTN_FP16ACC=1, 2; int8 K/V also 3: STRATA_PROMPT_ATTN_DENSE_IMMA=4 (index 0: neither
+    // set). Then the removed values, each with the mode it must run: FP16ACC=3 -> 2, DENSE_IMMA=2 and =3 -> 3
+    struct Mode {
+        const char* fa;   // STRATA_PROMPT_ATTN_FP16ACC ("" unset)
+        const char* im;   // STRATA_PROMPT_ATTN_DENSE_IMMA ("" unset)
+        int runs;         // a removed value: the mode whose output it must give bit for bit (0: a mode of its own)
+    };
+    static const Mode modes[] = {{"", "", 0}, {"1", "", 0}, {"2", "", 0}, {"", "4", 0},
+                                 {"3", "", 2}, {"", "2", 3}, {"", "3", 3}};
     auto set_prec = [](int pr) {
-        const char v[2] = {(char) ('0' + (pr <= 3 ? pr : pr - 2)), 0};
-        const char* fa = pr >= 1 && pr <= 3 ? v : "";
-        const char* im = pr >= 4 ? v : "";
+        const char* fa = modes[pr].fa;
+        const char* im = modes[pr].im;
 #if defined(_WIN32)
         _putenv_s("STRATA_PROMPT_ATTN_FP16ACC", fa);
         _putenv_s("STRATA_PROMPT_ATTN_DENSE_IMMA", im);
@@ -442,17 +451,23 @@ int run_dense(int fmt, int64_t ctx, int64_t nq, int reps, bool sharp = false) { 
         if (im[0]) setenv("STRATA_PROMPT_ATTN_DENSE_IMMA", im, 1); else unsetenv("STRATA_PROMPT_ATTN_DENSE_IMMA");
 #endif
     };
-    const int n_modes = fmt == 1 ? 6 : 3;
-    std::vector<float> lp[7];   // the reduced-precision modes' outputs (lp[0] unused)
-    for (int pr = 1; pr <= n_modes; ++pr) {
+    auto var = [](int pr) { return modes[pr].fa[0] ? "FP16ACC" : "DENSE_IMMA"; };
+    auto val = [](int pr) { return modes[pr].fa[0] ? modes[pr].fa : modes[pr].im; };
+    const int n_modes = fmt == 1 ? 3 : 2;   // modes 1..n_modes
+    std::vector<int> removed = {4};          // FP16ACC=3
+    if (fmt == 1) { removed.push_back(5); removed.push_back(6); }   // DENSE_IMMA=2, =3
+    std::vector<float> lp[7];   // the outputs per index (lp[0] unused)
+    auto capture = [&](int pr) {
         set_prec(pr);
         go(true, d_new);
         ck(cudaDeviceSynchronize(), "run");
         lp[pr].resize(o.size());
         ck(cudaMemcpy(lp[pr].data(), d_new, o.size() * 4, cudaMemcpyDeviceToHost), "down");
-    }
+    };
+    for (int pr = 1; pr <= n_modes; ++pr) capture(pr);
+    for (int pr : removed) capture(pr);
     set_prec(0);
-    double err_old = 0, err_new = 0, ref_scale = 0, err_lp[7] = {0, 0, 0, 0, 0, 0, 0};
+    double err_old = 0, err_new = 0, ref_scale = 0, err_lp[4] = {0, 0, 0, 0};
     for (int64_t i = 0; i < nq; i += std::max<int64_t>(1, nq / 6)) {
         const int64_t w = ctx - nq + i + 1;
         for (int64_t h = 0; h < NH; h += 3) {
@@ -551,15 +566,18 @@ int run_dense(int fmt, int64_t ctx, int64_t nq, int reps, bool sharp = false) { 
         cudaEventElapsedTime(&ms, e0, e1);
         set_prec(0);
         lp_ok = lp_ok && fin;
-        std::printf("  %s %s=%d vs FP32: max |d| %.3g (%.2g of scale), mean |d| %.3g, row rel L2 mean %.3g max %.3g; "
+        std::printf("  %s %s=%s vs FP32: max |d| %.3g (%.2g of scale), mean |d| %.3g, row rel L2 mean %.3g max %.3g; "
                     "vs FP64 %.3g (FP32 %.3g); %.3f ms per chunk (%.2fx the FP32 dense)\n",
-                    fin ? "ok" : "NOT FINITE", pr <= 3 ? "FP16ACC" : "DENSE_IMMA", pr <= 3 ? pr : pr - 2, mx, mx / scale, sum / (double) nw.size(), rel_sum / (double) n_rows,
+                    fin ? "ok" : "NOT FINITE", var(pr), val(pr), mx, mx / scale, sum / (double) nw.size(), rel_sum / (double) n_rows,
                     rel_max, err_lp[pr], err_new, ms / reps, ms_new / ms);
     }
-    if (n_modes >= 6) {   // DENSE_IMMA=4 against =3 (the same arithmetic but the V scale's reciprocal)
-        double mx = 0;
-        for (size_t i = 0; i < nw.size(); ++i) mx = std::max(mx, (double) std::fabs(lp[6][i] - lp[5][i]));
-        std::printf("  DENSE_IMMA=4 vs =3: max |d| %.3g (%.2g of scale)\n", mx, mx / scale);
+    // the removed values: FP16ACC=3 runs mode 2 (1 for FP16 K/V, as 2 does there), DENSE_IMMA=2 and =3 run =4
+    for (int pr : removed) {
+        const int want = modes[pr].runs;
+        const bool same = std::memcmp(lp[pr].data(), lp[want].data(), lp[pr].size() * sizeof(float)) == 0;
+        lp_ok = lp_ok && same;
+        std::printf("  %s %s=%s (removed) runs %s=%s: %s\n", same ? "ok" : "FAIL", var(pr), val(pr), var(want), val(want),
+                    same ? "bit for bit" : "outputs differ");
     }
     cudaFree((void*) d_steps); cudaFree((void*) d_q); cudaFree(d_old); cudaFree(d_new);
     cudaFree((void*) pl.k_q); cudaFree((void*) pl.v_q); cudaFree((void*) pl.k_scale); cudaFree((void*) pl.v_scale);

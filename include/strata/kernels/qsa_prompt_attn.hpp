@@ -52,8 +52,8 @@ bool qsa_decode_attn_window(const float* q, const QsaAttnPools& pools, const int
                             float* scratch, uint64_t scratch_floats, float* attn, int64_t n_q, void* stream);
 /// Tests: the int8-KV kernel on INT8 tensor cores (1), v2 (0), or as STRATA_PROMPT_ATTN_IMMA says (-1).
 void qsa_prompt_attn_set_imma(int on);
-/// Tests: STRATA_ATTN_WINDOW_SMALL for windows of up to max_t queries (0 off, at most 8), or as the variable says (-1).
-void qsa_decode_attn_window_set_small(int max_t);
+/// Tests: STRATA_ATTN_WINDOW_SMALL on (> 0: windows of up to 4 queries) or off (0), or as the variable says (-1).
+void qsa_decode_attn_window_set_small(int on);
 /// HIP: STRATA_HIP_WMMA asks for the matrix-core prompt attention (=1 or =auto) and this device is a gfx11 / gfx12 matrix-core part
 /// that has not switched it off after a failed launch.  The prompt path's 96-slot expert ring follows it.  False off HIP.
 bool qsa_prompt_attn_matrix_cores_requested();
