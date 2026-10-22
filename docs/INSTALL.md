@@ -383,6 +383,23 @@ slower on others (`STRATA_ADAPT_OVERLAP`, `STRATA_ADAPT_LAG`), off against on wi
 one only when it beats the noise between starts and gives the same text. A few minutes on a fast PC; the model is
 loaded up to 13 times. [Details and an RTX 5080 measurement](DETAILS.md#double-click-start-herebat).
 
+**More speed on one card when the whole model fits in RAM (opt-in).** Two opt-in settings by RubenTorney (#1904, #1905).
+They help when you run one graphics card and your RAM holds every expert, for example Q2_0 or IQ3_XXS on a 64 GB PC. Open
+`strata-<model>.json` in the Strata data folder ([where](#where-things-are-stored)) and add:
+
+- `"--adapt-async", "1"` to the `"args"` list. The expert cache then updates on a helper thread instead of pausing the
+  answer. Measured on an RTX 5070 (Windows, Q2_0): +4-5% decode, +7-10% on code and long documents. Answers can differ
+  slightly from the default and stay the same from run to run.
+- `"STRATA_PIN_BY_NEED": "1"` in the `"env"` block (Windows). Windows can lock only about half the RAM for the graphics
+  card, and this locks the experts the card needs first. Measured on the RTX 5070: +4.4% prompt reading.
+
+```json
+"args": [ ..., "--adapt-async", "1" ],
+"env": { "STRATA_PIN_BY_NEED": "1" }
+```
+
+Restart Strata after the change. To undo, remove the two entries.
+
 ## Options without questions
 
 For the Terminal, `strata launch --help` lists every flag; the most used are in [TERMINAL_LAUNCH.md](TERMINAL_LAUNCH.md). These are the options of the installer from source:
