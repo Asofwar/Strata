@@ -45,6 +45,7 @@ TASKS = tasks_py.TASKS + tasks_js.TASKS
 OUT_LIMIT = 8000            # characters of a tool result the model sees
 CMD_TIMEOUT = 60
 TEST_TIMEOUT = 120
+EXIT_FORMAT = "plain"       # --exit-format
 
 SYSTEM = """You are a coding agent. You work in a git-less repository on the user's machine through the tools \
 you are given; paths are relative to the repository root. Look at the code before you change it, make the \
@@ -121,6 +122,14 @@ def run_proc(cmd, cwd, timeout):
     except OSError as e:
         return 127, f"cannot run {cmd[0]}: {e}"
     return p.returncode, (p.stdout + ("\n" if p.stdout and p.stderr else "") + p.stderr)
+
+
+def exit_text(code, out, seconds):
+    """A command's result as the model sees it.  "codex" is the Codex CLI shell tool's own form; the Cyber-Tiel
+    template reads its "Exit code: N" (N > 0) as a failed tool call and adds a SYSTEM WARNING after it."""
+    if EXIT_FORMAT == "codex":
+        return f"Exit code: {code}\nWall time: {seconds:.1f} seconds\nOutput:\n{out}"
+    return f"exit code {code}\n{out}"
 
 
 def clip(text, limit=OUT_LIMIT):
@@ -212,8 +221,9 @@ class Sandbox:
         return "\n".join(hits[:200]) or "no matches"
 
     def run_tests(self):
+        t0 = time.time()
         code, out = run_proc(test_cmd(self.lang, "tests"), self.root, TEST_TIMEOUT)
-        return f"exit code {code}\n{out}"
+        return exit_text(code, out, time.time() - t0)
 
     def run_command(self, command):
         try:
@@ -231,8 +241,9 @@ class Sandbox:
             raise ValueError(f"program {argv[0]!r} is not allowed (only python and node)")
         if any(x.lower() in ("pip", "pip3", "ensurepip", "venv") for x in argv[1:3]):
             raise ValueError("installing packages is not allowed here: use the standard library")
+        t0 = time.time()
         code, out = run_proc(argv, self.root, CMD_TIMEOUT)
-        return f"exit code {code}\n{out}"
+        return exit_text(code, out, time.time() - t0)
 
 
 def http(url, body=None, timeout=3600.0):
@@ -300,7 +311,8 @@ def run_one(a, t, run_idx, tok, sandbox_root: Path):
     sb_root.mkdir(parents=True)
     write_tree(sb_root, t["files"])
     sb = Sandbox(sb_root, t["lang"])
-    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": t["prompt"]}]
+    system = SYSTEM + (" " + a.system_extra if a.system_extra else "")
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": t["prompt"]}]
     stats = {"turns": 0, "completion_tokens": 0, "reasoning_tokens": 0, "max_prompt_tokens": 0, "tool_calls": 0,
              "malformed": 0, "malformed_kinds": {}, "text_tool_calls": 0, "recoveries": 0, "length_cuts": 0,
              "repeat_calls": 0, "tests_runs": 0, "finished": False, "ended": None, "request_s": 0.0,
@@ -314,8 +326,11 @@ def run_one(a, t, run_idx, tok, sandbox_root: Path):
             body["reasoning_effort"] = a.reasoning_effort     # False: thinking off
         if a.reasoning_budget is not None:
             body["reasoning_budget_tokens"] = a.reasoning_budget
+        ctk = dict(a.template_kwargs)
         if a.preserve_thinking != "default":
-            body["chat_template_kwargs"] = {"preserve_thinking": a.preserve_thinking == "on"}
+            ctk["preserve_thinking"] = a.preserve_thinking == "on"
+        if ctk:
+            body["chat_template_kwargs"] = ctk
         rt = time.time()
         try:
             out = http(a.url.rstrip("/") + "/v1/chat/completions", body, timeout=a.request_timeout)
@@ -434,6 +449,11 @@ def main():
     ap.add_argument("--reasoning-effort", choices=["none", "low", "medium", "high"], default=None)
     ap.add_argument("--reasoning-budget", type=int, default=None, help="reasoning_budget_tokens of every request")
     ap.add_argument("--preserve-thinking", choices=["default", "on", "off"], default="default")
+    ap.add_argument("--exit-format", choices=["plain", "codex"], default="plain",
+                    help="how run_tests/run_command show the exit code: 'exit code N', or Codex's 'Exit code: N'")
+    ap.add_argument("--system-extra", default="", help="a sentence added to the end of the agent's system prompt")
+    ap.add_argument("--template-kwargs", default="",
+                    help="JSON object sent as chat_template_kwargs (with --preserve-thinking's key when that is set)")
     ap.add_argument("--request-timeout", type=float, default=900, help="seconds; a request over it ends the bench")
     ap.add_argument("--budget-min", type=float, default=0, help="stop starting runs after this many minutes")
     ap.add_argument("--run-order", choices=["run-major", "task-major"], default="run-major",
@@ -444,6 +464,11 @@ def main():
     a = ap.parse_args()
     if a.reasoning_effort == "none":
         a.reasoning_effort = False                    # the server's "thinking off"
+    global EXIT_FORMAT
+    EXIT_FORMAT = a.exit_format
+    a.template_kwargs = json.loads(a.template_kwargs) if a.template_kwargs else {}
+    if not isinstance(a.template_kwargs, dict):
+        ap.error("--template-kwargs must be a JSON object")
     tasks = TASKS
     if a.tasks:
         want = a.tasks.split(",")
@@ -474,6 +499,12 @@ def main():
             return 1
         rec["config"] = {"reasoning_effort": a.reasoning_effort, "reasoning_budget": a.reasoning_budget,
                          "preserve_thinking": a.preserve_thinking, "max_turns": a.max_turns}
+        if a.exit_format != "plain":
+            rec["config"]["exit_format"] = a.exit_format
+        if a.template_kwargs:
+            rec["config"]["template_kwargs"] = a.template_kwargs
+        if a.system_extra:
+            rec["config"]["system_extra"] = a.system_extra
         with out_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
         print(f"{t['id']:22} #{r} {'PASS' if rec['pass'] else 'FAIL'} turns {rec['turns']:2} {rec['wall_s']:6.1f}s "
