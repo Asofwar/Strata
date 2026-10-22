@@ -153,6 +153,8 @@ class InstallPack(unittest.TestCase):
         self.assertIs(self.cfg["reasoning_close_retry"], True)
         self.assertEqual(self.cfg["env"]["STRATA_PROMPT_ATTN_DENSE_IMMA"], "4")
         self.assertEqual(self.cfg["env"]["STRATA_ATTN_WINDOW_SMALL"], "1")
+        self.assertEqual(self.cfg["env"]["STRATA_MMQ_KQ"], "1")
+        self.assertEqual(self.cfg["env"]["STRATA_ARENA_WSLOCK"], "1")
         self.assertEqual(self.cfg["sampling"], {"temperature": 0.6, "presence_penalty": 0})
 
     def test_ornith_abl_and_the_draft_subset(self):
