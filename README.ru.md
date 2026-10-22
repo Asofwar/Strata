@@ -13,6 +13,7 @@
   <a href="https://github.com/Asofwar/Strata/releases/latest"><img src="https://img.shields.io/github/v/release/Asofwar/Strata?label=%D1%80%D0%B5%D0%BB%D0%B8%D0%B7%20%D1%84%D0%BE%D1%80%D0%BA%D0%B0" alt="Релиз форка"></a>
   <a href="https://github.com/Niko1221/Strata"><img src="https://img.shields.io/badge/upstream-Niko1221%2FStrata-blue" alt="Upstream: Niko1221/Strata"></a>
   <a href="docs/FORK.ru.md"><img src="https://img.shields.io/badge/docs-FORK.ru.md-2ea44f" alt="Документация форка"></a>
+  <a href="#%D0%BF%D0%BE%D0%B4%D0%B4%D0%B5%D1%80%D0%B6%D0%B0%D1%82%D1%8C-strata"><img src="https://img.shields.io/badge/%D0%B4%D0%BE%D0%BD%D0%B0%D1%82-Gram%20(TON)-0098EA" alt="Gram (TON)"></a>
 </p>
 
 Этот форк [Niko1221/Strata](https://github.com/Niko1221/Strata) запускает модели Qwen3.6-35B-A3B Cyber-Tiel-Coder и

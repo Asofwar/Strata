@@ -13,6 +13,7 @@
   <a href="https://github.com/Asofwar/Strata/releases/latest"><img src="https://img.shields.io/github/v/release/Asofwar/Strata?label=fork%20release" alt="Fork release"></a>
   <a href="https://github.com/Niko1221/Strata"><img src="https://img.shields.io/badge/upstream-Niko1221%2FStrata-blue" alt="Upstream: Niko1221/Strata"></a>
   <a href="docs/FORK.ru.md"><img src="https://img.shields.io/badge/docs-FORK.ru.md-2ea44f" alt="Fork docs"></a>
+  <a href="#support-strata"><img src="https://img.shields.io/badge/donate-Gram%20(TON)-0098EA" alt="Gram (TON)"></a>
 </p>
 
 This fork of [Niko1221/Strata](https://github.com/Niko1221/Strata) runs the Qwen3.6-35B-A3B models Cyber-Tiel-Coder
