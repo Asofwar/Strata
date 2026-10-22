@@ -3518,6 +3518,7 @@ class Service:
         self.shared_path = None                       # where they are kept between starts (next to the config)
         self.config_effort = None                     # #1641: the config's "reasoning_effort": the level for requests with none
         self.config_preserve = None                   # the config's "preserve_thinking": true/false, or None (the template's)
+        self.template_extra = {}                      # the config's "chat_template_kwargs": the template's own switches
         self.keep_awake = None                        # #1727 (opt-in): serve.keepawake.KeepAwake, the config's "prevent_sleep"
         self.fifo = threading.Lock()
         self.slot_save_path = None                    # --slot-save-path: /slots/0?action=save|restore (off when None)
@@ -4178,6 +4179,22 @@ class Service:
             if "preserve_thinking" not in ctk:
                 req["chat_template_kwargs"] = {**ctk, "preserve_thinking": bool(preserve)}
         return req
+
+    def template_extras(self, req: dict) -> dict:
+        """The template's own switches for this request: the config's "chat_template_kwargs", each key with the
+        request's chat_template_kwargs value when it gives one.  A key the config does not name is not passed on, so
+        without the config key every prompt is what it was."""
+        if not self.template_extra:
+            return {}
+        ctk = req.get("chat_template_kwargs") if isinstance(req.get("chat_template_kwargs"), dict) else {}
+        out = {}
+        for key, value in self.template_extra.items():
+            if key in ctk:
+                value = ctk[key]
+                if not (value is None or isinstance(value, (bool, int, float, str))):
+                    raise ValueError(f"chat_template_kwargs.{key}: a string, number, true, false or null")
+            out[key] = value
+        return out
 
     def start_telemetry(self):
         """The hardware sampler behind GET /metrics (serve/telemetry.py), recording this server's tok/s too."""
@@ -6819,6 +6836,7 @@ def make_handler(svc: Service):
             req = svc.with_shared(req, "openai")
             bias_api.normalize(req.get("logit_bias"), len(getattr(svc.tok, "tokens", ())) or None)
             messages, tools, kw = openai_to_messages(req)
+            kw = {**svc.template_extras(req), **kw}
             self._no_local_images(messages)
             if tool_choice_of(req.get("tool_choice"))[0] == "none":   # as the Responses route: no tools are offered
                 tools = None
@@ -7004,7 +7022,8 @@ def make_handler(svc: Service):
             responses_api.check_request(req)
             messages = responses_api.input_messages(req)
             tools, names, skipped = responses_api.request_tools(req)
-            kw = responses_api.template_kwargs(req, {"reasoning_effort": svc.effort_default()})
+            kw = {**svc.template_extras(req),
+                  **responses_api.template_kwargs(req, {"reasoning_effort": svc.effort_default()})}
             try:
                 self._no_local_images(messages)              # as on the chat route: no file read for a foreign page
             except ValueError as e:
@@ -7067,6 +7086,7 @@ def make_handler(svc: Service):
             read for the same request, rendered and tokenized - the model does not run."""
             req = svc.with_shared(req, "anthropic")
             messages, tools, kw = anthropic_to_messages(req, svc.anthropic_think_unasked)
+            kw = {**svc.template_extras(req), **kw}
             stop_strings(req)                                 # the same 400 as the request itself would get
             check_request_sampling(req)                       # ... likewise a sampling field of the wrong type
             self._json(200, {"input_tokens": len(svc.encode_prompt(messages, tools, kw, store=False))})
@@ -7075,6 +7095,7 @@ def make_handler(svc: Service):
             svc.load()
             req = svc.with_shared(req, "anthropic")
             messages, tools, kw = anthropic_to_messages(req, svc.anthropic_think_unasked)
+            kw = {**svc.template_extras(req), **kw}
             self._no_local_images(messages)
             if tool_choice_of(req.get("tool_choice"))[0] == "none":   # Anthropic's {"type": "none"}: no tools offered
                 tools = None
@@ -7419,6 +7440,25 @@ def origins_of(value, key: str, wildcard: bool) -> list[str]:
 
 SHARED_KEYS = ("reasoning_effort", "reasoning_budget_tokens", "temperature", "top_p", "top_k", "seed", "max_tokens",
                "experimental_speed_projection")
+# the template's render arguments and the switches that have settings of their own: never a config's
+# "chat_template_kwargs"
+TEMPLATE_RESERVED = ("messages", "tools", "add_generation_prompt", "enable_thinking", "reasoning_effort",
+                     "preserve_thinking")
+
+
+def clean_template_kwargs(d) -> dict:
+    """The config's "chat_template_kwargs": a template's own switches (Cyber-Tiel's `terse`, `max_tool_response_chars`,
+    ...) with the value every request gets.  ValueError names a bad entry."""
+    if not isinstance(d, dict):
+        raise ValueError('must be an object of the template\'s own switches, for example {"terse": false}')
+    for key, value in d.items():
+        if not isinstance(key, str) or not key.isidentifier():
+            raise ValueError(f"{key!r} is not a template variable name")
+        if key in TEMPLATE_RESERVED:
+            raise ValueError(f"{key!r} cannot be set here: it has a setting of its own")
+        if not (value is None or isinstance(value, (bool, int, float, str))):
+            raise ValueError(f"{key}: a string, number, true, false or null, not {value!r}")
+    return dict(d)
 
 
 def clean_shared_defaults(d) -> dict:
@@ -8124,6 +8164,14 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         svc.config_preserve = cfg["preserve_thinking"]
         print(f"[strata] earlier turns' reasoning: {'kept' if svc.config_preserve else 'dropped'} (preserve_thinking in "
               "the config; a request's chat_template_kwargs can set its own)", flush=True)
+    if cfg.get("chat_template_kwargs") is not None:     # a template's own switches for every request: opt-in
+        try:
+            svc.template_extra = clean_template_kwargs(cfg["chat_template_kwargs"])
+        except ValueError as e:
+            raise SystemExit(f"[strata] config \"chat_template_kwargs\" {e}")
+        if svc.template_extra:
+            print(f"[strata] chat template switches: {json.dumps(svc.template_extra)} (chat_template_kwargs in the "
+                  "config; a request's chat_template_kwargs can set its own for these keys)", flush=True)
     svc.codex_thread_titles = cfg.get("codex_thread_titles") is True    # #923: opt-in, off by default
     svc.codex_compaction_cache = cfg.get("codex_compaction_cache") is True   # #924: opt-in, off by default
     try:
