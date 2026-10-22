@@ -37,8 +37,11 @@ an RTX 3060).  Each is measured off against on, a restart per sample, the starts
 beats the baseline by more than the baseline's own spread across its starts (and MIN_GAIN), and with the same greedy
 text.
 
+The pack path's own settings (setup.py --calibrate-fork) are measured at a long context by tools/calibrate_fork.py.
+
     python tools/calibrate.py strata-q2_0.json        # measure and print; setup.py --calibrate also saves it
     python tools/calibrate.py --switches strata-q2_0.json
+    python tools/calibrate.py --fork --budget 60 strata-cybertiel-ud-iq4_xs.json   # --dry-run: the plan only
 """
 from __future__ import annotations
 
@@ -692,10 +695,36 @@ def apply_env(env: dict | None, calibrated: dict | None) -> dict:
     return out
 
 
+def fork_main(argv: list[str]) -> int:
+    """`calibrate.py --fork [--budget MIN] [--context N] [--compare CFG] [--dry-run] [--out FILE] <config>`: the
+    pack path's own settings (tools/calibrate_fork.py); prints the plan first, then the result as JSON."""
+    import argparse
+    import calibrate_fork as CF
+    ap = argparse.ArgumentParser(prog="calibrate.py --fork")
+    ap.add_argument("config")
+    ap.add_argument("--budget", type=float, default=60.0, help="minutes (default 60)")
+    ap.add_argument("--context", type=int, help=f"the target context in tokens (default {CF.FORK_CONTEXT})")
+    ap.add_argument("--compare", help="another config measured beside the tuned settings in the last check")
+    ap.add_argument("--dry-run", action="store_true", help="print the plan and its estimate only")
+    ap.add_argument("--out", help="also write the result here (JSON)")
+    a = ap.parse_args(argv)
+    cfg = json.loads(Path(a.config).read_text(encoding="utf-8-sig"))
+    cmp = json.loads(Path(a.compare).read_text(encoding="utf-8-sig")) if a.compare else None
+    say = lambda *x: print(*x, flush=True)          # noqa: E731
+    res = CF.run_fork(cfg, say=say, budget_min=a.budget, ctx=a.context, compare=cmp, dry_run=a.dry_run)
+    text = json.dumps(res, indent=1)
+    if a.out:
+        Path(a.out).write_text(text, encoding="utf-8")
+    print(text)
+    return 0
+
+
 if __name__ == "__main__":
+    if "--fork" in sys.argv[1:]:
+        sys.exit(fork_main([x for x in sys.argv[1:] if x != "--fork"]))
     argv = [x for x in sys.argv[1:] if x != "--switches"]
     if len(argv) != 1:
-        sys.exit("usage: calibrate.py [--switches] <strata-*.json>")
+        sys.exit("usage: calibrate.py [--switches | --fork [--budget MIN] [--context N]] <strata-*.json>")
     cfg = json.loads(Path(argv[0]).read_text(encoding="utf-8-sig"))
     res = run_switches(cfg) if "--switches" in sys.argv else run(cfg)
     print(json.dumps(res, indent=1))

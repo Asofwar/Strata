@@ -6057,15 +6057,79 @@ def hardware_key(cfg: dict) -> str:
                      cfg.get("model_name", "?"), ctx, "images" if "--vision" in a else "text"])
 
 
-def calibrate_config(cfg_path: Path, settings: bool = True, switches: bool = False) -> bool:
+def calibrate_config(cfg_path: Path, settings: bool = True, switches: bool = False, fork: bool = False,
+                     budget_min: float = 60.0, context: int | None = None) -> bool:
     """Measure the engine's hardware-dependent settings on this PC (tools/calibrate.py), write them into the run
     config and remember them per PC and model in the settings file, so an update or a reinstall keeps them.
     `switches` (--calibrate-switches, opt-in): also the decode switches that win on some PCs and lose on others
-    (STRATA_ADAPT_OVERLAP, STRATA_ADAPT_LAG), after the settings; the winner goes into the config's "env"."""
+    (STRATA_ADAPT_OVERLAP, STRATA_ADAPT_LAG), after the settings; the winner goes into the config's "env".
+    `fork` (--calibrate-fork, opt-in, the pack path): the fork's own settings at a long context (tools/calibrate_fork.py),
+    after the settings; it measures the two switches too, so the switch step is not run again after it."""
     if settings and not calibrate_settings(cfg_path):
         return False
+    forked = calibrate_fork(cfg_path, budget_min, context) if fork else True
+    if fork and switches:
+        say("  --calibrate-switches: the fork calibration measured STRATA_ADAPT_OVERLAP and STRATA_ADAPT_LAG already")
+        switches = False
     switched = calibrate_switches(cfg_path) if switches else True
-    return switched or settings                        # a failed switch step after tuned settings is said by itself
+    return (switched and forked) or settings           # a failed later step after tuned settings is said by itself
+
+
+def calibrate_fork(cfg_path: Path, budget_min: float = 60.0, context: int | None = None) -> bool:
+    """--calibrate-fork: the pack path's own settings measured at a long context on this PC (tools/calibrate_fork.py:
+    the window depth, the draft floor and the PCIe share per request; setup's PACK_TUNED variables and the opt-in ones
+    with a restart each; the settings that follow from the VRAM, RAM and disk), written into the run config and
+    remembered with the PC's calibration.  A failure keeps the config as it was."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    import calibrate_fork as CF
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
+    say()
+    say(f"  Tuning the fork's settings for this PC at a long context (up to {budget_min:.0f} minutes; the model is "
+        "loaded many times and the PC is busy meanwhile).")
+    try:
+        res = CF.run_fork(cfg, say=say, budget_min=budget_min, ctx=context)
+    except Exception as e:                             # never stops an install: the config stays as it was
+        warn(f"the fork calibration did not finish ({e}): the config stays as it was")
+        return False
+    cfg["args"], env = CF.apply_fork(cfg["args"], cfg.get("env"), res)
+    if env:
+        cfg["env"] = env
+    else:
+        cfg.pop("env", None)
+    write_config(cfg_path, cfg)
+    st = load_settings()
+    entry = st.setdefault("calibration", {}).setdefault(hardware_key(cfg), {})
+    r = res.get("report") or {}
+    entry["fork"] = {"settings": res["settings"], "env": res["env"], "date": time.strftime("%Y-%m-%d"),
+                     "target_ctx": r.get("target_ctx"), "chosen": r.get("chosen"), "minutes": r.get("minutes")}
+    save_settings(st)
+    CF.say_result(res, say)
+    ok("the fork's settings for this PC are in the config" + (": " + ", ".join(r["chosen"]) if r.get("chosen") else
+                                                               ": setup's own variables stay"))
+    return True
+
+
+def apply_saved_calibration(cfg: dict, pack: bool = False) -> dict:
+    """A new config (a setup run) with the calibration saved for this PC and model: --calibrate's settings and
+    variables, --calibrate-switches' switch and, on the pack path, --calibrate-fork's settings after them.  Without a
+    saved calibration the config is returned as it is."""
+    cal = saved_calibration(cfg)
+    if not cal:
+        return cfg
+    sys.path.insert(0, str(ROOT / "tools"))
+    import calibrate as CAL
+    cfg = dict(cfg)
+    if "settings" in cal:
+        cfg["args"] = CAL.apply(cfg["args"], cal.get("settings") or {})
+    if "env" in cal:
+        cfg["env"] = CAL.apply_switch_env(CAL.apply_env(cfg.get("env"), cal["env"]), {k: v for k, v in cal["env"].items()
+                                                                                    if k in CAL.SWITCHES})
+    if pack and cal.get("fork"):
+        import calibrate_fork as CF
+        cfg["args"], cfg["env"] = CF.apply_fork(cfg["args"], cfg.get("env"), cal["fork"])
+    if not cfg.get("env"):
+        cfg.pop("env", None)
+    return cfg
 
 
 def calibrate_switches(cfg_path: Path) -> bool:
@@ -6094,6 +6158,8 @@ def calibrate_switches(cfg_path: Path) -> bool:
     # beside the variables --calibrate chose (its own keys), the switch that won here
     entry.update(env={**{k: v for k, v in (entry.get("env") or {}).items() if k not in CAL.SWITCHES}, **res["env"]},
                  switches_date=time.strftime("%Y-%m-%d"))
+    if entry.get("fork"):                              # the newer measurement of the two switches is the one a setup run applies
+        entry["fork"]["env"] = {**(entry["fork"].get("env") or {}), **{k: res["env"].get(k) for k in CAL.SWITCHES}}
     save_settings(st)
     ok("decode switches for this PC: " + (", ".join(f"{k}={v}" for k, v in res["env"].items()) if res["env"]
                                           else "none wins here, all stay off")
@@ -6124,9 +6190,14 @@ def calibrate_settings(cfg_path: Path) -> bool:
     cfg["args"] = CAL.apply(cfg["args"], res["settings"])
     if "env" in res:                                   # HIP: the engine variables it measured (STRATA_SH_STREAM)
         cfg["env"] = CAL.apply_env(cfg.get("env"), res["env"])
-    write_config(cfg_path, cfg)
     st = load_settings()
     old = (st.get("calibration") or {}).get(hardware_key(cfg)) or {}
+    if old.get("fork"):                                # --calibrate-fork's settings stay on top (as a setup run applies them)
+        import calibrate_fork as CF
+        cfg["args"], cfg["env"] = CF.apply_fork(cfg["args"], cfg.get("env"), old["fork"])
+        if not cfg["env"]:
+            cfg.pop("env")
+    write_config(cfg_path, cfg)
     # the env --calibrate measured, with the switch --calibrate-switches chose kept beside it (its own date)
     kept = {k: v for k, v in (old.get("env") or {}).items() if k in CAL.SWITCHES} if "switches_date" in old else {}
     st.setdefault("calibration", {})[hardware_key(cfg)] = {"settings": res["settings"],
@@ -6134,7 +6205,8 @@ def calibrate_settings(cfg_path: Path) -> bool:
                                                            "tok_s": res["report"].get("tok_s"),
                                                            "date": time.strftime("%Y-%m-%d"),
                                                            **({"switches_date": old["switches_date"]}
-                                                              if "switches_date" in old else {})}
+                                                              if "switches_date" in old else {}),
+                                                           **({"fork": old["fork"]} if old.get("fork") else {})}
     save_settings(st)
     chosen = {**res["settings"], **(res.get("env") or {})}
     if chosen:
@@ -7272,6 +7344,10 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
         else:
             cfg["parallel"] = 1
             ok("parallel requests: one at a time (--parallel 1)")
+    # --calibrate / --calibrate-fork measured on this PC for this model (the key's probes only when any was saved)
+    if pack_path and load_settings().get("calibration") and saved_calibration(cfg):
+        cfg = apply_saved_calibration(cfg, pack=True)
+        ok("the settings tuned for this PC earlier are used")
     write_setup_config(cfg_path, cfg, adopted if adopted is not None and adopted.name == cfg_path.name else None, explicit_args(a))
     script = write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
     ok(f"start script: {script.name}")
@@ -7627,6 +7703,15 @@ def main() -> int:
     ap.add_argument("--calibrate-switches", action="store_true",
                     help="measure the opt-in decode switches (STRATA_ADAPT_OVERLAP, STRATA_ADAPT_LAG) on this PC and keep "
                          "the one that is faster here with the same text (about 5-15 minutes); with --calibrate, after it")
+    ap.add_argument("--calibrate-fork", action="store_true",
+                    help="the pack families (cyber-tiel, ornith-abl): tune the fork's settings for this PC at a long "
+                         "context - the window depth, the draft floor, the PCIe share, the PACK_TUNED variables and the "
+                         "opt-in ones, the VRAM reserve and the conversation cache (--calibrate-budget minutes, default "
+                         "60); with --calibrate, after it")
+    ap.add_argument("--calibrate-budget", type=float, default=60.0, metavar="MIN",
+                    help="--calibrate-fork: the minutes it may take (the candidates that do not fit are left out)")
+    ap.add_argument("--calibrate-context", type=int, metavar="TOKENS",
+                    help="--calibrate-fork: the context to measure at (default 65536, at most the model's)")
     ap.add_argument("--draft-vocab", choices=list(DRAFT_VOCABS),
                     help="the draft layer's tokens: cjk = with Chinese, Japanese and Korean (default), en = English "
                          "and code only (~110 MiB less VRAM, English answers 1-2%% faster), cyrillic = English, code "
@@ -7739,8 +7824,8 @@ def main() -> int:
     # choice, and asked once when the PC has cards that could share the model
     run_gpu = start_gpus(a.gpus) or a.gpu
     port = a.port or 8080                              # a new install's port (issue #32: --port for an existing one)
-    calibrating = a.calibrate or a.calibrate_switches
-    flag = "--calibrate" if a.calibrate else "--calibrate-switches"
+    calibrating = a.calibrate or a.calibrate_switches or a.calibrate_fork
+    flag = "--calibrate" if a.calibrate else "--calibrate-fork" if a.calibrate_fork else "--calibrate-switches"
     if calibrating and (a.setup or a.check or not have):    # #2036: said, not dropped
         why = ("--setup" if a.setup else "--check" if a.check else "no model is installed yet")
         warn(f"{flag} does nothing with {why}: it tunes a model that is already installed. Run setup first, "
@@ -7759,11 +7844,14 @@ def main() -> int:
             for i, c in enumerate(have, 1):
                 say(f"  {i}) {json.loads(c.read_text(encoding='utf-8-sig')).get('model_name', c.stem)}")
             pick_cfg = have[int(ask("Tune which one?", [str(i) for i in range(1, len(have) + 1)], "1", a.yes)) - 1]
-        if not calibrate_config(pick_cfg, a.calibrate, a.calibrate_switches):   # #447: said again where it is not lost above the start
+        fork = {"fork": True, "budget_min": a.calibrate_budget, "context": a.calibrate_context} if a.calibrate_fork else {}
+        if not calibrate_config(pick_cfg, a.calibrate, a.calibrate_switches, **fork):   # #447: said again where it is not lost above the start
             say()
             if a.calibrate:
                 warn("this PC is NOT tuned: the tuning failed (the reason is above); the model "
                      + ("keeps" if a.no_start else "starts with") + " the default settings")
+            elif a.calibrate_fork:
+                warn("the fork's settings were NOT measured (the reason is above); the config keeps the ones it had")
             else:
                 warn("the decode switches were NOT measured (the reason is above); the config keeps the ones it had")
         return 0 if a.no_start else start(pick_cfg, a.port, run_gpu, yes=a.yes, layer_split=a.layer_split,

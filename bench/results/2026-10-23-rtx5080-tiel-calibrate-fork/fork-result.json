@@ -1,0 +1,954 @@
+{
+ "settings": {
+  "--spec": "4",
+  "--spec-min-p": "0.50",
+  "--pcie-frac": "0.00",
+  "--kv-grow": true,
+  "--vram-reserve-mib": "1536",
+  "--conversation-cache-mib": "3072",
+  "--conversation-cache-slots": "2",
+  "--conversation-disk-mib": "32768"
+ },
+ "env": {
+  "STRATA_ATTN_WINDOW": "1",
+  "STRATA_ATTN_WINDOW_PREC": "2",
+  "STRATA_PROMPT_ATTN_DENSE_IMMA": "4",
+  "STRATA_ATTN_WINDOW_SMALL": "1",
+  "STRATA_MMQ_KQ": "1",
+  "STRATA_ARENA_WSLOCK": "1",
+  "STRATA_IQ3S_MT1": null,
+  "STRATA_ADAPT_OVERLAP": null,
+  "STRATA_ADAPT_LAG": null,
+  "STRATA_IQ3S_FAST": null,
+  "STRATA_POOL_FUSED": null,
+  "STRATA_IQ4XS_DOWN": null,
+  "STRATA_ATTN_SPLITS": null
+ },
+ "report": {
+  "target_ctx": 65536,
+  "host": {
+   "win": true,
+   "avx2": true,
+   "avx512": false,
+   "cc": 120,
+   "gpu": "NVIDIA GeForce RTX 5080",
+   "gpu_index": 0
+  },
+  "experts": {
+   "gate_up": [
+    21
+   ],
+   "down": [
+    14,
+    23
+   ]
+  },
+  "not_applicable": {},
+  "plan": {
+   "kept": [
+    "STRATA_IQ3S_MT1=1",
+    "STRATA_ADAPT_OVERLAP=1",
+    "STRATA_ATTN_WINDOW_SMALL off",
+    "STRATA_PROMPT_ATTN_DENSE_IMMA off",
+    "STRATA_IQ3S_FAST=1",
+    "STRATA_POOL_FUSED=1",
+    "STRATA_ATTN_WINDOW_PREC=1",
+    "STRATA_IQ4XS_DOWN=1",
+    "STRATA_ATTN_SPLITS=256",
+    "STRATA_MMQ_KQ off",
+    "STRATA_IQ4XS_DOWN=2",
+    "STRATA_ADAPT_LAG=2"
+   ],
+   "dropped": [],
+   "estimate_min": 66.0,
+   "dropped_after_phase1": []
+  },
+  "requests": {
+   "read": {
+    "tokens": 65216,
+    "ms": 8855.4,
+    "tok_s": 7364.5
+   },
+   "load_s": 10.0,
+   "offset": 2,
+   "pcie": {
+    "0.0": [
+     247.3,
+     238.0,
+     258.3
+    ],
+    "0.2": [
+     252.7,
+     251.5,
+     253.7
+    ],
+    "0.35": [
+     236.2,
+     254.7,
+     254.7
+    ],
+    "0.55": [
+     240.2,
+     242.8,
+     244.7
+    ],
+    "0.75": [
+     232.3,
+     236.9,
+     232.8
+    ],
+    "0.9": [
+     240.7,
+     236.7,
+     248.2
+    ],
+    "1.0": [
+     214.2,
+     220.1,
+     215.1
+    ]
+   },
+   "min_p": {
+    "0.3": [
+     238.5,
+     255.5,
+     257.9
+    ],
+    "0.4": [
+     257.2,
+     265.8,
+     250.3
+    ],
+    "0.5": [
+     245.7,
+     253.2,
+     253.2
+    ],
+    "0.6": [
+     248.9,
+     246.8,
+     251.9
+    ],
+    "0.7": [
+     226.6,
+     236.2,
+     238.4
+    ]
+   },
+   "depth": {
+    "3": [
+     257.6,
+     247.3,
+     249.0
+    ],
+    "4": [
+     255.5,
+     259.1,
+     244.9
+    ],
+    "5": [
+     237.9,
+     239.5,
+     246.8
+    ]
+   },
+   "confirm": {
+    "default": {
+     "long": [
+      247.8,
+      245.5,
+      257.7
+     ],
+     "short": [
+      290.2,
+      304.2,
+      305.4
+     ]
+    },
+    "tuned": {
+     "long": [
+      256.9,
+      242.5,
+      249.0
+     ],
+     "short": [
+      311.3,
+      331.5,
+      331.6
+     ]
+    }
+   },
+   "chosen": {
+    "pcie_frac": 0.0,
+    "spec_min_p": 0.5,
+    "depth": 4
+   },
+   "gain": 0.005,
+   "rereads": 0
+  },
+  "hardware": {
+   "measured": {
+    "vram_free_mib": 420,
+    "ram_avail_gib": 12.4,
+    "disk_free_gib": 355.3,
+    "vram_free_log_mib": 207
+   },
+   "step1": {
+    "vram_free_mib": 424,
+    "ram_avail_gib": 12.4,
+    "disk_free_gib": 355.3,
+    "vram_free_log_mib": 147
+   },
+   "settings": {
+    "--kv-grow": true,
+    "--vram-reserve-mib": "1536",
+    "--conversation-cache-mib": "3072",
+    "--conversation-cache-slots": "2",
+    "--conversation-disk-mib": "32768"
+   },
+   "why": {
+    "--kv-grow": "the pack path: the K/V takes VRAM as the context grows (more expert slots at the start)",
+    "--vram-reserve-mib": "207 MiB of VRAM stayed free with the model loaded and a long prompt read, below the engine's safe line of 1024 MiB: the reserve grows from 700 by the difference",
+    "--conversation-cache-mib": "12.4 GiB of RAM available with the model loaded: half of what is left beyond 6 GiB, at most 2 conversations at the full context (6064 MiB)",
+    "--conversation-disk-mib": "355 GiB free on the disk of D:\\Strata-data\\conv-disk: a tenth of it, at most 32768 MiB"
+   }
+  },
+  "decisions": {
+   "STRATA_IQ3S_MT1=1": {
+    "gain": 0.0126,
+    "margin": 0.0603,
+    "faster": false,
+    "samples": [
+     251.5,
+     254.1,
+     252.8
+    ],
+    "base": [
+     241.8,
+     256.9,
+     249.7
+    ],
+    "text_ok": true
+   },
+   "STRATA_ADAPT_OVERLAP=1": {
+    "gain": -0.0161,
+    "margin": 0.0603,
+    "faster": false,
+    "samples": [
+     241.7,
+     259.1,
+     245.7
+    ],
+    "base": [
+     241.8,
+     256.9,
+     249.7
+    ]
+   },
+   "STRATA_PROMPT_ATTN_DENSE_IMMA off": {
+    "gain": -0.4919,
+    "margin": 0.03,
+    "faster": false,
+    "samples": [
+     3718.0,
+     3711.3,
+     3715.7,
+     3710.5,
+     3715.8,
+     3710.5
+    ],
+    "base": [
+     7326.2,
+     7305.7,
+     7320.5,
+     7304.5,
+     7312.4,
+     7305.2
+    ],
+    "text_ok": true
+   },
+   "STRATA_ATTN_WINDOW_SMALL off": {
+    "gain": -0.1054,
+    "margin": 0.0603,
+    "faster": false,
+    "samples": [
+     219.7,
+     223.4,
+     227.6
+    ],
+    "base": [
+     241.8,
+     256.9,
+     249.7
+    ],
+    "text_ok": true
+   },
+   "STRATA_IQ3S_FAST=1": {
+    "gain": 0.015,
+    "margin": 0.0603,
+    "faster": false,
+    "samples": [
+     253.4,
+     250.1,
+     259.3
+    ],
+    "base": [
+     241.8,
+     256.9,
+     249.7
+    ],
+    "text_ok": true
+   },
+   "STRATA_POOL_FUSED=1": {
+    "gain": -0.0202,
+    "margin": 0.0603,
+    "faster": false,
+    "samples": [
+     244.7,
+     245.1,
+     244.2
+    ],
+    "base": [
+     241.8,
+     256.9,
+     249.7
+    ]
+   },
+   "STRATA_MMQ_KQ off": {
+    "gain": -0.0291,
+    "margin": 0.03,
+    "faster": false,
+    "samples": [
+     7073.6,
+     7116.5,
+     7082.8,
+     7112.0,
+     7070.9,
+     7110.3
+    ],
+    "base": [
+     7326.2,
+     7305.7,
+     7320.5,
+     7304.5,
+     7312.4,
+     7305.2
+    ],
+    "text_ok": true
+   },
+   "STRATA_ATTN_WINDOW_PREC=1": {
+    "gain": -0.0394,
+    "margin": 0.0603,
+    "faster": false,
+    "samples": [
+     246.4,
+     234.6,
+     239.9
+    ],
+    "base": [
+     241.8,
+     256.9,
+     249.7
+    ],
+    "text_ok": true
+   },
+   "STRATA_IQ4XS_DOWN=1": {
+    "gain": -0.0674,
+    "margin": 0.0603,
+    "faster": false,
+    "samples": [
+     232.9,
+     230.5,
+     235.4
+    ],
+    "base": [
+     241.8,
+     256.9,
+     249.7
+    ]
+   },
+   "STRATA_ATTN_SPLITS=256": {
+    "gain": -0.0591,
+    "margin": 0.0603,
+    "faster": false,
+    "samples": [
+     233.4,
+     234.9,
+     239.0
+    ],
+    "base": [
+     241.8,
+     256.9,
+     249.7
+    ],
+    "text_ok": true
+   },
+   "STRATA_IQ4XS_DOWN=2": {
+    "gain": -0.0511,
+    "margin": 0.0603,
+    "faster": false,
+    "samples": [
+     239.4,
+     236.9,
+     234.0
+    ],
+    "base": [
+     241.8,
+     256.9,
+     249.7
+    ]
+   },
+   "STRATA_ADAPT_LAG=2": {
+    "gain": -0.0584,
+    "margin": 0.0603,
+    "faster": false,
+    "samples": [
+     248.4,
+     235.1,
+     230.5
+    ],
+    "base": [
+     241.8,
+     256.9,
+     249.7
+    ],
+    "text_ok": true
+   }
+  },
+  "samples": {
+   "baseline": [
+    {
+     "round": 0,
+     "load_s": 9.8,
+     "prompt": [
+      7326.2,
+      7305.7
+     ],
+     "decode": 241.8345417188201,
+     "short": 260.6924643584521,
+     "foreign": [
+      0.06
+     ],
+     "slots": 7006,
+     "vram_free": 1061,
+     "rereads": 0
+    },
+    {
+     "round": 1,
+     "load_s": 9.5,
+     "prompt": [
+      7320.5,
+      7304.5
+     ],
+     "decode": 256.87981336076064,
+     "short": 286.80259914855475,
+     "foreign": [
+      0.061
+     ],
+     "slots": 7006,
+     "vram_free": 1051,
+     "rereads": 0
+    },
+    {
+     "round": 2,
+     "load_s": 9.5,
+     "prompt": [
+      7312.4,
+      7305.2
+     ],
+     "decode": 249.68910780034622,
+     "short": 286.8668758404303,
+     "foreign": [
+      0.054
+     ],
+     "slots": 7007,
+     "vram_free": 1033,
+     "rereads": 0
+    }
+   ],
+   "STRATA_IQ3S_MT1=1": [
+    {
+     "round": 0,
+     "load_s": 9.4,
+     "prompt": [
+      7336.1
+     ],
+     "decode": 251.47347740667976,
+     "short": 293.98254478640337,
+     "foreign": [
+      0.058
+     ],
+     "slots": 7006,
+     "vram_free": 1032,
+     "rereads": 0
+    },
+    {
+     "round": 1,
+     "load_s": 9.8,
+     "prompt": [
+      7335.1
+     ],
+     "decode": 254.0627713683166,
+     "short": 280.64021048015786,
+     "foreign": [
+      0.063
+     ],
+     "slots": 7006,
+     "vram_free": 1051,
+     "rereads": 0
+    },
+    {
+     "round": 2,
+     "load_s": 9.5,
+     "prompt": [
+      7345.4
+     ],
+     "decode": 252.82702088785737,
+     "short": 307.5444497837578,
+     "foreign": [
+      0.056
+     ],
+     "slots": 7006,
+     "vram_free": 1048,
+     "rereads": 0
+    }
+   ],
+   "STRATA_ADAPT_OVERLAP=1 + STRATA_PROMPT_ATTN_DENSE_IMMA off": [
+    {
+     "round": 0,
+     "load_s": 9.4,
+     "prompt": [
+      3718.0,
+      3711.3
+     ],
+     "decode": 241.72607525612577,
+     "short": 262.99568522703925,
+     "foreign": [
+      0.062
+     ],
+     "slots": 7006,
+     "vram_free": 1036,
+     "rereads": 0
+    },
+    {
+     "round": 1,
+     "load_s": 9.9,
+     "prompt": [
+      3715.7,
+      3710.5
+     ],
+     "decode": 259.05031748842623,
+     "short": 255.64210105851805,
+     "foreign": [
+      0.059
+     ],
+     "slots": 7007,
+     "vram_free": 1033,
+     "rereads": 0
+    },
+    {
+     "round": 2,
+     "load_s": 9.5,
+     "prompt": [
+      3715.8,
+      3710.5
+     ],
+     "decode": 245.6813819577735,
+     "short": 291.9042189281642,
+     "foreign": [
+      0.062
+     ],
+     "slots": 7006,
+     "vram_free": 1036,
+     "rereads": 0
+    }
+   ],
+   "STRATA_ATTN_WINDOW_SMALL off": [
+    {
+     "round": 0,
+     "load_s": 9.1,
+     "prompt": [
+      7326.4
+     ],
+     "decode": 219.71891427958374,
+     "short": 242.4242424242424,
+     "foreign": [
+      0.062
+     ],
+     "slots": 7006,
+     "vram_free": 1058,
+     "rereads": 0
+    },
+    {
+     "round": 1,
+     "load_s": 9.5,
+     "prompt": [
+      7327.4
+     ],
+     "decode": 223.36132620787436,
+     "short": 284.69750889679716,
+     "foreign": [
+      0.053
+     ],
+     "slots": 7006,
+     "vram_free": 1033,
+     "rereads": 0
+    },
+    {
+     "round": 2,
+     "load_s": 9.5,
+     "prompt": [
+      7312.6
+     ],
+     "decode": 227.6162532230817,
+     "short": 264.0808747678977,
+     "foreign": [
+      0.055
+     ],
+     "slots": 7006,
+     "vram_free": 1048,
+     "rereads": 0
+    }
+   ],
+   "STRATA_IQ3S_FAST=1": [
+    {
+     "round": 0,
+     "load_s": 9.4,
+     "prompt": [
+      7340.8
+     ],
+     "decode": 253.43398094295262,
+     "short": 285.14145689463135,
+     "foreign": [
+      0.057
+     ],
+     "slots": 7006,
+     "vram_free": 1058,
+     "rereads": 0
+    },
+    {
+     "round": 1,
+     "load_s": 9.5,
+     "prompt": [
+      7337.0
+     ],
+     "decode": 250.085478435012,
+     "short": 318.0124223602484,
+     "foreign": [
+      0.06
+     ],
+     "slots": 7007,
+     "vram_free": 1033,
+     "rereads": 0
+    },
+    {
+     "round": 2,
+     "load_s": 9.5,
+     "prompt": [
+      7347.9
+     ],
+     "decode": 259.2536330953466,
+     "short": 301.9580089643784,
+     "foreign": [
+      0.066
+     ],
+     "slots": 7006,
+     "vram_free": 1058,
+     "rereads": 0
+    }
+   ],
+   "STRATA_POOL_FUSED=1 + STRATA_MMQ_KQ off": [
+    {
+     "round": 0,
+     "load_s": 9.4,
+     "prompt": [
+      7073.6,
+      7116.5
+     ],
+     "decode": 244.65416318241546,
+     "short": 278.74564459930315,
+     "foreign": [
+      0.057
+     ],
+     "slots": 7012,
+     "vram_free": 1046,
+     "rereads": 0
+    },
+    {
+     "round": 1,
+     "load_s": 9.4,
+     "prompt": [
+      7082.8,
+      7112.0
+     ],
+     "decode": 245.12854885814144,
+     "short": 268.73819021625025,
+     "foreign": [
+      0.064
+     ],
+     "slots": 7012,
+     "vram_free": 1049,
+     "rereads": 0
+    },
+    {
+     "round": 2,
+     "load_s": 9.5,
+     "prompt": [
+      7070.9,
+      7110.3
+     ],
+     "decode": 244.17578749075992,
+     "short": 271.58922130277955,
+     "foreign": [
+      0.059
+     ],
+     "slots": 7012,
+     "vram_free": 1045,
+     "rereads": 0
+    }
+   ],
+   "STRATA_ATTN_WINDOW_PREC=1": [
+    {
+     "round": 0,
+     "load_s": 9.4,
+     "prompt": [
+      7325.5
+     ],
+     "decode": 246.390760346487,
+     "short": 308.06257521058967,
+     "foreign": [
+      0.066
+     ],
+     "slots": 7006,
+     "vram_free": 1051,
+     "rereads": 0
+    },
+    {
+     "round": 1,
+     "load_s": 9.7,
+     "prompt": [
+      7326.2
+     ],
+     "decode": 234.5557413473212,
+     "short": 288.61330326944756,
+     "foreign": [
+      0.062
+     ],
+     "slots": 7006,
+     "vram_free": 1033,
+     "rereads": 0
+    },
+    {
+     "round": 2,
+     "load_s": 9.4,
+     "prompt": [
+      7320.2
+     ],
+     "decode": 239.8519663645094,
+     "short": 303.46135609293503,
+     "foreign": [
+      0.062
+     ],
+     "slots": 7006,
+     "vram_free": 1036,
+     "rereads": 0
+    }
+   ],
+   "STRATA_IQ4XS_DOWN=1": [
+    {
+     "round": 0,
+     "load_s": 9.1,
+     "prompt": [
+      7336.0
+     ],
+     "decode": 232.8648746986856,
+     "short": 289.6582937316135,
+     "foreign": [
+      0.052
+     ],
+     "slots": 7006,
+     "vram_free": 1047,
+     "rereads": 0
+    },
+    {
+     "round": 1,
+     "load_s": 9.8,
+     "prompt": [
+      7334.5
+     ],
+     "decode": 230.46453006841912,
+     "short": 303.8936372269706,
+     "foreign": [
+      0.064
+     ],
+     "slots": 7006,
+     "vram_free": 1033,
+     "rereads": 0
+    },
+    {
+     "round": 2,
+     "load_s": 9.5,
+     "prompt": [
+      7316.3
+     ],
+     "decode": 235.3968874278752,
+     "short": 288.4182063992789,
+     "foreign": [
+      0.088
+     ],
+     "slots": 7007,
+     "vram_free": 1051,
+     "rereads": 0
+    }
+   ],
+   "STRATA_ATTN_SPLITS=256": [
+    {
+     "round": 0,
+     "load_s": 9.3,
+     "prompt": [
+      7330.8
+     ],
+     "decode": 233.3796750005698,
+     "short": 311.284046692607,
+     "foreign": [
+      0.057
+     ],
+     "slots": 7270,
+     "vram_free": 1048,
+     "rereads": 0
+    },
+    {
+     "round": 1,
+     "load_s": 9.1,
+     "prompt": [
+      7334.2
+     ],
+     "decode": 234.9432144086268,
+     "short": 272.74664393777965,
+     "foreign": [
+      0.078
+     ],
+     "slots": 7270,
+     "vram_free": 1031,
+     "rereads": 0
+    },
+    {
+     "round": 2,
+     "load_s": 9.7,
+     "prompt": [
+      7330.3
+     ],
+     "decode": 238.95085639613575,
+     "short": 283.436669619132,
+     "foreign": [
+      0.09
+     ],
+     "slots": 7270,
+     "vram_free": 1058,
+     "rereads": 0
+    }
+   ],
+   "STRATA_IQ4XS_DOWN=2": [
+    {
+     "round": 0,
+     "load_s": 9.2,
+     "prompt": [
+      7332.7
+     ],
+     "decode": 239.38657190948197,
+     "short": 260.6924643584521,
+     "foreign": [
+      0.053
+     ],
+     "slots": 7006,
+     "vram_free": 1054,
+     "rereads": 0
+    },
+    {
+     "round": 1,
+     "load_s": 9.1,
+     "prompt": [
+      7337.6
+     ],
+     "decode": 236.93831274006203,
+     "short": 292.3041790363097,
+     "foreign": [
+      0.059
+     ],
+     "slots": 7006,
+     "vram_free": 1048,
+     "rereads": 0
+    },
+    {
+     "round": 2,
+     "load_s": 9.5,
+     "prompt": [
+      7323.0
+     ],
+     "decode": 233.9822685312129,
+     "short": 243.94892319420617,
+     "foreign": [
+      0.108,
+      0.078
+     ],
+     "slots": 7006,
+     "vram_free": 1058,
+     "rereads": 0
+    }
+   ],
+   "STRATA_ADAPT_LAG=2": [
+    {
+     "round": 0,
+     "load_s": 9.0,
+     "prompt": [
+      7336.7
+     ],
+     "decode": 248.38694028040555,
+     "short": 286.54578016565927,
+     "foreign": [
+      0.062
+     ],
+     "slots": 7006,
+     "vram_free": 1058,
+     "rereads": 0
+    },
+    {
+     "round": 1,
+     "load_s": 9.1,
+     "prompt": [
+      7330.9
+     ],
+     "decode": 235.09964184038935,
+     "short": 267.8945165341147,
+     "foreign": [
+      0.055
+     ],
+     "slots": 7006,
+     "vram_free": 1047,
+     "rereads": 0
+    },
+    {
+     "round": 2,
+     "load_s": 9.5,
+     "prompt": [
+      7321.5
+     ],
+     "decode": 230.54755043227664,
+     "short": 281.38052319191036,
+     "foreign": [
+      0.068
+     ],
+     "slots": 7006,
+     "vram_free": 1050,
+     "rereads": 0
+    }
+   ]
+  },
+  "chosen": [],
+  "minutes": 20.7,
+  "baseline": {
+   "decode": 249.7,
+   "prompt": 7309.0
+  }
+ }
+}

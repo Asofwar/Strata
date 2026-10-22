@@ -1732,6 +1732,15 @@ class SamplingKeys(unittest.TestCase):
         bad = self.keys(strata_tune={"pcie_frac": 3, "spec_min_p": True, "pool_workers": 2})
         self.assertFalse([x for x in bad if x.split("=")[0] in ("pcie_frac", "spec_min_p", "pool_workers")])
 
+    def test_tune_spec_caps(self):
+        k = self.keys(temperature=0, strata_tune={"spec_t": 4, "spec_s": 6})
+        self.assertIn("spec_t=4", k)
+        self.assertIn("spec_s=6", k)
+        for bad in (0, 9, -1, True, 4.0, "4", None):
+            self.assertFalse([x for x in self.keys(temperature=0, strata_tune={"spec_t": bad, "spec_s": bad})
+                              if x.split("=")[0] in ("spec_t", "spec_s")], bad)
+        self.assertFalse([x for x in self.keys(temperature=0) if x.startswith("spec_")])
+
     def test_tune_prefill_pipe(self):
         self.assertIn("pipe=1536.0", self.keys(temperature=0, strata_tune={"prefill_pipe": 1536}))
         self.assertIn("pipe=0.0", self.keys(temperature=0, strata_tune={"prefill_pipe": 0}))

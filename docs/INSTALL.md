@@ -383,6 +383,20 @@ slower on others (`STRATA_ADAPT_OVERLAP`, `STRATA_ADAPT_LAG`), off against on wi
 one only when it beats the noise between starts and gives the same text. A few minutes on a fast PC; the model is
 loaded up to 13 times. [Details and an RTX 5080 measurement](DETAILS.md#double-click-start-herebat).
 
+`START-HERE.bat --calibrate-fork` (opt-in, the `cyber-tiel` and `ornith-abl` families) tunes this fork's own settings
+at a long context, 64K by default (`--calibrate-context N` sets it): the window depth (`--spec` 3/4/5), the draft floor
+and the PCIe share, one engine start for all of them; then the variables setup writes for these families and the
+opt-in ones (`STRATA_IQ3S_MT1`, `STRATA_ADAPT_OVERLAP`, `STRATA_POOL_FUSED` and others), 3 engine starts each,
+interleaved with the baseline. It keeps a change only when it beats the noise between starts, does not slow the short
+answers and keeps the text, so it can also switch off a default that is slower on your PC. It also sets
+`--vram-reserve-mib` when less than 1024 MiB of VRAM stayed free (Windows), sizes the conversation cache from the RAM
+left with the model loaded, and keeps `--kv-grow` and `STRATA_ARENA_WSLOCK`. `--calibrate-budget MIN` (default 60)
+limits the time: the plan and its estimate are printed first, and what does not fit is left out. The model is loaded
+30-40 times (21 minutes on an RTX 5080 with an i9-14900K, where a start takes 10 s). Results are remembered per PC and
+model like `--calibrate`'s. On that PC it kept setup's variables and set `--vram-reserve-mib 1536`: the safer VRAM
+margin costs 9-10% decode there against a config that runs with ~200 MiB free; remove the flag for that speed.
+[Details and the RTX 5080 result](DETAILS.md#tuning-these-settings-per-pc---calibrate-fork).
+
 **More speed on one card when the whole model fits in RAM (opt-in).** Two opt-in settings by RubenTorney (#1904, #1905).
 They help when you run one graphics card and your RAM holds every expert, for example Q2_0 or IQ3_XXS on a 64 GB PC. Open
 `strata-<model>.json` in the Strata data folder ([where](#where-things-are-stored)) and add:

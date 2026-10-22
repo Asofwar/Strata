@@ -3494,6 +3494,109 @@ request to request, two QEMU virtual machines busy on the PC); there the medians
 all three 23.0 GB/s; 200K: 29.2 and 31.6) and nothing can be read from them. The switches stay off by default: the gain
 is a few percent of the CPU's share of a window, measured on one PC.
 
+### Tuning these settings per PC: `--calibrate-fork`
+
+Everything above was measured on one PC. `START-HERE.bat --calibrate-fork` (Linux: `./setup.sh --calibrate-fork`;
+`python tools/calibrate.py --fork <config>` prints the result without writing it) measures them on the PC it runs on,
+for a config on the pack path (tools/calibrate_fork.py):
+
+1. **Per request, one engine start.** A long document (this repository's docs, 64K tokens by default;
+   `--calibrate-context N`) is read once and pinned (`strata_prefix`), and every sample is greedy answers of 256
+   tokens after it, so only the question is read again. The PCIe share (7 values), the draft floor (`--spec-min-p`
+   0.3-0.7) and the window depth (`--spec` 3/4/5) are swept in turn, 3 rounds each, every other round in reverse. The
+   depth uses the `spec_t` / `spec_s` request keys of an engine started with the deepest window. The winner must then
+   beat the config's own values in 3 paired rounds by more than their spread, and not lose the short answers
+   (tools/calibrate.py's three prompts).
+2. **The hardware.** One start with the chosen depth reads the free VRAM (the engine's own line and nvidia-smi after
+   the long prompt) and the free RAM. Below the engine's safe line (1024 MiB under WDDM, 512 elsewhere),
+   `--vram-reserve-mib` grows by the difference. The conversation cache gets half of the RAM left beyond 6 GiB, at most
+   two conversations at the full context. An existing disk tier gets a tenth of its disk's free space, at most 32 GiB
+   (a new one is never switched on). `--kv-grow` stays on, and `STRATA_ARENA_WSLOCK` on Windows.
+3. **Engine variables, 3 starts each, interleaved with the baseline.** The baseline is setup's `PACK_TUNED`, so a
+   default that is slower on this PC can be switched off. Candidates, only where they can run (the pack's
+   `native_experts.txt` types, `--kv int8`, compute capability 8.0+, AVX2 without AVX-512, the K-quant library, one
+   GPU): `STRATA_IQ3S_MT1=1`, `STRATA_IQ3S_FAST=1`, `STRATA_IQ4XS_DOWN=1` / `=2`, `STRATA_POOL_FUSED=1`,
+   `STRATA_ADAPT_OVERLAP=1`, `STRATA_ADAPT_LAG=2`, `STRATA_ATTN_SPLITS=256`, and `STRATA_ATTN_WINDOW_SMALL`,
+   `STRATA_ATTN_WINDOW_PREC=1`, `STRATA_PROMPT_ATTN_DENSE_IMMA` and `STRATA_MMQ_KQ` against setup's values. A start
+   gives one sample: decode tok/s after the long prompt, the prompt's read speed (two reads where a prompt switch is
+   judged), the short answers and the greedy text. A prompt switch rides on a bit-exact decode arm, so it costs no
+   starts of its own. A candidate is kept when its median beats the baseline's by more than the baseline's spread
+   across its starts (at least 3%), does not lose the short answers, and keeps the text: a bit-exact one must give the
+   baseline's tokens in `--deterministic` starts with the expert cache fixed; one with other rounding must agree with
+   the baseline at least half as long as two baseline starts agree with each other; one that runs the more exact
+   arithmetic has no text bar. At most one of each group is kept (`MT1` / `FAST`, `DOWN=1` / `=2`, `OVERLAP` / `LAG`).
+4. **Budget.** `--calibrate-budget MIN` (default 60): the candidates are taken in the order of their expected value
+   while the estimate fits, and the plan is printed first. A sample taken while other programs used more than 10% of
+   the CPU is taken again (up to twice). Non-finite logits or an engine that ends during a measurement stop the run.
+   The result goes into the config and, per PC and model, into the settings file; a later setup run applies it.
+
+**Measured 2026-10-23** on the RTX 5080 16 GB + i9-14900K (DDR5-7600, 48 GB, Windows 11), Cyber-Tiel-Coder UD-IQ4_XS,
+the live server's config (`--kv int8 --max-context 262144 --spec 4`, `--pool-workers 7`, the adaptive tier 1 / 160 /
+0.97), this branch's engine, 64K (every sample and the harness:
+[bench/results/2026-10-23-rtx5080-tiel-calibrate-fork](../bench/results/2026-10-23-rtx5080-tiel-calibrate-fork/README.md)).
+An engine start took 9-10 s here, not a minute: the whole run took 20.7 minutes (the
+estimate before it, from a minute per start, said 66). Other programs held 5-11% of the CPU (a QEMU virtual machine,
+editors); one sample above 10% was taken again.
+
+Per request (one start with `--spec 5`), tok/s medians of 3 visits of 2 answers:
+
+| PCIe share | 0 | 0.2 | 0.35 | 0.55 | 0.75 | 0.9 | 1 |
+|---|---|---|---|---|---|---|---|
+| | 247.3 | 252.7 | 254.7 | 242.8 | 232.8 | 240.7 | 215.1 |
+
+| draft floor (at PCIe 0.35) | 0.3 | 0.4 | 0.5 | 0.6 | 0.7 |
+|---|---|---|---|---|---|
+| | 255.5 | 257.2 | 253.2 | 248.9 | 236.2 |
+
+| window depth (at 0.35 / 0.4) | 3 | 4 | 5 |
+|---|---|---|---|
+| | 249.0 | 255.5 | 239.5 |
+
+0.35 / 0.4 / depth 4 against the config's 0.00 / 0.50 / depth 4: +0.5% with a spread of 4.9%: not kept. Depth 4 is
+again the fastest, as on the agent replay above.
+
+The hardware: with the chosen depth and setup's variables 207 MiB of VRAM stayed free (nvidia-smi: 420 after the 64K
+prompt), so `--vram-reserve-mib 1536`; 12.4 GiB of RAM available with the model loaded, so
+`--conversation-cache-mib 3072 --conversation-cache-slots 2`; 355 GiB free on D:, so `--conversation-disk-mib 32768`.
+The step-1 engine, with 7-token windows and 512 MiB of window buffers at 262K, had 145 MiB free: that is why the
+reserve comes from a start with the chosen depth.
+
+Engine variables, decode tok/s at 64K (3 starts each, reserve 1536, 7,006 expert slots, 1,031-1,061 MiB free; the
+baseline 241.8 / 256.9 / 249.7, its spread 6.0%; the 64K prompt 7,305-7,326 tok/s):
+
+| candidate | tok/s (3 starts) | against the baseline | kept |
+|---|---|---|---|
+| `STRATA_IQ3S_MT1=1` | 251.5, 254.1, 252.8 | +1.3% | no (noise) |
+| `STRATA_IQ3S_FAST=1` | 253.4, 250.1, 259.3 | +1.5% | no (noise) |
+| `STRATA_ADAPT_OVERLAP=1` | 241.7, 259.1, 245.7 | -1.6% | no |
+| `STRATA_POOL_FUSED=1` | 244.7, 245.1, 244.2 | -2.0% | no |
+| `STRATA_ATTN_WINDOW_PREC=1` | 246.4, 234.6, 239.9 | -3.9% | no |
+| `STRATA_IQ4XS_DOWN=2` | 239.4, 236.9, 234.0 | -5.1% | no |
+| `STRATA_ADAPT_LAG=2` | 248.4, 235.1, 230.5 | -5.8% | no |
+| `STRATA_ATTN_SPLITS=256` (7,270 slots) | 233.4, 234.9, 239.0 | -5.9% | no |
+| `STRATA_IQ4XS_DOWN=1` | 232.9, 230.5, 235.4 | -6.7% | no (slower) |
+| `STRATA_ATTN_WINDOW_SMALL` off | 219.7, 223.4, 227.6 | -10.5% | no: setup's stays |
+| `STRATA_PROMPT_ATTN_DENSE_IMMA` off (prompt) | 3,711-3,718 prompt tok/s | -49.2% | no: setup's stays |
+| `STRATA_MMQ_KQ` off (prompt) | 7,071-7,117 prompt tok/s | -2.9% (spread 3.0%) | no: setup's stays |
+
+So on this PC at 64K setup's `PACK_TUNED` is the fastest set: no opt-in switch beat the 6% between starts, and the
+three defaults measured off were slower. The calibrated config against the hand-tuned live one (which has
+`STRATA_IQ3S_MT1`, `STRATA_ADAPT_OVERLAP`, `STRATA_ATTN_SPLITS=256` and no reserve), 3 interleaved starts each, a 64K
+and a 128K prompt per start, 4 answers of 256 tokens after each:
+
+| | expert slots | VRAM free | 64K prompt | 64K decode | 128K prompt | 128K decode | short answers |
+|---|---|---|---|---|---|---|---|
+| calibrated | 7,006 | 984-1,048 MiB | 8.90 s | 235.3 (233.1-236.2) | 22.36 s | 210.1 (209.4-211.6) | 254.2 |
+| live | 7,863 | 205-212 MiB | 8.87 s | 261.4 (256.2-266.4) | 22.33 s | 231.7 (221.3-232.0) | 291.8 |
+
+The live config decodes 9-10% faster. The gap is the VRAM reserve: it keeps 857 expert slots off the GPU (and
+`STRATA_ATTN_SPLITS=256` gives the live config 264 more); the switches themselves measured within the noise above.
+The live config runs with ~200 MiB free, where the engine warns at every request that WDDM may page; the GPU TDR this
+PC had on 2026-10-22 came with 15.3 of 16.3 GB of VRAM in use (a test beside the server) and an undervolt profile, the
+cause not proven. The reserve is a safety setting, not a timed one:
+removing `--vram-reserve-mib` from the config gives the speed back, at that risk. Not measured: 130K-200K inside the
+calibration (only the comparison), other PCs, sampled answers (the calibration answers greedily), Linux.
+
 ## CUDA opt-in switches measured for 0.1.45 (RTX 3060 and RTX A4000, sm_86; all off unless you set them)
 
 Ported from open pull requests and A/B'd as whole engine runs against the default (a fresh engine per side, IQ3_XXS, 5 pairs, medians;

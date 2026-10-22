@@ -1400,6 +1400,13 @@ class StrataEngine:
                 v = tune.get(k)
                 if isinstance(v, (int, float)) and not isinstance(v, bool) and 0.0 <= float(v) <= 1.0:
                     keys += f" {k}={float(v)!r}"
+            # the fork's window caps for this request (tools/calibrate_fork.py): spec_t = the MTP window (as
+            # --mtp-max-t), spec_s = the verify window (as --spec after the prompt lookup's +2), each 1-8 and at most
+            # the start-up value (the engine clamps); anything else is not sent
+            for k in ("spec_t", "spec_s"):
+                v = tune.get(k)
+                if isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 8:
+                    keys += f" {k}={v}"
             # a layer split's prompt chunks (--prefill-pipe): 0 off, 1 evened out, > 1 the rig's b/a in tokens
             v = tune.get("prefill_pipe")
             if isinstance(v, (int, float)) and not isinstance(v, bool) and 0.0 <= float(v) <= 262144.0:
