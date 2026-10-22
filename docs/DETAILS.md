@@ -1050,7 +1050,8 @@ print(r.choices[0].message.content)
   config. The client has to send the earlier thinking back (`reasoning_content`, or Anthropic `thinking` blocks), as
   the web app does. Kept thinking makes every prompt longer. Off by default: the template's own choice.
 - **A template's own switches (opt-in).** Some packs' chat templates take switches of their own: Cyber-Tiel's adds a
-  "be terse" system text unless `terse` is false, and reads `max_tool_response_chars` and `tool_call_format`. A
+  "be terse" system text unless `terse` is false, and `max_tool_response_chars` cuts long tool results in the
+  prompt. (Leave its `tool_call_format` alone: the server reads tool calls in the XML form.) A
   request's `chat_template_kwargs` reaches the template only for `enable_thinking`, `reasoning_effort` and
   `preserve_thinking`, so `"chat_template_kwargs": {"terse": false}` in `strata-<model>.json` (outside `"args"`) is
   how to set one: every request gets it, and a request's own `chat_template_kwargs` can set its own value for a key

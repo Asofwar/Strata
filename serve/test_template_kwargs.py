@@ -1,7 +1,7 @@
 """serve/test_template_kwargs.py - the config's "chat_template_kwargs": a template's own switches (mock engine, no GPU).
 
 Some packs' templates take switches of their own: Cyber-Tiel's adds a "be terse" system text unless `terse` is false,
-and has `max_tool_response_chars`, `tool_call_format` and others.  The server passes a request's chat_template_kwargs
+and has `max_tool_response_chars` and others.  The server passes a request's chat_template_kwargs
 on only for enable_thinking, reasoning_effort and preserve_thinking, so `{"terse": false}` (the model card's own
 advice) was silently dropped.  The config's "chat_template_kwargs" names the switches to pass and their values for
 every request; a request may set its own value for a key the config names (and only for those).  Without the key in
