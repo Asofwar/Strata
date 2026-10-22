@@ -50,34 +50,10 @@
 #include "moe_mmq_tab.hpp"
 
 #include <type_traits>
-#include <utility>
 
 namespace strata::prefill::mmq {
 
 // A second net behind the configure fingerprint: the upstream templates this copy calls keep their signatures.
-// MSVC (and nvcc's front end in MSVC mode) keeps a parameter's top-level __restrict__ in the function type, so no
-// spelled pointer type equals upstream's there: each parameter is matched up to that qualifier instead (same count,
-// and each type converts both ways to the expected one, which still tells int from uint3 and float * from
-// const float *).  Other compilers drop the qualifier and get the exact comparison as well.
-// The match is done by overload deduction (a class-template pattern on the pointer type does not match such a type
-// in nvcc's MSVC mode); a different count or a parameter that does not deduce falls to the false overload.
-template <class... E> struct mmq_tab_sig {};
-template <class... A, class... E>
-auto mmq_tab_sig_check(void (*)(A...), mmq_tab_sig<E...>)
-    -> std::bool_constant<sizeof...(A) == sizeof...(E) &&
-                          ((std::is_convertible<A, E>::value && std::is_convertible<E, A>::value) && ...)>;
-std::false_type mmq_tab_sig_check(...);
-template <class F, class S>
-constexpr bool mmq_tab_sig_matches = decltype(mmq_tab_sig_check(std::declval<F>(), S{}))::value;
-static_assert(mmq_tab_sig_matches<decltype(&mul_mat_q_process_tile<GGML_TYPE_Q8_0, 8, false, false>),
-                                  mmq_tab_sig<const char *, int, const int *, const int *, float *, float *,
-                                              const float *, int, int, int, int, int, int, int>>,
-              "mmq.cuh: mul_mat_q_process_tile changed - re-sync src/prefill/moe_mmq_tab.cuh");
-static_assert(mmq_tab_sig_matches<decltype(&mul_mat_q_stream_k_fixup<GGML_TYPE_Q8_0, 8, false>),
-                                  mmq_tab_sig<const int32_t *, const int32_t *, float *, float *, uint3, int, int, int,
-                                              uint3, int, uint3, int, uint3>>,
-              "mmq.cuh: mul_mat_q_stream_k_fixup changed - re-sync src/prefill/moe_mmq_tab.cuh");
-#if !defined(_MSC_VER)
 static_assert(std::is_same<decltype(&mul_mat_q_process_tile<GGML_TYPE_Q8_0, 8, false, false>),
                            void (*)(const char*, int, const int*, const int*, float*, float*, const float*, int, int, int,
                                     int, int, int, int)>::value,
@@ -86,7 +62,6 @@ static_assert(std::is_same<decltype(&mul_mat_q_stream_k_fixup<GGML_TYPE_Q8_0, 8,
                            void (*)(const int32_t*, const int32_t*, float*, float*, uint3, int, int, int, uint3, int,
                                     uint3, int, uint3)>::value,
               "mmq.cuh: mul_mat_q_stream_k_fixup changed - re-sync src/prefill/moe_mmq_tab.cuh");
-#endif
 
 // The table reaches the kernel as 16 separate `const char * __restrict__` parameters, like upstream's `x`, and an
 // expert's entry is picked with a select chain: a pointer picked from read-only kernel parameters keeps upstream's
