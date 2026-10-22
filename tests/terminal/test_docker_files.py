@@ -144,11 +144,11 @@ class Document(unittest.TestCase):
                           ("docker-compose.intel.yml", "ghcr.io/asofwar/strata:0.2.1-sycl")):
             self.assertIn(tag, (DOCKER / "compose" / name).read_text(encoding="utf-8"))
 
-    def test_the_user_doc_says_images_are_published_from_0_2_1(self):
+    def test_the_user_doc_says_the_fork_publishes_no_images(self):
         doc = (ROOT / "docs" / "DOCKER.md").read_text(encoding="utf-8")
         self.assertNotIn("TODO(owner)", doc)
         self.assertNotIn("not available yet", doc)
-        self.assertIn("published from version 0.2.1 on", doc)
+        self.assertIn("The Asofwar fork publishes no Docker images", doc)
         self.assertIn("Publishing the images (for maintainers)", doc)
 
 
