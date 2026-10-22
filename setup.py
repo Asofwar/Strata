@@ -218,7 +218,7 @@ LLAMA_CPP_ZIP = f"https://github.com/ggml-org/llama.cpp/archive/{LLAMA_CPP_COMMI
 # The ready-made engine: <PREBUILT_URL><asset>, a zip with strata(.exe), strata-vision(.exe) and BUILD.json, built
 # by tools/make_release.py.  Set this to the GitHub release download folder when publishing, e.g.
 # "https://github.com/<you>/Strata/releases/latest/download/" (or pass --prebuilt / set STRATA_PREBUILT_URL).
-# With the default, the release of this checkout's own version (PREBUILT_TAG_URL, CMakeLists.txt's version) is
+# With the default, the release of this checkout's own version (PREBUILT_TAG_URL, the fork's FORK_VERSION) is
 # tried first and the latest release is the fallback (#214): an older checkout keeps the engine it shipped with.
 PREBUILT_URL = "https://github.com/Asofwar/Strata/releases/latest/download/"
 # The repository the release assets and their SHA-256 come from; `engine_digest` reads the API here even
@@ -226,6 +226,10 @@ PREBUILT_URL = "https://github.com/Asofwar/Strata/releases/latest/download/"
 # from somewhere the download does not.
 REPO = "Asofwar/Strata"
 PREBUILT_TAG_URL = "https://github.com/Asofwar/Strata/releases/download/v{version}/"
+# The fork's own release version: semver, independent of upstream's numbers (base: upstream 0.2.1.1, engine
+# 0.1.46.1).  Its release is tagged v<FORK_VERSION> and carries the engine this checkout was tested with; bump it
+# with every release (MAJOR.MINOR.PATCH: incompatible change / new feature or speed-up / fix only).
+FORK_VERSION = "1.0.0"
 PREBUILT_ASSET = "strata-windows-x64.zip" if WIN else "strata-linux-x64.zip"
 # the CUDA libraries the ready-made engine loads (the same CUDA 13.0 it is built with), from NVIDIA's pip packages
 CUDA_WHEELS = ["nvidia-cublas==13.0.2.14", "nvidia-cuda-runtime==13.0.96"]
@@ -4493,7 +4497,7 @@ def prebuilt_bases(url_base) -> list[str]:
     base = url_base if url_base.endswith(("/", "\\")) else url_base + "/"
     if base != PREBUILT_URL:
         return [base]
-    return [PREBUILT_TAG_URL.format(version=source_version()), base]
+    return [PREBUILT_TAG_URL.format(version=FORK_VERSION), base]
 
 
 PREVIOUS_ENGINE = ".previous"
@@ -4612,7 +4616,7 @@ def get_prebuilt(url_base, gpu, vision, updating=False, toolkit=13) -> Path | No
             break
         except OSError as e:
             if i + 1 < len(bases):                     # #214: this checkout's release is not published (yet)
-                say(f"  No ready-made engine for v{source_version()} ({e}): the latest release instead")
+                say(f"  No ready-made engine for v{FORK_VERSION} ({e}): the latest release instead")
                 continue
             warn(f"no ready-made engine at {base} ({e})" + ("" if updating else ": compiling instead"))
             return None

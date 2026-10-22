@@ -1,6 +1,6 @@
 # Strata Terminal: one-line installer for Windows (PowerShell 5.1 or newer).
 #
-#     irm https://github.com/Niko1221/Strata/releases/latest/download/install.ps1 | iex
+#     irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
 #
 # What it does, in order (and nothing else):
 #   1. finds out which computer this is (Windows, processor, graphics card);
@@ -13,7 +13,7 @@
 # The engine and the model are not part of this: `strata launch` fetches the engine for your graphics card the first time you choose
 # a model, from the same release folder, signed.
 #
-# <feed> is where the release folder is hosted: GitHub Releases of Niko1221/Strata (the "latest" release's files), built in as the default.
+# <feed> is where the release folder is hosted: GitHub Releases of Asofwar/Strata (the "latest" release's files), built in as the default; the fork publishes no signed Terminal feed, so for the fork use packaging/fork/install.*
 # Set $env:STRATA_FEED to another folder (a URL) to use that instead, for example a local test feed:  $env:STRATA_FEED='http://127.0.0.1:8099'; irm http://127.0.0.1:8099/install.ps1 | iex
 # Optional: $env:STRATA_DATA_DIR (default %LOCALAPPDATA%\Strata), $env:STRATA_INSTALL_TEST_TRUST='1' (a test feed: trust only its
 # test-trust.json for step 4), $env:STRATA_NO_PATH='1' (do not change the user PATH).
@@ -23,7 +23,7 @@ $ProgressPreference = 'SilentlyContinue'
 
 function Die([string]$msg) { [Console]::Error.WriteLine("strata installer: $msg"); throw "strata installer stopped" }
 
-$feed = if ($env:STRATA_FEED) { $env:STRATA_FEED } else { 'https://github.com/Niko1221/Strata/releases/latest/download' }
+$feed = if ($env:STRATA_FEED) { $env:STRATA_FEED } else { 'https://github.com/Asofwar/Strata/releases/latest/download' }
 $feed = $feed.TrimEnd('/')
 if (-not $feed) {
     Die 'this installer does not know where the Strata release folder is. Set $env:STRATA_FEED to its address and run it again, for example: $env:STRATA_FEED=''https://example.org/strata'''

@@ -221,7 +221,8 @@ class Engine(unittest.TestCase):
         self.root = Path(self.tmp.name)
         (self.root / "engine").mkdir()
         self.patches = [mock.patch.object(setup, "ROOT", self.root),
-                        mock.patch.object(setup, "source_version", lambda: "0.1.31")]
+                        mock.patch.object(setup, "source_version", lambda: "0.1.31"),
+                        mock.patch.object(setup, "FORK_VERSION", "0.1.31")]
         for p in self.patches:
             p.start()
 
