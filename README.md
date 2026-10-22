@@ -85,6 +85,7 @@ The server listens on `127.0.0.1` only. Before opening it to a network set an AP
 ## Docs
 
 - [docs/FORK.ru.md](docs/FORK.ru.md) - what the fork adds, all measurements, the recommended config (Russian)
+- [docs/ROADMAP.ru.md](docs/ROADMAP.ru.md) - plans: pictures, audio and video, speed, quality (Russian)
 - [docs/INSTALL.md](docs/INSTALL.md) - install options, AMD / Intel / Mac / several cards (upstream paths, not tested by the fork), settings
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) - when something goes wrong; bugs go to [issues](https://github.com/Asofwar/Strata/issues)
 - [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) - how a big model fits on a PC; every part and number: [DETAILS.md](docs/DETAILS.md), [the paper](docs/paper/Strata-Paper.pdf)

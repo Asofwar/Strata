@@ -85,6 +85,7 @@ curl -fsSL https://github.com/Asofwar/Strata/releases/latest/download/install.sh
 ## Документация
 
 - [docs/FORK.ru.md](docs/FORK.ru.md) — что добавляет форк, все замеры, рекомендуемый конфиг
+- [docs/ROADMAP.ru.md](docs/ROADMAP.ru.md) — планы: картинки, звук и видео, скорость, качество
 - [docs/INSTALL.md](docs/INSTALL.md) — варианты установки, AMD / Intel / Mac / несколько карт (пути upstream, форк их не проверял), настройки
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — если что-то пошло не так; ошибки — в [issues](https://github.com/Asofwar/Strata/issues)
 - [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) — как большая модель помещается в ПК; все детали и числа: [DETAILS.md](docs/DETAILS.md), [статья](docs/paper/Strata-Paper.pdf)
