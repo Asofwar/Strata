@@ -41,21 +41,21 @@ writes (2026-10-21/22):
 
 Windows, NVIDIA RTX 20 or newer, driver 580 or newer:
 
-1. Download `Strata-asofwar-<version>-windows-cuda13.zip` from the
+1. Download `Strata-Asofwar-<version>-windows-cuda13.zip` from the
    [fork's latest release](https://github.com/Asofwar/Strata/releases/latest) and unzip it into a folder without
    spaces in its path. It holds the fork's code and a ready engine.
 2. Run `START-HERE.bat --setup --family cyber-tiel` (or `--family ornith-abl`). Add `--draft-vocab cyrillic` if you
    chat in Russian.
 
 A clone works the same way and `UPDATE.bat` updates it. On Linux use `./setup.sh` with the same options (the fork has
-not tested Linux). Don't use `strata update` or the upstream installers below for these models: they install
-upstream's engine, which has no pack path for them.
+not tested Linux). Other ways to install the fork are in [Install](#install). Don't use `strata update` or upstream's
+installers: the fork publishes no signed update feed, and upstream's engine has no pack path for these models.
 
 **Read more:** [docs/FORK.ru.md](docs/FORK.ru.md) (overview, every measurement, the recommended config; Russian) ·
 [the kernels](docs/DETAILS.md#long-contexts-on-the-pack-path-qwen36--ornith--cyber-tiel-this-fork-opt-in) ·
 [EVAL.ru.md](docs/EVAL.ru.md) · [AGENT-EVAL.ru.md](docs/AGENT-EVAL.ru.md)
 
-<p align="center"><sub>Everything below is upstream Strata's README.</sub></p>
+<p align="center"><sub>Everything below is upstream Strata's README. Its install section is rewritten for the fork.</sub></p>
 
 ---
 
@@ -64,9 +64,9 @@ upstream's engine, which has no pack path for them.
 <p align="center">Support for NVIDIA, AMD, Intel · Windows, Linux, Mac · free and open source</p>
 
 <p align="center">
-  <a href="https://github.com/Niko1221/Strata/releases"><img src="https://img.shields.io/github/v/release/Niko1221/Strata?include_prereleases&label=release" alt="Latest release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Niko1221/Strata" alt="MIT license"></a>
-  <a href="https://github.com/Niko1221/Strata/stargazers"><img src="https://img.shields.io/github/stars/Niko1221/Strata?style=flat" alt="GitHub stars"></a>
+  <a href="https://github.com/Niko1221/Strata/releases"><img src="https://img.shields.io/github/v/release/Niko1221/Strata?include_prereleases&label=upstream%20release" alt="Upstream latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Asofwar/Strata" alt="MIT license"></a>
+  <a href="https://github.com/Asofwar/Strata/stargazers"><img src="https://img.shields.io/github/stars/Asofwar/Strata?style=flat" alt="GitHub stars"></a>
 </p>
 
 <p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="A voxel pagoda garden that Strata's model wrote, running in the browser"></a><br>
@@ -77,7 +77,7 @@ Strata runs **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Nex
 normally needs a server, on a normal PC. It chats, writes code, reads pictures and works with your apps and coding
 agents. Your chats and files stay on your PC.
 
-**New here?** Check [what you need](#what-you-need), then [install the app](#option-a-the-strata-app).
+**New here?** Check [what you need](#what-you-need), then [install](#install).
 
 - **Runs on a gaming PC.** 32 GB of RAM and graphics memory together is enough to start.
 - **Works with your tools.** It speaks the OpenAI and Anthropic APIs, so Claude Code, Codex CLI, OpenCode and other agents connect to it.
@@ -97,7 +97,7 @@ memory. More memory gives a bigger model or a faster one.
 
 | Your computer | Details |
 | --- | --- |
-| **NVIDIA** GeForce RTX 20, 30, 40, 50 series (12 GB or more) | Install the app or the Terminal. |
+| **NVIDIA** GeForce RTX 20, 30, 40, 50 series (12 GB or more) | [Install](#install) (Windows: the release zip). |
 | **AMD** Radeon RX 6800 and newer, Radeon AI PRO R9700 (12 GB or more) | [AMD cards](docs/AMD_HIP.md) |
 | **Intel** Arc | [Intel Arc](docs/INTEL_ARC.md), [Intel engine](docs/INTEL.md) |
 | **Apple Silicon Mac** (M1 or newer, macOS 15 or newer) | [Mac](docs/MAC.md) |
@@ -115,83 +115,53 @@ NVIDIA and AMD cards. Full list: [docs/INSTALL.md](docs/INSTALL.md#what-you-need
 
 ## Install
 
-> These are upstream Strata's builds, without this fork's changes. For Cyber-Tiel and Ornith with the fork's settings see [Install the fork](#install-the-fork).
+This is Asofwar's fork, and everything below installs the fork from its [releases](https://github.com/Asofwar/Strata/releases), not upstream's. The fork ships a Windows build for NVIDIA RTX 20 or newer (driver 580 or newer). It does not ship Strata's desktop app installers (`.exe`, `.AppImage`, `.dmg`), the Terminal's signed update feed (`strata update`), or builds for Mac, AMD (HIP) and Intel. For those, [build from source](#build-from-source); the fork has not tested them.
 
 Pick one option. They all start the same engine and use the same models.
 
-### Option A: the Strata app
+### Option A: the release zip (Windows, NVIDIA)
 
-The easiest way. The app has the engine inside: install it, pick a model, chat. Download the file for your system and
-graphics card from the [releases page](https://github.com/Niko1221/Strata/releases/latest). Not sure which one? See the
-line under the table.
+The easiest way on Windows. The zip holds the fork's code and a ready engine, so nothing is compiled. Download the file from the [latest release](https://github.com/Asofwar/Strata/releases/latest).
 
 | System | Your graphics card | File to download |
 | --- | --- | --- |
-| **Windows 10 / 11** | NVIDIA RTX, driver 580 or newer | [`Strata-0.2.1-windows-cuda13.exe`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-windows-cuda13.exe) |
-| | NVIDIA, older card or driver older than 580 | [`Strata-0.2.1-windows-cuda12.exe`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-windows-cuda12.exe) |
-| | AMD Radeon RX 9000 series or Radeon AI PRO R9700 | [`Strata-0.2.1-windows-hip.exe`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-windows-hip.exe) |
-| | AMD Radeon RX 7000 series or Ryzen AI Max (Strix Halo) | [`Strata-0.2.1-windows-hip-rdna3.exe`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-windows-hip-rdna3.exe) |
-| **Linux** | NVIDIA RTX, driver 580 or newer | [`Strata-0.2.1-linux-nvidia-cuda13.AppImage`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-linux-nvidia-cuda13.AppImage) |
-| | NVIDIA, older card or driver older than 580 | [`Strata-0.2.1-linux-nvidia-cuda12.AppImage`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-linux-nvidia-cuda12.AppImage) |
-| | AMD Radeon RX 9000 series or Radeon AI PRO R9700 | [`Strata-0.2.1-linux-amd-rx9070.AppImage`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-linux-amd-rx9070.AppImage) |
-| | AMD Radeon RX 7000 series | [`Strata-0.2.1-linux-amd-rx7900.AppImage`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-linux-amd-rx7900.AppImage) |
-| | AMD Ryzen AI Max (Strix Halo) | [`Strata-0.2.1-linux-amd-strixhalo.AppImage`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-linux-amd-strixhalo.AppImage) |
-| **Mac** (Apple Silicon, macOS 15 or newer) | built in | [`Strata-0.2.1-mac.dmg`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-mac.dmg) |
+| **Windows 10 / 11** | NVIDIA RTX 20 series or newer, driver 580 or newer | `Strata-Asofwar-<version>-windows-cuda13.zip` |
 
-**If you are unsure:** for NVIDIA, take `cuda13` if your driver is version 580 or newer, otherwise `cuda12`. `cuda12` is
-for older cards and older drivers. The `hip` and `amd` files are for AMD cards. Other AMD cards (RX 6000) have no
-ready-made app yet: see [AMD cards](docs/AMD_HIP.md).
+**If you are unsure:** an NVIDIA RTX card with a driver of version 580 or newer is what this zip is for. For an older card or driver, see [Older GPUs](docs/OLDER_GPUS.md) and build from source. The release also has `strata-windows-x64.zip` (the engine alone): setup downloads it by itself, so you don't need it.
 
 Then:
 
-- **Windows:** run the `.exe`. It installs for your user and needs no administrator rights. If Windows says "Windows
-  protected your PC", choose **More info**, then **Run anyway** (the installer is not code-signed yet).
-- **Linux:** make the file runnable (`chmod +x`) and start it. It needs FUSE 2: `sudo apt install libfuse2` (Ubuntu 22.04)
-  or `libfuse2t64` (Ubuntu 24.04 and newer).
-- **Mac:** open the `.dmg` and drag Strata onto Applications.
+1. Unzip the file into a folder without spaces in its path.
+2. Double-click `START-HERE.bat`. It finds your card, asks which model and size, how much context and whether it should read pictures, downloads the model and starts it. Press Enter for the recommended answers. For the fork's models run `START-HERE.bat --setup --family cyber-tiel` (or `--family ornith-abl`), as in [Install the fork](#install-the-fork).
 
-On the first screen the app reads your PC and recommends a model that fits. Press install. The model is a big download
-(about 40-70 GB) and continues where it stopped if it is interrupted. Closing the window stops Strata and the engine.
+The model is a big download (about 40-70 GB) and continues where it stopped if it is interrupted. Closing the window stops Strata and the engine.
 
-### Option B: the Terminal (one line)
+### Option B: one line
 
-The Terminal is the `strata` command, for scripts, servers and AI agents.
-
-Linux and Mac:
-
-```sh
-curl -fsSL https://github.com/Niko1221/Strata/releases/latest/download/install.sh | sh
-```
-
-Windows (PowerShell):
+Windows (PowerShell), NVIDIA RTX 20 or newer:
 
 ```powershell
-irm https://github.com/Niko1221/Strata/releases/latest/download/install.ps1 | iex
+irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
 ```
 
-The script checks your PC, downloads the Terminal, verifies its SHA-256 and unpacks it into your home folder. It needs no
-administrator rights. On Windows, open a new terminal window afterwards. Then start Strata:
+It downloads the zip of Option A from the latest release, checks it against `SHA256SUMS.txt`, unzips it and runs `START-HERE.bat`.
+
+Linux (the fork has not tested Linux):
 
 ```sh
-strata launch
+curl -fsSL https://github.com/Asofwar/Strata/releases/latest/download/install.sh | sh
 ```
 
-It asks one question at a time: model, context, pictures, who may connect. Then it downloads the engine for your graphics
-card (signed, and test-started before use) and the model, and starts serving. For scripts and AI agents, use flags:
+It downloads the release's source and runs `./setup.sh`, which builds the engine from source on your PC.
 
-```sh
-strata launch --model q2_0 --yes --no-tui
-```
-
-To read the install script before it runs, download it first with `curl -fsSL <address> -o install.sh`, read it, then run
-`sh install.sh`. All screens and flags: [docs/TERMINAL_LAUNCH.md](docs/TERMINAL_LAUNCH.md).
+To read a script before it runs, download it first (`curl -fsSL <address> -o install.sh` or, in PowerShell, `irm <address> -OutFile install.ps1`), read it, then run it.
 
 ### Option C: let your AI set it up
 
 Paste this into Claude Code, Cursor, Codex, GitHub Copilot or another coding assistant:
 
 ```text
-Set up Strata on this PC for me: https://github.com/Niko1221/Strata - follow docs/AI_SETUP.md in that repository.
+Set up Strata on this PC for me: https://github.com/Asofwar/Strata - follow docs/AI_SETUP.md in that repository.
 ```
 
 It checks your graphics card, RAM and disk, picks the model that fits, installs and starts it, and tells you how to
@@ -269,6 +239,10 @@ tokens per second. The engine version behind each number is in [DETAILS.md](docs
 
 ## Using it
 
+The fork does not ship Strata's desktop app or the Terminal's installer or signed update feed. **In the app** and **In the
+Terminal** below describe upstream's app and `strata` command, which the fork has not tested. With the fork, start Strata
+with `START-HERE.bat` (or `./setup.sh`) and update it with `UPDATE.bat` (or `./update.sh`); don't use `strata update`.
+
 ### In the app
 
 The app has a **Chat**, a **Monitor** of the model and your GPU, CPU and RAM, a **Models** page and **Settings**. The chat
@@ -295,20 +269,18 @@ strata launch --plan --model q2_0              # show what would happen; nothing
 strata launch --status                         # what is being served now
 strata launch --stop                           # stop it
 strata monitor --url http://127.0.0.1:8080     # watch speed, GPU, memory and requests
-strata update --check                          # is there a new engine? (strata update installs it)
 strata doctor                                  # check the installed engine files
 ```
 
-`strata --help` lists everything. Starting and serving never download anything. Only the install, `strata launch` (when
-you choose a model) and `strata update` do. To reach Strata from your phone or another PC, use
+`strata --help` lists everything. Starting and serving never download anything. Only the install and `strata launch` (when
+you choose a model) do. To reach Strata from your phone or another PC, use
 `strata launch --access lan`. It makes an API key and will not start on a network without one. No browser opens unless
 you add `--open`. Guide: [docs/TERMINAL_LAUNCH.md](docs/TERMINAL_LAUNCH.md). Whole client: [docs/TERMINAL.md](docs/TERMINAL.md).
 
 ### With AI agents
 
-An agent installs Strata with the one-line command in Option B and runs
-`strata launch --model NAME --yes --no-tui`. The steps, flags and exit codes are in [docs/AI_SETUP.md](docs/AI_SETUP.md),
-and the repository rules are in [AGENTS.md](AGENTS.md).
+An agent follows [docs/AI_SETUP.md](docs/AI_SETUP.md) (Option C): it gets the fork, runs setup without questions
+and starts the server. The repository rules are in [AGENTS.md](AGENTS.md).
 
 ### Connect your other apps
 
@@ -346,7 +318,9 @@ memory); the processor reader needs about 50 s per picture there, so it runs onl
 <details>
 <summary>Windows, Linux and Mac from the repository</summary>
 
-[Download Strata](https://github.com/Niko1221/Strata/archive/refs/heads/main.zip) and unzip it, or `git clone` it.
+[Download the fork](https://github.com/Asofwar/Strata/archive/refs/heads/main.zip) and unzip it, or run
+`git clone https://github.com/Asofwar/Strata.git`. The fork has tested only Windows with an NVIDIA card; Linux, Mac, AMD and
+Intel are upstream's paths, which it has not tested.
 **Windows:** double-click `START-HERE.bat`. **Linux:** run `./setup.sh` in the Strata folder.
 
 **Mac (Apple Silicon, macOS 15 or newer):** install Apple's Command Line Tools once with `xcode-select --install`
@@ -419,12 +393,12 @@ The longer explanation: [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md). Every part
   `./setup.sh`) again. It continues where it stopped.
 - **It is very slow, the disk light keeps blinking, or it says "the engine stopped unexpectedly".** Your PC does not have
   enough free RAM. Close other programs (browsers use a lot), or pick a smaller size such as Q2_0 or IQ2_XS.
-- **It says there is no engine for this PC.** In the app, open **Settings, Engine** and press **Update engine**. In the
-  Terminal, run `strata update`. `strata doctor` shows which engine files are installed.
+- **It says there is no engine for this PC.** Run `START-HERE.bat` (or `./setup.sh`) again: it fetches the engine from the
+  fork's release or builds it. Don't run `strata update`: the fork publishes no signed update feed.
 - **It says port 8080 is already in use.** Strata is already running. Look for its window.
 
 More problems and fixes: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). Still stuck? Open an
-[issue](https://github.com/Niko1221/Strata/issues). In the app, attach the file from **Settings, Engine, Diagnostics, View
+[issue](https://github.com/Asofwar/Strata/issues). In the app, attach the file from **Settings, Engine, Diagnostics, View
 logs, Save logs**. In the Terminal, paste the output of `strata doctor`. From source, attach `strata-<model>.log` from the
 Strata folder. For a security problem, report it privately: [SECURITY.md](SECURITY.md).
 
@@ -448,4 +422,4 @@ me keep testing new cards and fixing what you report. No pressure. Using it and 
 
 <a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a>
 
-Interested in sponsoring Strata? Contact me via [GitHub](https://github.com/Niko1221).
+Interested in sponsoring Strata? Contact me via [GitHub](https://github.com/Asofwar).

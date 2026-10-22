@@ -12,9 +12,9 @@
 <p align="center">NVIDIA、AMD、Intel に対応 · Windows、Linux、Mac · 無料のオープンソース</p>
 
 <p align="center">
-  <a href="https://github.com/Niko1221/Strata/releases"><img src="https://img.shields.io/github/v/release/Niko1221/Strata?include_prereleases&label=release" alt="Latest release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Niko1221/Strata" alt="MIT license"></a>
-  <a href="https://github.com/Niko1221/Strata/stargazers"><img src="https://img.shields.io/github/stars/Niko1221/Strata?style=flat" alt="GitHub stars"></a>
+  <a href="https://github.com/Niko1221/Strata/releases"><img src="https://img.shields.io/github/v/release/Niko1221/Strata?include_prereleases&label=upstream%20release" alt="Upstream latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Asofwar/Strata" alt="MIT license"></a>
+  <a href="https://github.com/Asofwar/Strata/stargazers"><img src="https://img.shields.io/github/stars/Asofwar/Strata?style=flat" alt="GitHub stars"></a>
 </p>
 
 <p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="A voxel pagoda garden that Strata's model wrote, running in the browser"></a><br>
@@ -25,7 +25,7 @@ Strata は **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next
 ふつうはサーバーが必要ですが、Strata なら一般的なPCで使えます。チャット、コード作成、画像の読み取りができ、
 お使いのアプリやコーディングエージェントとも連携します。チャットとファイルはPCの外に出ません。
 
-**はじめての方へ。** まず[必要な環境](#必要な環境)を確認して、[アプリをインストール](#方法a-strata-アプリ)してください。
+**はじめての方へ。** まず[必要な環境](#必要な環境)を確認して、[インストール](#インストール)してください。
 
 - **ゲーミングPCで動きます。** RAMとグラフィックスメモリの合計が32 GBあれば始められます。
 - **お使いのツールと連携します。** OpenAI と Anthropic の API に対応しているので、Claude Code、Codex CLI、OpenCode などのエージェントから接続できます。
@@ -45,7 +45,7 @@ Strata は **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next
 
 | お使いのPC | 詳細 |
 | --- | --- |
-| **NVIDIA** GeForce RTX 20、30、40、50 シリーズ（12 GB以上） | アプリまたはターミナル版をインストールしてください。 |
+| **NVIDIA** GeForce RTX 20、30、40、50 シリーズ（12 GB以上） | [インストール](#インストール)（Windows: リリースの zip）。 |
 | **AMD** Radeon RX 6800 以降、Radeon AI PRO R9700（12 GB以上） | [AMD のカード](docs/AMD_HIP.md) |
 | **Intel** Arc | [Intel Arc](docs/INTEL_ARC.md)、[Intel エンジン](docs/INTEL.md) |
 | **Apple Silicon の Mac**（M1 以降、macOS 15 以降） | [Mac](docs/MAC.md) |
@@ -63,86 +63,58 @@ Strata は **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next
 
 ## インストール
 
+これは Asofwar のフォークです。以下はすべて、upstream ではなくフォークの[リリース](https://github.com/Asofwar/Strata/releases)からインストールします。フォークが提供するのは、NVIDIA RTX 20 以降（ドライバー 580 以降）向けの Windows ビルドです。Strata アプリのインストーラー（`.exe`、`.AppImage`、`.dmg`）、ターミナル版の署名付き更新フィード（`strata update`）、Mac・AMD（HIP）・Intel 向けのビルドは提供しません。これらは[ソースからビルド](#ソースからビルド)してください。フォークはテストしていません。
+
 3つの方法から1つ選んでください。どれも同じエンジンを起動し、同じモデルを使います。
 
-### 方法A: Strata アプリ
+### 方法A: リリースの zip（Windows、NVIDIA）
 
-いちばん簡単な方法です。エンジンはアプリに入っているので、インストールしてモデルを選べばチャットを始められます。お使いのOSとグラフィックスカードに合うファイルを
-[リリースページ](https://github.com/Niko1221/Strata/releases/latest)からダウンロードしてください。どれか分からない場合は、表の下の説明を見てください。
+Windows でいちばん簡単な方法です。zip にはフォークのコードと用意済みのエンジンが入っているので、コンパイルは要りません。[最新リリース](https://github.com/Asofwar/Strata/releases/latest)からファイルをダウンロードしてください。
 
 | OS | グラフィックスカード | ダウンロードするファイル |
 | --- | --- | --- |
-| **Windows 10 / 11** | NVIDIA RTX、ドライバー 580 以降 | [`Strata-0.2.1-windows-cuda13.exe`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-windows-cuda13.exe) |
-| | NVIDIA、古いカード、またはドライバーが 580 より古い場合 | [`Strata-0.2.1-windows-cuda12.exe`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-windows-cuda12.exe) |
-| | AMD Radeon RX 9000 シリーズまたは Radeon AI PRO R9700 | [`Strata-0.2.1-windows-hip.exe`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-windows-hip.exe) |
-| | AMD Radeon RX 7000 シリーズまたは Ryzen AI Max (Strix Halo) | [`Strata-0.2.1-windows-hip-rdna3.exe`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-windows-hip-rdna3.exe) |
-| **Linux** | NVIDIA RTX、ドライバー 580 以降 | [`Strata-0.2.1-linux-nvidia-cuda13.AppImage`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-linux-nvidia-cuda13.AppImage) |
-| | NVIDIA、古いカード、またはドライバーが 580 より古い場合 | [`Strata-0.2.1-linux-nvidia-cuda12.AppImage`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-linux-nvidia-cuda12.AppImage) |
-| | AMD Radeon RX 9000 シリーズまたは Radeon AI PRO R9700 | [`Strata-0.2.1-linux-amd-rx9070.AppImage`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-linux-amd-rx9070.AppImage) |
-| | AMD Radeon RX 7000 シリーズ | [`Strata-0.2.1-linux-amd-rx7900.AppImage`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-linux-amd-rx7900.AppImage) |
-| | AMD Ryzen AI Max (Strix Halo) | [`Strata-0.2.1-linux-amd-strixhalo.AppImage`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-linux-amd-strixhalo.AppImage) |
-| **Mac**（Apple Silicon、macOS 15 以降） | 内蔵 | [`Strata-0.2.1-mac.dmg`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-mac.dmg) |
+| **Windows 10 / 11** | NVIDIA RTX 20 シリーズ以降、ドライバー 580 以降 | `Strata-Asofwar-<バージョン>-windows-cuda13.zip` |
 
-**迷ったときは:** NVIDIA の場合、ドライバーがバージョン 580 以降なら `cuda13`、それより古ければ `cuda12` を選びます。`cuda12` は古いカードと古いドライバー向けです。
-`hip` と `amd` のファイルは AMD のカード用です。それ以外の AMD カード（RX 6000）には、まだ用意されたアプリがありません。
-[AMD のカード](docs/AMD_HIP.md)を見てください。
+**迷ったら:** この zip は、ドライバーがバージョン 580 以降の NVIDIA RTX カード向けです。それより古いカードやドライバーは、[古い GPU](docs/OLDER_GPUS.md) を見て、ソースからビルドしてください。リリースには `strata-windows-x64.zip`（エンジンだけ）もありますが、setup が自動でダウンロードするので、自分で取る必要はありません。
 
-そのあとの手順:
+そのあとは:
 
-- **Windows:** `.exe` を実行します。ユーザー単位でインストールされ、管理者権限は不要です。「Windows によってPCが保護されました」と表示されたら、
-  **詳細情報**を選び、**実行**を選んでください（インストーラーにはまだコード署名がありません）。
-- **Linux:** ファイルを実行可能にして（`chmod +x`）起動します。FUSE 2 が必要です。`sudo apt install libfuse2`（Ubuntu 22.04）
-  または `libfuse2t64`（Ubuntu 24.04 以降）を実行してください。
-- **Mac:** `.dmg` を開き、Strata を「アプリケーション」にドラッグします。
+1. ファイルを、パスに空白を含まないフォルダーに展開します。
+2. `START-HERE.bat` をダブルクリックします。カードを見つけて、モデルとサイズ、コンテキストの長さ、画像を読むかどうかを尋ね、モデルをダウンロードして起動します。おすすめの答えでよければ Enter を押してください。フォークのモデルを使うには、`START-HERE.bat --setup --family cyber-tiel`（または `--family ornith-abl`）を実行します（[Install the fork](README.md#install-the-fork)、英語）。
 
-最初の画面で、アプリがPCを調べて合うモデルをすすめます。インストールを押してください。モデルは大きく（約40〜70 GB）、中断しても続きからダウンロードできます。
-ウィンドウを閉じると、Strata とエンジンが止まります。
+モデルは大きく（約 40〜70 GB）、中断しても続きから再開します。ウィンドウを閉じると、Strata とエンジンが止まります。
 
-### 方法B: ターミナル（1行）
+### 方法B: 1行
 
-ターミナル版は `strata` コマンドです。スクリプトやサーバー、AI エージェント向けです。
-
-Linux と Mac:
-
-```sh
-curl -fsSL https://github.com/Niko1221/Strata/releases/latest/download/install.sh | sh
-```
-
-Windows（PowerShell）:
+Windows（PowerShell）、NVIDIA RTX 20 以降:
 
 ```powershell
-irm https://github.com/Niko1221/Strata/releases/latest/download/install.ps1 | iex
+irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
 ```
 
-スクリプトはPCを調べ、ターミナル版をダウンロードし、SHA-256 を検証して、ホームフォルダに展開します。管理者権限は不要です。Windows では、終わったら
-新しいターミナルを開いてください。そのあと Strata を起動します。
+最新リリースから方法Aの zip をダウンロードし、`SHA256SUMS.txt` で確認して展開し、`START-HERE.bat` を実行します。
+
+Linux（フォークは Linux をテストしていません）:
 
 ```sh
-strata launch
+curl -fsSL https://github.com/Asofwar/Strata/releases/latest/download/install.sh | sh
 ```
 
-質問は1つずつ表示されます。モデル、コンテキスト、画像、接続を許可する相手の順です。そのあと、お使いのグラフィックスカード用のエンジン
-（署名付きで、使う前にテスト起動します）とモデルをダウンロードして、サーバーを開始します。スクリプトや AI エージェントからは、フラグを使います。
+リリースのソースをダウンロードして `./setup.sh` を実行し、お使いのPCでエンジンをソースからビルドします。
 
-```sh
-strata launch --model q2_0 --yes --no-tui
-```
-
-実行前にインストールスクリプトを読みたい場合は、先に `curl -fsSL <address> -o install.sh` でダウンロードし、内容を確認してから
-`sh install.sh` を実行してください。すべての画面とフラグは [docs/TERMINAL_LAUNCH.md](docs/TERMINAL_LAUNCH.md) にあります。
+実行前にスクリプトを読みたいときは、先にダウンロードして（`curl -fsSL <address> -o install.sh`、PowerShell では `irm <address> -OutFile install.ps1`）、内容を読んでから実行してください。
 
 ### 方法C: AI にセットアップを任せる
 
 Claude Code、Cursor、Codex、GitHub Copilot などのコーディングアシスタントに、次の文を貼り付けます。
 
 ```text
-Set up Strata on this PC for me: https://github.com/Niko1221/Strata - follow docs/AI_SETUP.md in that repository.
+Set up Strata on this PC for me: https://github.com/Asofwar/Strata - follow docs/AI_SETUP.md in that repository.
 ```
 
-AI はグラフィックスカード、RAM、ディスクを調べ、合うモデルを選んで、インストールと起動をし、アプリの接続方法を教えてくれます。
-AI ツールは [MCP サーバー](docs/MCP_SERVER.md)を通じて、Strata のインストール、起動、停止もできます。
+グラフィックスカード、RAM、ディスクを確認し、合うモデルを選んでインストールと起動をし、ほかのアプリのつなぎ方を教えてくれます。AI ツールは [MCP サーバー](docs/MCP_SERVER.md)から Strata のインストール、起動、停止もできます。
 
-自分でビルドしたい方は[ソースからビルド](#ソースからビルド)を見てください。
+自分でビルドしたい場合は、[ソースからビルド](#ソースからビルド)を見てください。
 
 ## モデル
 
@@ -211,6 +183,8 @@ Gyro は NVIDIA と AMD のカードで動きます（AMD は実験的）。Inte
 
 ## 使い方
 
+フォークは、Strata アプリも、ターミナル版のインストーラーや署名付き更新フィードも提供しません。以下の**アプリで**と**ターミナルで**は upstream のアプリと `strata` コマンドの説明で、フォークはテストしていません。フォークでは、`START-HERE.bat`（または `./setup.sh`）で Strata を起動し、`UPDATE.bat`（または `./update.sh`）で更新します。`strata update` は使わないでください。
+
 ### アプリで
 
 アプリには、**チャット**、モデルとGPU・CPU・RAMの状態を見る**モニター**、**モデル**ページ、**設定**があります。チャットはPC上のフォルダで作業できます。
@@ -236,20 +210,17 @@ strata launch --plan --model q2_0              # 実行内容を表示するだ�
 strata launch --status                         # 今、何が動いているか
 strata launch --stop                           # 停止する
 strata monitor --url http://127.0.0.1:8080     # 速度、GPU、メモリ、リクエストを見る
-strata update --check                          # 新しいエンジンがあるか確認（strata update でインストール）
 strata doctor                                  # インストール済みのエンジンファイルを調べる
 ```
 
-`strata --help` ですべてのコマンドを確認できます。起動とサーバーの稼働では、何もダウンロードしません。ダウンロードするのは、インストール、
-`strata launch`（モデルを選んだとき）、`strata update` だけです。スマートフォンや別のPCから Strata に接続するには、
+`strata --help` ですべてのコマンドを確認できます。起動とサーバーの稼働では、何もダウンロードしません。ダウンロードするのは、インストールと
+`strata launch`（モデルを選んだとき）だけです。スマートフォンや別のPCから Strata に接続するには、
 `strata launch --access lan` を使います。API キーが作られ、キーがない状態ではネットワーク上で起動しません。`--open` を付けない限り、ブラウザは開きません。
 ガイド: [docs/TERMINAL_LAUNCH.md](docs/TERMINAL_LAUNCH.md)。クライアント全体: [docs/TERMINAL.md](docs/TERMINAL.md)。
 
 ### AI エージェントと使う
 
-エージェントは、方法Bの1行コマンドで Strata をインストールし、
-`strata launch --model NAME --yes --no-tui` を実行します。手順、フラグ、終了コードは [docs/AI_SETUP.md](docs/AI_SETUP.md) に、
-リポジトリのルールは [AGENTS.md](AGENTS.md) にあります。
+エージェントは [docs/AI_SETUP.md](docs/AI_SETUP.md)（方法C）に従って、フォークを取得し、質問なしで setup を実行し、サーバーを起動します。リポジトリのルールは [AGENTS.md](AGENTS.md) にあります。
 
 ### ほかのアプリをつなぐ
 
@@ -285,7 +256,7 @@ strata doctor                                  # インストール済みのエ�
 <details>
 <summary>リポジトリから Windows、Linux、Mac 用にビルドする</summary>
 
-[Strata をダウンロード](https://github.com/Niko1221/Strata/archive/refs/heads/main.zip)して展開するか、`git clone` します。
+[フォークをダウンロード](https://github.com/Asofwar/Strata/archive/refs/heads/main.zip)して展開するか、`git clone https://github.com/Asofwar/Strata.git` を実行します。フォークがテストしたのは NVIDIA カードを使う Windows だけです。Linux、Mac、AMD、Intel は upstream の手順で、フォークはテストしていません。
 **Windows:** `START-HERE.bat` をダブルクリックします。**Linux:** Strata フォルダで `./setup.sh` を実行します。
 
 **Mac（Apple Silicon、macOS 15 以降）:** 最初に一度、`xcode-select --install` で Apple のコマンドラインツールをインストールします
@@ -353,12 +324,11 @@ Strata のデータフォルダにある `strata-<model>.json`（[場所](docs/I
   `./setup.sh`）をもう一度実行してください。止まったところから再開します。
 - **とても遅い、ディスクのランプが点滅し続ける、または「エンジンが予期せず停止しました」と表示される。** PCの空き RAM が足りません。
   ほかのプログラムを閉じるか（ブラウザはメモリを多く使います）、Q2_0 や IQ2_XS のような小さいサイズを選んでください。
-- **このPCに合うエンジンがないと表示される。** アプリでは、**設定、エンジン**を開いて**エンジンを更新**を押します。ターミナルでは
-  `strata update` を実行します。`strata doctor` で、どのエンジンファイルがインストールされているか分かります。
+- **このPCに合うエンジンがないと表示される。** `START-HERE.bat`（または `./setup.sh`）をもう一度実行します。フォークのリリースからエンジンをダウンロードするか、ビルドします。`strata update` は実行しないでください。フォークは署名付きの更新フィードを公開していません。
 - **ポート 8080 はすでに使われていると表示される。** Strata がすでに動いています。ウィンドウを探してください。
 
 そのほかの問題と対処法は [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) にあります。それでも解決しない場合は、
-[issue](https://github.com/Niko1221/Strata/issues) を作成してください。アプリでは、**設定、エンジン、診断、ログを見る、ログを保存**で作られるファイルを添付します。
+[issue](https://github.com/Asofwar/Strata/issues) を作成してください。アプリでは、**設定、エンジン、診断、ログを見る、ログを保存**で作られるファイルを添付します。
 ターミナルでは、`strata doctor` の出力を貼り付けます。ソースから動かしている場合は、Strata フォルダの `strata-<model>.log` を添付してください。
 セキュリティ上の問題は、非公開で報告してください: [SECURITY.md](SECURITY.md)。
 
@@ -382,4 +352,4 @@ Strata は無料で、MIT ライセンスです。私が入手できるハード
 
 <a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a>
 
-Strata のスポンサーに関心がある方は、[GitHub](https://github.com/Niko1221) から連絡してください。
+Strata のスポンサーに関心がある方は、[GitHub](https://github.com/Asofwar) から連絡してください。

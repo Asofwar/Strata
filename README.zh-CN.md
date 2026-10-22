@@ -12,9 +12,9 @@
 <p align="center">支持 NVIDIA、AMD、Intel · Windows、Linux、Mac · 免费开源</p>
 
 <p align="center">
-  <a href="https://github.com/Niko1221/Strata/releases"><img src="https://img.shields.io/github/v/release/Niko1221/Strata?include_prereleases&label=release" alt="Latest release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Niko1221/Strata" alt="MIT license"></a>
-  <a href="https://github.com/Niko1221/Strata/stargazers"><img src="https://img.shields.io/github/stars/Niko1221/Strata?style=flat" alt="GitHub stars"></a>
+  <a href="https://github.com/Niko1221/Strata/releases"><img src="https://img.shields.io/github/v/release/Niko1221/Strata?include_prereleases&label=upstream%20release" alt="Upstream latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Asofwar/Strata" alt="MIT license"></a>
+  <a href="https://github.com/Asofwar/Strata/stargazers"><img src="https://img.shields.io/github/stars/Asofwar/Strata?style=flat" alt="GitHub stars"></a>
 </p>
 
 <p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="A voxel pagoda garden that Strata's model wrote, running in the browser"></a><br>
@@ -25,7 +25,7 @@ Strata 运行 **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-N
 通常需要服务器才能跑，现在用普通电脑就行。它能聊天、写代码、看图片，也能配合你的应用和编程智能体使用。
 你的聊天记录和文件都留在你自己的电脑上。
 
-**第一次用？** 先看[硬件要求](#硬件要求)，再[安装应用](#方式-astrata-应用)。
+**第一次用？** 先看[硬件要求](#硬件要求)，再[安装](#安装)。
 
 - **游戏电脑就能跑。** 内存和显存加起来有 32 GB 就可以开始。
 - **能接入你的工具。** 支持 OpenAI 和 Anthropic 的 API，Claude Code、Codex CLI、OpenCode 等智能体都能连上。
@@ -45,7 +45,7 @@ Strata 运行 **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-N
 
 | 你的电脑 | 说明 |
 | --- | --- |
-| **NVIDIA** GeForce RTX 20、30、40、50 系列（12 GB 及以上） | 安装应用或终端版即可。 |
+| **NVIDIA** GeForce RTX 20、30、40、50 系列（12 GB 及以上） | [安装](#安装)（Windows：发布页的 zip）。 |
 | **AMD** Radeon RX 6800 及更新型号、Radeon AI PRO R9700（12 GB 及以上） | [AMD 显卡](docs/AMD_HIP.md) |
 | **Intel** Arc | [Intel Arc](docs/INTEL_ARC.md)、[Intel 引擎](docs/INTEL.md) |
 | **Apple 芯片 Mac**（M1 及更新，macOS 15 及以上） | [Mac](docs/MAC.md) |
@@ -63,86 +63,58 @@ Strata 运行 **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-N
 
 ## 安装
 
+这是 Asofwar 的分支（fork）。下面的内容都从该分支的[发布页](https://github.com/Asofwar/Strata/releases)安装，而不是 upstream。分支提供适用于 NVIDIA RTX 20 及更新显卡（驱动 580 或更新）的 Windows 版本。它不提供 Strata 应用安装包（`.exe`、`.AppImage`、`.dmg`）、终端版的签名更新源（`strata update`），也不提供 Mac、AMD（HIP）和 Intel 的构建。这些请[从源码构建](#从源码构建)；分支没有测试过它们。
+
 三种方式任选一种。它们启动的是同一个引擎，用的是同样的模型。
 
-### 方式 A：Strata 应用
+### 方式 A：发布页的 zip（Windows，NVIDIA）
 
-最简单的方式。应用内置引擎：安装、选模型、开始聊天。请根据你的系统和显卡，从
-[发布页](https://github.com/Niko1221/Strata/releases/latest)下载对应的文件。不确定选哪个？看表格下面那一段。
+Windows 上最简单的方式。zip 里有分支的代码和现成的引擎，不需要编译。请从[最新发布](https://github.com/Asofwar/Strata/releases/latest)下载文件。
 
 | 系统 | 你的显卡 | 要下载的文件 |
 | --- | --- | --- |
-| **Windows 10 / 11** | NVIDIA RTX，驱动 580 或更新 | [`Strata-0.2.1-windows-cuda13.exe`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-windows-cuda13.exe) |
-| | NVIDIA，较旧的显卡，或驱动低于 580 | [`Strata-0.2.1-windows-cuda12.exe`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-windows-cuda12.exe) |
-| | AMD Radeon RX 9000 系列或 Radeon AI PRO R9700 | [`Strata-0.2.1-windows-hip.exe`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-windows-hip.exe) |
-| | AMD Radeon RX 7000 系列或 Ryzen AI Max (Strix Halo) | [`Strata-0.2.1-windows-hip-rdna3.exe`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-windows-hip-rdna3.exe) |
-| **Linux** | NVIDIA RTX，驱动 580 或更新 | [`Strata-0.2.1-linux-nvidia-cuda13.AppImage`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-linux-nvidia-cuda13.AppImage) |
-| | NVIDIA，较旧的显卡，或驱动低于 580 | [`Strata-0.2.1-linux-nvidia-cuda12.AppImage`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-linux-nvidia-cuda12.AppImage) |
-| | AMD Radeon RX 9000 系列或 Radeon AI PRO R9700 | [`Strata-0.2.1-linux-amd-rx9070.AppImage`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-linux-amd-rx9070.AppImage) |
-| | AMD Radeon RX 7000 系列 | [`Strata-0.2.1-linux-amd-rx7900.AppImage`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-linux-amd-rx7900.AppImage) |
-| | AMD Ryzen AI Max (Strix Halo) | [`Strata-0.2.1-linux-amd-strixhalo.AppImage`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-linux-amd-strixhalo.AppImage) |
-| **Mac**（Apple 芯片，macOS 15 及以上） | 内置 | [`Strata-0.2.1-mac.dmg`](https://github.com/Niko1221/Strata/releases/latest/download/Strata-0.2.1-mac.dmg) |
+| **Windows 10 / 11** | NVIDIA RTX 20 系列及更新，驱动 580 或更新 | `Strata-Asofwar-<版本>-windows-cuda13.zip` |
 
-**不确定时：** NVIDIA 显卡的驱动版本在 580 及以上就选 `cuda13`，否则选 `cuda12`。`cuda12` 适用于较旧的显卡和驱动。
-`hip` 和 `amd` 的文件是给 AMD 显卡用的。其他 AMD 显卡（RX 6000）目前还没有现成的应用，
-请看 [AMD 显卡](docs/AMD_HIP.md)。
+**拿不准时：** 这个 zip 是给驱动版本 580 或更新的 NVIDIA RTX 显卡用的。更旧的显卡或驱动请看[旧显卡](docs/OLDER_GPUS.md)并从源码构建。发布页还有 `strata-windows-x64.zip`（只有引擎）：setup 会自己下载，你不需要它。
 
 然后：
 
-- **Windows：** 运行 `.exe`。它只为当前用户安装，不需要管理员权限。如果 Windows 提示“Windows 已保护你的电脑”，
-  点击**更多信息**，再点**仍要运行**（安装程序还没有代码签名）。
-- **Linux：** 给文件加上可执行权限（`chmod +x`），然后启动。需要 FUSE 2：`sudo apt install libfuse2`（Ubuntu 22.04），
-  或 `libfuse2t64`（Ubuntu 24.04 及更新）。
-- **Mac：** 打开 `.dmg`，把 Strata 拖到“应用程序”。
+1. 把文件解压到路径中不含空格的文件夹。
+2. 双击 `START-HERE.bat`。它会找到你的显卡，询问模型和尺寸、上下文长度以及是否读取图片，然后下载模型并启动。直接按 Enter 即可采用推荐的回答。要用分支的模型，运行 `START-HERE.bat --setup --family cyber-tiel`（或 `--family ornith-abl`），见 [Install the fork](README.md#install-the-fork)（英文）。
 
-第一个界面里，应用会检测你的电脑，并推荐合适的模型。点击安装即可。模型很大，要下载约 40-70 GB，中断后会从断点继续。
-关闭窗口会同时停止 Strata 和引擎。
+模型很大，要下载约 40-70 GB，中断后会从断点继续。关闭窗口会同时停止 Strata 和引擎。
 
-### 方式 B：终端（一行命令）
+### 方式 B：一行命令
 
-终端版就是 `strata` 命令，适合脚本、服务器和 AI 智能体。
-
-Linux 和 Mac：
-
-```sh
-curl -fsSL https://github.com/Niko1221/Strata/releases/latest/download/install.sh | sh
-```
-
-Windows（PowerShell）：
+Windows（PowerShell），NVIDIA RTX 20 及更新：
 
 ```powershell
-irm https://github.com/Niko1221/Strata/releases/latest/download/install.ps1 | iex
+irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
 ```
 
-脚本会检查你的电脑，下载终端版，校验 SHA-256，然后解压到你的用户目录。不需要管理员权限。在 Windows 上，装完后请
-打开一个新的终端窗口。然后启动 Strata：
+脚本会从最新发布下载方式 A 的 zip，用 `SHA256SUMS.txt` 校验，解压并运行 `START-HERE.bat`。
+
+Linux（分支没有测试过 Linux）：
 
 ```sh
-strata launch
+curl -fsSL https://github.com/Asofwar/Strata/releases/latest/download/install.sh | sh
 ```
 
-它会一次问一个问题：模型、上下文、图片、允许谁连接。接着为你的显卡下载引擎（已签名，使用前会先试启动），再下载
-模型，并开始提供服务。在脚本和 AI 智能体里，请使用参数：
+脚本会下载该发布的源码并运行 `./setup.sh`，在你的电脑上从源码构建引擎。
 
-```sh
-strata launch --model q2_0 --yes --no-tui
-```
-
-如果想在运行前先看看安装脚本，先用 `curl -fsSL <address> -o install.sh` 下载，读完后再用 `sh install.sh` 运行。
-所有界面和参数见 [docs/TERMINAL_LAUNCH.md](docs/TERMINAL_LAUNCH.md)。
+想在运行前先读脚本，可以先下载（`curl -fsSL <address> -o install.sh`，PowerShell 里用 `irm <address> -OutFile install.ps1`），读完再运行。
 
 ### 方式 C：让你的 AI 来安装
 
-把下面这段话粘贴到 Claude Code、Cursor、Codex、GitHub Copilot 或其他编程助手里：
+把下面这段粘贴到 Claude Code、Cursor、Codex、GitHub Copilot 或其他编程助手里：
 
 ```text
-Set up Strata on this PC for me: https://github.com/Niko1221/Strata - follow docs/AI_SETUP.md in that repository.
+Set up Strata on this PC for me: https://github.com/Asofwar/Strata - follow docs/AI_SETUP.md in that repository.
 ```
 
-它会检查你的显卡、内存和磁盘，选出合适的模型，完成安装和启动，并告诉你怎么连接你的应用。AI 工具也可以通过 Strata 的
-[MCP 服务器](docs/MCP_SERVER.md)安装、启动和停止 Strata。
+它会检查你的显卡、内存和硬盘，选出合适的模型，安装并启动，然后告诉你怎么连接你的其他应用。AI 工具也可以通过 [MCP 服务器](docs/MCP_SERVER.md)安装、启动和停止 Strata。
 
-想自己动手编译？请看[从源码构建](#从源码构建)。
+想自己构建？见[从源码构建](#从源码构建)。
 
 ## 模型
 
@@ -210,6 +182,8 @@ Gyro 可在 NVIDIA 和 AMD 显卡上运行（AMD 为实验性支持），不支�
 
 ## 使用方法
 
+分支不提供 Strata 应用，也不提供终端版的安装脚本和签名更新源。下面的**在应用里**和**在终端里**介绍的是 upstream 的应用和 `strata` 命令，分支没有测试过。使用分支时，用 `START-HERE.bat`（或 `./setup.sh`）启动 Strata，用 `UPDATE.bat`（或 `./update.sh`）更新，不要用 `strata update`。
+
 ### 在应用里
 
 应用包含**聊天**、显示模型以及 GPU、CPU 和内存状态的**监控**、**模型**页面和**设置**。聊天可以在你电脑上的某个文件夹里工作。
@@ -235,19 +209,16 @@ strata launch --plan --model q2_0              # 显示将要执行的操作；�
 strata launch --status                         # 当前正在提供什么服务
 strata launch --stop                           # 停止服务
 strata monitor --url http://127.0.0.1:8080     # 查看速度、GPU、内存和请求
-strata update --check                          # 有新引擎吗？（strata update 会安装它）
 strata doctor                                  # 检查已安装的引擎文件
 ```
 
-`strata --help` 会列出所有命令。启动和提供服务时不会下载任何东西。只有安装、`strata launch`（在你选择模型时）和
-`strata update` 会下载。要从手机或另一台电脑访问 Strata，请使用 `strata launch --access lan`。它会生成一个 API 密钥，
+`strata --help` 会列出所有命令。启动和提供服务时不会下载任何东西。只有安装和 `strata launch`（在你选择模型时）会下载。要从手机或另一台电脑访问 Strata，请使用 `strata launch --access lan`。它会生成一个 API 密钥，
 没有密钥就不会在网络上启动。除非你加上 `--open`，否则不会打开浏览器。指南：[docs/TERMINAL_LAUNCH.md](docs/TERMINAL_LAUNCH.md)。
 完整的客户端说明：[docs/TERMINAL.md](docs/TERMINAL.md)。
 
 ### 配合 AI 智能体
 
-智能体用方式 B 中的一行命令安装 Strata，然后运行 `strata launch --model NAME --yes --no-tui`。步骤、参数和退出码见
-[docs/AI_SETUP.md](docs/AI_SETUP.md)，仓库规则见 [AGENTS.md](AGENTS.md)。
+智能体按 [docs/AI_SETUP.md](docs/AI_SETUP.md)（方式 C）操作：获取分支、无提问运行 setup 并启动服务。仓库规则见 [AGENTS.md](AGENTS.md)。
 
 ### 连接你的其他应用
 
@@ -283,7 +254,7 @@ strata doctor                                  # 检查已安装的引擎文件
 <details>
 <summary>从仓库构建 Windows、Linux 和 Mac 版本</summary>
 
-[下载 Strata](https://github.com/Niko1221/Strata/archive/refs/heads/main.zip)并解压，或者用 `git clone` 获取。
+[下载分支](https://github.com/Asofwar/Strata/archive/refs/heads/main.zip)并解压，或者运行 `git clone https://github.com/Asofwar/Strata.git`。分支只测试过 Windows 加 NVIDIA 显卡；Linux、Mac、AMD 和 Intel 是 upstream 的路径，分支没有测试过。
 **Windows：** 双击 `START-HERE.bat`。**Linux：** 在 Strata 文件夹里运行 `./setup.sh`。
 
 **Mac（Apple 芯片，macOS 15 及以上）：** 先用 `xcode-select --install` 安装一次 Apple 的命令行工具（不需要完整的 Xcode）。
@@ -349,12 +320,11 @@ strata doctor                                  # 检查已安装的引擎文件
   它会从中断的地方继续。
 - **非常慢、硬盘灯一直闪，或者提示“引擎意外停止”。** 你的电脑可用内存不够。关闭其他程序（浏览器很占内存），
   或者选一个更小的尺寸，比如 Q2_0 或 IQ2_XS。
-- **提示这台电脑没有可用的引擎。** 在应用里打开**设置，引擎**，点击**更新引擎**。在终端里运行 `strata update`。
-  `strata doctor` 会显示已安装哪些引擎文件。
+- **提示这台电脑没有可用的引擎。** 重新运行 `START-HERE.bat`（或 `./setup.sh`）：它会从分支的发布页下载引擎或构建引擎。不要运行 `strata update`：分支没有签名更新源。
 - **提示 8080 端口已被占用。** Strata 已经在运行了。找一下它的窗口。
 
 更多问题和解决办法：[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)。还是解决不了？请提交
-[issue](https://github.com/Niko1221/Strata/issues)。在应用里，附上**设置，引擎，诊断，查看日志，保存日志**得到的文件。
+[issue](https://github.com/Asofwar/Strata/issues)。在应用里，附上**设置，引擎，诊断，查看日志，保存日志**得到的文件。
 在终端里，粘贴 `strata doctor` 的输出。从源码运行时，附上 Strata 文件夹里的 `strata-<model>.log`。
 如果是安全问题，请私下报告：[SECURITY.md](SECURITY.md)。
 
@@ -378,4 +348,4 @@ Strata 免费，采用 MIT 许可证。我在能拿到的各种硬件上开发�
 
 <a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a>
 
-有兴趣赞助 Strata？请通过 [GitHub](https://github.com/Niko1221) 联系我。
+有兴趣赞助 Strata？请通过 [GitHub](https://github.com/Asofwar) 联系我。
