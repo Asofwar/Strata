@@ -7211,8 +7211,8 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
         ok(f"KV cache: {a.kv or 'int8'}; MTP draft layer: the model file's own (token subset: {draft_vocab})")
         if fam.get("tuned"):                           # the fork's measured settings (PACK_TUNED)
             args += fam["tuned"]["args"]
-            ok("fork settings: window decode attention, FP16 prompt attention, K/V grown with the context, "
-               "loop recovery (docs/FORK.ru.md)")
+            ok("fork settings: window decode attention, INT8 prompt attention, K/V grown with the context, "
+               "expert arena locked in RAM, loop recovery (docs/FORK.ru.md)")
     else:
         args = ["--native", str(gguf), "--max-context", str(ctx), "--prefill", "auto", "--mtp", str(fam["mtp"])]
     if a.vram_reserve_mib is not None and pack_path:   # the pack path keeps it free itself
