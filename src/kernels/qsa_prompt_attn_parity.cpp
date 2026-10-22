@@ -429,7 +429,7 @@ int run_dense(int fmt, int64_t ctx, int64_t nq, int reps, bool sharp = false) { 
     std::vector<float> o((size_t) (nq * NH * HD)), nw(o.size());
     ck(cudaMemcpy(o.data(), d_old, o.size() * 4, cudaMemcpyDeviceToHost), "down");
     ck(cudaMemcpy(nw.data(), d_new, nw.size() * 4, cudaMemcpyDeviceToHost), "down");
-    // modes 1..3: STRATA_PROMPT_ATTN_FP16ACC=1..3; int8 K/V also 4, 5: STRATA_PROMPT_ATTN_DENSE_IMMA=2, 3
+    // modes 1..3: STRATA_PROMPT_ATTN_FP16ACC=1..3; int8 K/V also 4, 5, 6: STRATA_PROMPT_ATTN_DENSE_IMMA=2, 3, 4
     auto set_prec = [](int pr) {
         const char v[2] = {(char) ('0' + (pr <= 3 ? pr : pr - 2)), 0};
         const char* fa = pr >= 1 && pr <= 3 ? v : "";
@@ -442,8 +442,8 @@ int run_dense(int fmt, int64_t ctx, int64_t nq, int reps, bool sharp = false) { 
         if (im[0]) setenv("STRATA_PROMPT_ATTN_DENSE_IMMA", im, 1); else unsetenv("STRATA_PROMPT_ATTN_DENSE_IMMA");
 #endif
     };
-    const int n_modes = fmt == 1 ? 5 : 3;
-    std::vector<float> lp[6];   // the reduced-precision modes' outputs (lp[0] unused)
+    const int n_modes = fmt == 1 ? 6 : 3;
+    std::vector<float> lp[7];   // the reduced-precision modes' outputs (lp[0] unused)
     for (int pr = 1; pr <= n_modes; ++pr) {
         set_prec(pr);
         go(true, d_new);
@@ -452,7 +452,7 @@ int run_dense(int fmt, int64_t ctx, int64_t nq, int reps, bool sharp = false) { 
         ck(cudaMemcpy(lp[pr].data(), d_new, o.size() * 4, cudaMemcpyDeviceToHost), "down");
     }
     set_prec(0);
-    double err_old = 0, err_new = 0, ref_scale = 0, err_lp[6] = {0, 0, 0, 0, 0, 0};
+    double err_old = 0, err_new = 0, ref_scale = 0, err_lp[7] = {0, 0, 0, 0, 0, 0, 0};
     for (int64_t i = 0; i < nq; i += std::max<int64_t>(1, nq / 6)) {
         const int64_t w = ctx - nq + i + 1;
         for (int64_t h = 0; h < NH; h += 3) {
@@ -555,6 +555,11 @@ int run_dense(int fmt, int64_t ctx, int64_t nq, int reps, bool sharp = false) { 
                     "vs FP64 %.3g (FP32 %.3g); %.3f ms per chunk (%.2fx the FP32 dense)\n",
                     fin ? "ok" : "NOT FINITE", pr <= 3 ? "FP16ACC" : "DENSE_IMMA", pr <= 3 ? pr : pr - 2, mx, mx / scale, sum / (double) nw.size(), rel_sum / (double) n_rows,
                     rel_max, err_lp[pr], err_new, ms / reps, ms_new / ms);
+    }
+    if (n_modes >= 6) {   // DENSE_IMMA=4 against =3 (the same arithmetic but the V scale's reciprocal)
+        double mx = 0;
+        for (size_t i = 0; i < nw.size(); ++i) mx = std::max(mx, (double) std::fabs(lp[6][i] - lp[5][i]));
+        std::printf("  DENSE_IMMA=4 vs =3: max |d| %.3g (%.2g of scale)\n", mx, mx / scale);
     }
     cudaFree((void*) d_steps); cudaFree((void*) d_q); cudaFree(d_old); cudaFree(d_new);
     cudaFree((void*) pl.k_q); cudaFree((void*) pl.v_q); cudaFree((void*) pl.k_scale); cudaFree((void*) pl.v_scale);

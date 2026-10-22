@@ -2652,6 +2652,103 @@ could not be used (`ERR_NVGPUCTRPERM`: GPU performance counters need administrat
 cells over two blocks for the last wave (about 6% of a chunk's blocks idle in its last wave at 8192 queries) needs a
 scratch buffer in the prompt path's API and was not done.
 
+### `STRATA_PROMPT_ATTN_DENSE_IMMA=4`: `=3` with cheaper loads and a split last wave (opt-in, measured 2026-10-22)
+
+Nsight Compute 2026.3 (`ncu --set full`, the counters opened to all users on this PC) on `=3`, RTX 5080, 64K cells and
+8192 queries, the first launch in `qsa_prompt_attn_parity`:
+
+- 255 registers and 48 bytes of stack a thread: 293 M local-memory requests, 35% of the sectors in L1; two blocks
+  (8 warps) an SM, 16.7% occupancy; the tensor pipe busy 46% of the time, 0.46 instructions issued per cycle and
+  scheduler.
+- Cycles per issued instruction 4.29: issued 1.00, `wait` (fixed-latency dependencies) 1.26, math pipe throttle (the
+  tensor pipe busy) 0.55, short scoreboard (shared memory, shuffles, MUFU) 0.44, not selected 0.30, long scoreboard
+  0.26, dispatch 0.13, barrier 0.11.
+- By source line (a `-lineinfo` build, the warp samples): the cp.async address arithmetic took 24% of the samples and
+  15.5% of the instructions. Per 16-byte piece it shuffled the cell's page, which waited on the page-table load issued
+  just before it, and multiplied 64-bit row indices, twice per chunk (K, then V of the same cells). Then the MMAs
+  (~19%, mostly math throttle), p.v's joins (11% / 20% of the instructions), the quantization of p (9% / 12%), the
+  softmax (8% / 12.5%) and q.k's joins (6% / 12%).
+- SM active 95.4% of the elapsed cycles: 2,048 blocks of a chunk are 12.19 waves of 168, and in the last one most
+  slots are empty.
+
+`=4` keeps `=3`'s block, layout and arithmetic and changes three things:
+
+- warp 0 computes the chunk's 32 row indices once (lane = cell) into shared memory, its page-table load issued a chunk
+  ahead; a thread reads its 4 cells' rows with one 16-byte load and adds one product per piece, for K and for V;
+- 1 / (the chunk's largest V scale) is one `rcp.approx` instead of the IEEE division (within 1 ulp; p * v_scale / vmax
+  still rounds to at most 32766);
+- the last partial wave is split over the cells: its T items (the shortest rows, as the blocks run widest first) run
+  on wave / T blocks each, over whole chunks, and write unnormalized sums and (max, sum) to a scratch buffer that
+  `prompt_attn_tail_merge_kernel` combines. The buffer is one wave of 64 rows x 258 floats (11 MB on an 84-SM card),
+  allocated at the first split call on a device and kept; without room, or while the stream captures a graph, the
+  launch is not split. `STRATA_PROMPT_ATTN_TAIL=0` turns the split off (read per call).
+
+256 more bytes of shared memory (two blocks an SM still). Unset, the other 30 kernels of `qsa_prompt_attn.cu` compile
+to the same SASS (sm_120, `cuobjdump -sass` of the file built with and without the change). A pitfall found on the way:
+a call to `max(int, int)` in the new code changed the PTX of kernels it does not touch (an unsigned division became a
+signed one in `decode_attn_window_small_kernel`); plain conditionals keep them identical. The new code is guarded
+for the HIP build of the same file (no inline PTX, no occupancy call on AMD), but that build was not run (no ROCm on
+the test PC).
+
+The same profile on `=4`: 26.5 G instructions instead of 30.8 G, 98.6 M local-memory requests instead of 293 M, 172 M
+cycles instead of 212 M, the SM throughput 56% instead of 45%; the stall mix moved to the tensor pipe (math throttle
+0.75 cycles per instruction, long scoreboard 0.11). The MMA lines are now the largest share of the samples (29%).
+
+`qsa_prompt_attn_parity` (RTX 5080, int8 K/V, page size 4 unless noted; `=3` and `=4` in the same run, two runs):
+
+| | 64K, 8192 queries | 64K, peaked | 128K, 8192 queries | 16K, 2048 queries | 1,000 cells, 37 queries |
+|---|---|---|---|---|---|
+| `DENSE_IMMA=3` | 72.9-73.1 ms | 72.8 ms | 151.4-151.7 ms | 5.2-5.3 ms | 0.087-0.088 ms |
+| `DENSE_IMMA=4` | 62.2-62.3 ms | 62.2 ms | 128.9-129.0 ms | 3.9-4.0 ms | 0.034-0.037 ms |
+| `=4`, `STRATA_PROMPT_ATTN_TAIL=0` | 63.9 ms | 63.9 ms | - | - | 0.074 ms |
+
+So 1.17x on long chunks (8.25 TFLOP per 64K chunk: 113 -> 133 TFLOP/s), 1.33x at 16K and 2.4x on the short ragged
+chunk, where the split puts 16 blocks on each of its 10 items. The errors are `=3`'s to the digit: row error against
+FP32 8.9e-5 / 3.2e-4 (mean / max, rel. L2), max error against FP64 2.0e-4 (64K), 2.5e-4 (128K), 2.9e-4 (1,000 cells);
+`=4` against `=3` at most 9.6e-5 (2.6e-5 of the output scale) at 64K, from the reciprocal. Page sizes 3 and 512: the
+same errors as `=3`, 16K 3.9-4.1 ms against 5.2-6.3. (`=3` read 81.6-84.0 ms at 64K in a run the day before, with
+`=4` before the tail split at 72.4-74.1: the card's clock state differs between days, so compare within a run.)
+
+Whole engine, one downtime, a fresh engine per arm (Cyber-Tiel-Coder UD-IQ4_XS, RTX 5080 + i9-14900K, Windows 11,
+CUDA 13.4, the server's settings - `DENSE_IMMA=3`, `STRATA_ATTN_WINDOW_SMALL=1`, `--prefill auto` (8192-token chunks),
+`--kv-grow` - plus `--vram-reserve-mib 1472`), three prompts of each size, medians; the attention column is the prompt
+attention's GPU time from `STRATA_PREFILL_TIMING`:
+
+| | 64K | 130K | 200K | 200K after 115K |
+|---|---|---|---|---|
+| the server's settings (`DENSE_IMMA=3`), s | 12.68 | 31.70 | 57.59 | 32.55 |
+| + `STRATA_PROMPT_ATTN_DENSE_IMMA=4`, s | 11.87 | 28.32 | 53.84 | 30.49 |
+| speed-up | 1.07x | 1.12x | 1.07x | 1.07x |
+| attention GPU time, `=3` -> `=4`, s | 3.56 -> 2.99 | 13.78 -> 11.35 | 31.51 -> 26.98 | 20.88 -> 18.29 |
+
+The single prompts spread by 1-7% (200K with `=3`: 53.8, 57.6, 58.0 s; with `=4`: 53.7, 53.8, 54.3 s). Attention is
+still 41-62% of the prompt's GPU time at 130K-200K. Five of the 26 requests started with 407-962 MiB of VRAM free (the
+WDDM warning: the first 64K and the third 200K request of the first arm, the first and third 64K and the first 130K
+request of the second), so the 64K column is the least sure. The `=4` arm also had `STRATA_ATTN_WINDOW_SMALL=6` (windows of 5-6 tokens on the small
+kernel, which `attn_window_parity` times at 422-428 µs against 466-473 for the window kernel at 200K cells); its decode
+did not differ beyond the answers' spread (tok/s means of three 128-token answers, `=3` arm / `=4` arm: 130K 166.5 /
+168.8, 200K 171.2 / 154.3, 200K after 115K 163.7 / 186.9, 64K 251.4 / 255.4; single answers range 127-220), so that
+setting is not recommended from this run.
+
+Where a 200K decode window goes now (`STRATA_VERIFY_PROFILE=1 STRATA_DECODE_TIMING=1`, the server's settings, one
+request each, 128 tokens): from scratch, 63 windows of 2.22 queries (2.03 tokens) at 13.42 ms: the host waits 8.54 ms
+for the GPU, 2.23 ms per-layer host work (2.11 of it the CPU experts), 0.67 commit/emit, 0.87 draft. The GPU's 11.34
+ms: attention in the 10 QSA layers 3.38 ms (the largest stage; K/V of 200K cells are 2.05 GB a window, 2.1 ms at the
+card's ~960 GB/s), VRAM expert hits 1.63, the GDN layers' q/k/v GEMVs 1.08, waits for the CPU experts 0.87, the head
+0.55, routers 0.71, shared experts 0.66, out-projections 0.65. After 115K reused (42 windows of 3.36 queries, 18.46
+ms): attention 3.95 ms, but the waits for the CPU experts 4.50 ms (the pool read 39.8 GB/s and ran 5.09 experts per
+layer-window, against 43-57 GB/s and 1.6-2.4 in the other requests) - the slow pool reads of "The CPU experts at
+130K-200K context" above, not the attention. No cheap stage stood out: the attention is within 1.6x of reading K/V once at full
+bandwidth. An nsys trace of the same decode (`--trace=cuda`) showed only copies after the prompt: the decode runs as
+CUDA graphs, whose kernels need `--cuda-graph-trace=node`.
+
+What was tried and not kept: the page-table load one chunk ahead in `decode_attn_window_small_kernel`, whose shuffle
+waited on it (Nsight Compute, 200K cells: 28% of the warp samples at T <= 2, 16% at T = 3-4). Its outputs were the
+same, but four interleaved runs against the old build at 200K cells gave medians inside the noise (T = 1-4: 297 / 305 /
+377 / 360 against 293 / 293 / 359 / 373 µs) and slower at T = 6 and 8, so it was reverted: at T <= 2 the kernel reads
+K/V at 89% of the card's DRAM bandwidth (Nsight Compute), and at T = 3-4 it runs one block an SM (56 KB of shared
+memory) at 66%.
+
 ## Thread placement: `--aux-cpus` (Linux, off by default)
 
 The CPU pool pins its workers (one logical CPU per physical core) and the host thread pins itself to the pool's reserved
