@@ -3349,6 +3349,48 @@ workers fell asleep between layers while the host thread waited. Free RAM on the
 `--conversation-cache-mib`, helps there; the lock alone was not measured on such a request. Compare runs by medians
 over several starts, not by one request.
 
+### Deeper verify windows on agent traffic (measured 2026-10-22): keep `--spec 4`
+
+Drafts are accepted 74-85% of the time at `--spec 4`, so longer windows looked like the next decode lever. They are
+not, on this PC. The test replayed real agent turns (a live agent conversation at 34-88K, the same with a long file
+read inserted to reach 110-136K and 179-206K, and bench/agent-ru `write_file` turns at 12-19K; temperature 0.6, 512
+tokens) through one engine start per downtime. Each request set its own window caps with two new request keys, so
+every arm ran interleaved in the same engine:
+
+- `spec_t=M`: this request's MTP window cap (as `--mtp-max-t`); `spec_s=N`: its verify window cap (as `--spec` after
+  the suffix drafter's +2). Each is at most the start-up value; absent, the start-up caps. A start with `--spec 8
+  --mtp-max-t 8` then runs `--spec 4` as `spec_t=4 spec_s=6`. A request with its own caps learns in its own draft
+  policy. `--pipeline-windows` keeps the start-up caps.
+- `STRATA_SPEC_DEPTH=1` (diagnostic) now also prints, per request, the windows by size (MTP or lookup) with their
+  accepted drafts and their summed round times.
+
+Medians and totals (RTX 5080, Cyber-Tiel-Coder UD-IQ4_XS, the server's settings; full tables and the harness in
+[bench/results/2026-10-22-rtx5080-tiel-spec-depth](../bench/results/2026-10-22-rtx5080-tiel-spec-depth/README.md)):
+
+| context | `--spec 4` tok/s | `--spec 5` | `--spec 6` | `--spec 8` | lookup windows to 8, MTP 4 (`--spec 8 --mtp-max-t 4`) |
+|---|---|---|---|---|---|
+| 12-19K | 310.5 | 305.8 (0.991) | 304.7 (1.019) | 307.5 (1.008) | 313.8 vs 306.1 (1.031, 50 of 80 pairs faster) |
+| 34-88K | 234.2 | 242.6 (1.034) | 241.9 (1.035) | 235.5 (1.017) | 243.2 vs 238.6 (1.003, 37/72) |
+| 110-136K | 208.6 | 212.9 (1.005) | 207.3 (0.958) | 205.2 (0.958) | 214.1 vs 212.5 (0.986, 23/54) |
+| 179-206K | 189.8 | 185.3 (0.962) | 187.7 (1.006) | 184.4 (0.983) | 188.0 vs 191.2 (1.010, 28/53) |
+
+In brackets the median ratio to the control request with the same cut, repeat and seed (18-27 pairs for the deeper
+MTP arms, 3 repeats; the lookup column pools 3 + 6 repeats). Single requests spread by 20-40%, because the sampled
+answers differ between arms.
+
+- A deeper MTP chain was never faster beyond that spread. The draft layer stays good deep into the chain (drafts 5-7
+  are accepted 0.74-0.80 of the time when reached), but each row costs about as much as it brings. Forced window
+  sizes at 49.6K: 4 tokens 10.36 ms, 5 tokens 12.29 ms (+0.96 ms waiting for the GPU, +0.43 ms host time, mostly CPU
+  experts, +0.46 ms for the extra draft step; in a profiled run the attention, which leaves the 4-query small kernel,
+  took 0.55 ms more and the fifth token's routed experts in VRAM 0.50 ms more), 6 tokens 13.72 ms, 8 tokens 16.03 ms.
+- A gate that lets the MTP window grow past 4 tokens only while the drafts' joint probability stays at least 0.5 or
+  0.7 made those windows sure ones (4.1-6.3 tokens each), but still not faster than the control; it was not kept.
+  The old adaptive-cap branch was not ported for the same reason.
+- Lookup windows up to 8 with the MTP at 4 help a little at short context (+2.5%), where code is written out again,
+  and not at 110-206K, where this server spends most of its decode. Not applied to the server's config.
+
+Not covered: other cards, Linux, `--spec-min-p` other than 0.50 with deeper caps, greedy requests.
+
 ## CUDA opt-in switches measured for 0.1.45 (RTX 3060 and RTX A4000, sm_86; all off unless you set them)
 
 Ported from open pull requests and A/B'd as whole engine runs against the default (a fresh engine per side, IQ3_XXS, 5 pairs, medians;
