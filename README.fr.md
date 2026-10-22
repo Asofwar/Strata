@@ -7,6 +7,8 @@
 
 <p align="center"><a href="README.md">English</a> · <a href="README.ru.md">Русский</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.de.md">Deutsch</a> · <b>Français</b> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português</a></p>
 
+<h1 align="center">Strata Turbo</h1>
+
 <h3 align="center">Des agents de code avec 262K de contexte sur une seule carte graphique de 16 GB</h3>
 
 <p align="center">Fork de <a href="https://github.com/Niko1221/Strata">Strata</a> par Asofwar · Windows + NVIDIA · gratuit et open source</p>
@@ -45,8 +47,8 @@ irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
 ```
 
 Le script télécharge la [dernière version](https://github.com/Asofwar/Strata/releases/latest), la vérifie avec
-`SHA256SUMS.txt`, la décompresse dans `%LOCALAPPDATA%\Strata-Asofwar` et lance le setup, qui demande le modèle et le télécharge
-(Cyber-Tiel : environ 17 GB). À la main : décompressez `Strata-Asofwar-<version>-windows-cuda13.zip` dans un dossier sans
+`SHA256SUMS.txt`, la décompresse dans `%LOCALAPPDATA%\Strata-Turbo` et lance le setup, qui demande le modèle et le télécharge
+(Cyber-Tiel : environ 17 GB). À la main : décompressez `Strata-Turbo-<version>-windows-cuda13.zip` dans un dossier sans
 espaces et lancez `START-HERE.bat --setup --family cyber-tiel`.
 
 **Linux** (non testé par le fork ; le moteur se compile depuis les sources) :
@@ -104,7 +106,7 @@ ont la leur ([lesquelles](docs/HOW_IT_WORKS.md#license)).
 
 ## Soutenir le projet
 
-Strata Asofwar est gratuit. Si le fork vous aide, soutenez son travail avec des Gram (TON) sur son portefeuille Telegram :
+Strata Turbo est gratuit. Si le fork vous aide, soutenez son travail avec des Gram (TON) sur son portefeuille Telegram :
 
 <p><img src="docs/media/donate-gram-qr.png" alt="Gram (TON), portefeuille Telegram : QR" width="160"></p>
 

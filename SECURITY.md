@@ -80,7 +80,7 @@ irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
 ```
 
 Piping a script into a shell runs whatever the server sends, so it deserves the same care as running any downloaded program.
-The Windows script downloads `Strata-Asofwar-<version>-windows-cuda13.zip` from the latest release, checks it against the release's
+The Windows script downloads `Strata-Turbo-<version>-windows-cuda13.zip` from the latest release, checks it against the release's
 `SHA256SUMS.txt`, unzips it and runs `START-HERE.bat`. The Linux script downloads the release's source and runs `./setup.sh`, which
 builds the engine on your PC (the fork has not tested Linux). The fork does not publish the
 Terminal archive, `install-manifest.txt` or a signed feed.

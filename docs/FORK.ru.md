@@ -1,4 +1,4 @@
-# Форк Asofwar/Strata
+# Strata Turbo — форк Asofwar/Strata
 
 Это форк [Niko1221/Strata](https://github.com/Niko1221/Strata). Он стоит на upstream-теге `v0.2.1.1` (коммит
 `9ae93f7b`, движок 0.1.46, Control 0.1.46.1); свои коммиты форка показывает `git log --oneline 9ae93f7b..HEAD`.
@@ -284,7 +284,7 @@ Cyber-Tiel-Coder UD-IQ4_XS ([QWEN36_PACK.md](QWEN36_PACK.md#what-setup-writes-fo
 ## Установка
 
 Способы получить код форка (все берут файлы из [релизов форка](https://github.com/Asofwar/Strata/releases)):
-zip релиза `Strata-Asofwar-<версия>-windows-cuda13.zip` (Windows, NVIDIA RTX 20 и новее), однострочный установщик
+zip релиза `Strata-Turbo-<версия>-windows-cuda13.zip` (Windows, NVIDIA RTX 20 и новее), однострочный установщик
 (`irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex` на Windows, `curl -fsSL
 https://github.com/Asofwar/Strata/releases/latest/download/install.sh | sh` на Linux) или клон
 `git clone https://github.com/Asofwar/Strata.git`. Подробнее: [README.ru.md](../README.ru.md#установка). Установщики
@@ -314,7 +314,7 @@ START-HERE.bat --setup --family ornith-abl
 
 Релизы форка: https://github.com/Asofwar/Strata/releases. В каждом лежат:
 
-- `Strata-Asofwar-<версия>-windows-cuda13.zip` — исходники форка и готовый движок в папке `engine\`
+- `Strata-Turbo-<версия>-windows-cuda13.zip` — исходники форка и готовый движок в папке `engine\`
   (CUDA 13.4, видеокарты NVIDIA RTX 20 и новее: sm_75, 86, 89, 120 и PTX для более новых). Распаковать в папку
   без пробелов в пути и запустить `START-HERE.bat`: setup видит готовый движок (`engine\BUILD.json`,
   `"source": "release"`) и не собирает и не скачивает другой.

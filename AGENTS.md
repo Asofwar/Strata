@@ -2,7 +2,7 @@
 
 Strata runs the Qwen3.8-Flash-Next mixture-of-experts model (and its Coder, Swift 1.5, Unsloth, Gyro and NVFP4
 variants, and Qwen3.6-35B-A3B) on a normal PC: one NVIDIA or AMD graphics card plus system RAM on Windows or Linux,
-or an Apple Silicon Mac. It is Asofwar's fork of Niko1221/Strata (base: upstream 0.2.1.1, engine 0.1.46.1; the fork's
+or an Apple Silicon Mac. It is Strata Turbo, Asofwar's fork of Niko1221/Strata (base: upstream 0.2.1.1, engine 0.1.46.1; the fork's
 releases have their own versions from v1.0.0). It has three parts:
 
 - **The app** (`apps/desktop`, the Tauri shell; `apps/host`, the Node host and the web UI). It is for people who do
@@ -15,7 +15,7 @@ releases have their own versions from v1.0.0). It has three parts:
 
 ## Installing Strata for a user
 
-This is Asofwar's fork (https://github.com/Asofwar/Strata). Follow **[docs/AI_SETUP.md](docs/AI_SETUP.md)**. For an agent
+This is Strata Turbo, Asofwar's fork (https://github.com/Asofwar/Strata). Follow **[docs/AI_SETUP.md](docs/AI_SETUP.md)**. For an agent
 that has a shell, the short version is:
 
 1. Get the fork. Setup downloads the ready engine on Windows with an NVIDIA RTX 20 series card or newer (driver 580 or newer);
@@ -26,7 +26,7 @@ that has a shell, the short version is:
    ```
 
    Without git, download https://github.com/Asofwar/Strata/archive/refs/heads/main.zip and unzip it. On Windows the release
-   zip `Strata-Asofwar-<version>-windows-cuda13.zip` from https://github.com/Asofwar/Strata/releases/latest holds the same
+   zip `Strata-Turbo-<version>-windows-cuda13.zip` from https://github.com/Asofwar/Strata/releases/latest holds the same
    code and a ready engine.
 2. Check the PC. Nothing is installed except Python and the `.venv`:
 

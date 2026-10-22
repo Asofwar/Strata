@@ -4,7 +4,7 @@ Everything about installing, starting, updating and configuring Strata, on Windo
 or an AMD graphics card or an Apple Silicon Mac. The short version is in the [README](../README.md#install). An AI
 coding assistant can do all of this for you with [AI_SETUP.md](AI_SETUP.md).
 
-This is Asofwar's fork, and it installs from the fork's [releases](https://github.com/Asofwar/Strata/releases). There are three
+This is Strata Turbo, Asofwar's fork, and it installs from the fork's [releases](https://github.com/Asofwar/Strata/releases). There are three
 ways. Take the first one on a Windows PC with an NVIDIA RTX card:
 
 1. **[The release zip](#the-release-zip-windows-nvidia):** the fork's code and a ready engine in one zip. Unzip it and run
@@ -53,7 +53,7 @@ packages during an update.
 For a Windows 10 / 11 PC with an NVIDIA RTX 20 series card or newer and driver 580 or newer. The files are on the
 [latest release](https://github.com/Asofwar/Strata/releases/latest):
 
-- `Strata-Asofwar-<version>-windows-cuda13.zip`: the fork's code and a ready engine (CUDA 13). This is the one to download.
+- `Strata-Turbo-<version>-windows-cuda13.zip`: the fork's code and a ready engine (CUDA 13). This is the one to download.
 - `strata-windows-x64.zip`: the engine alone. Setup downloads it by itself when the folder has no engine or an outdated
   one, and checks it against the release's SHA-256, so you do not need it.
 - `SHA256SUMS.txt`: the checksums of the release's files.
@@ -75,7 +75,7 @@ Windows (PowerShell), NVIDIA RTX 20 or newer:
 irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
 ```
 
-It downloads `Strata-Asofwar-<version>-windows-cuda13.zip` from the latest release, checks it against `SHA256SUMS.txt`,
+It downloads `Strata-Turbo-<version>-windows-cuda13.zip` from the latest release, checks it against `SHA256SUMS.txt`,
 unzips it and runs `START-HERE.bat`.
 
 Linux (the fork has not tested Linux):
@@ -298,7 +298,7 @@ any PC (to try it). Problems and results on real hardware are welcome as GitHub 
 
 ## Updating
 
-**The fork's release zip:** download the newer `Strata-Asofwar-<version>-windows-cuda13.zip`, unzip it into a new folder and run
+**The fork's release zip:** download the newer `Strata-Turbo-<version>-windows-cuda13.zip`, unzip it into a new folder and run
 `START-HERE.bat`. The models in `Strata-data` are found and reused, and nothing big is downloaded again. Do not use
 `strata update`: the fork publishes no signed update feed, so it finds nothing, and with upstream's feed it would install
 upstream's engine, which has no pack path for the fork's models.

@@ -1,9 +1,9 @@
 #!/bin/sh
-# Strata Asofwar (the fork) - Linux installer.
+# Strata Turbo (the fork) - Linux installer.
 # Usage:
 #     curl -fsSL https://github.com/Asofwar/Strata/releases/latest/download/install.sh | sh
 # What it does: finds the fork's latest release on GitHub, downloads that release's source, unpacks it into
-# ~/Strata-Asofwar/<version> and starts ./setup.sh, which builds the engine from source (CUDA toolkit needed) and asks
+# ~/Strata-Turbo/<version> and starts ./setup.sh, which builds the engine from source (CUDA toolkit needed) and asks
 # which model to set up. The fork has not tested Linux; Windows has a ready engine in the release.
 # Options (environment variables, all optional):
 #     STRATA_VERSION=v1.0.0            a given release instead of the latest
@@ -13,21 +13,23 @@
 set -eu
 
 REPO="Asofwar/Strata"
-die() { echo "strata-asofwar installer: $*" >&2; exit 1; }
+die() { echo "strata-turbo installer: $*" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || die "curl is needed."
 command -v tar >/dev/null 2>&1 || die "tar is needed."
 [ "$(uname -s)" = "Linux" ] || die "this is the Linux installer; on Windows use install.ps1."
 
-echo "Strata Asofwar installer"
+echo "Strata Turbo installer"
 if [ -n "${STRATA_VERSION:-}" ]; then
   tag="$STRATA_VERSION"
 else
-  tag=$(curl -fsSL -H "User-Agent: strata-asofwar-installer" "https://api.github.com/repos/$REPO/releases/latest" \
+  tag=$(curl -fsSL -H "User-Agent: strata-turbo-installer" "https://api.github.com/repos/$REPO/releases/latest" \
         | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1) || true
   [ -n "$tag" ] || die "could not read the latest release of $REPO. Check your internet connection."
 fi
 version="${tag#v}"
-home_dir="${STRATA_HOME:-$HOME/Strata-Asofwar}"
+# an install from before the rename (~/Strata-Asofwar) keeps its folder, so its models are reused
+if [ -z "${STRATA_HOME:-}" ] && [ -d "$HOME/Strata-Asofwar" ]; then home_dir="$HOME/Strata-Asofwar"
+else home_dir="${STRATA_HOME:-$HOME/Strata-Turbo}"; fi
 dest="$home_dir/$version"
 echo "  Release: $tag"
 
@@ -42,7 +44,7 @@ else
   mkdir -p "$work/unpack"
   tar -xzf "$work/src.tar.gz" -C "$work/unpack" || die "the archive could not be unpacked (is the disk full?)."
   inner=$(find "$work/unpack" -mindepth 1 -maxdepth 1 -type d | head -n 1)
-  [ -n "$inner" ] && [ -f "$inner/setup.sh" ] || die "the archive does not look like a Strata Asofwar release."
+  [ -n "$inner" ] && [ -f "$inner/setup.sh" ] || die "the archive does not look like a Strata Turbo release."
   mkdir -p "$home_dir"
   mv "$inner" "$dest"
   chmod +x "$dest/setup.sh" 2>/dev/null || true

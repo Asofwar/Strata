@@ -7,6 +7,8 @@
 
 <p align="center"><a href="README.md">English</a> · <a href="README.ru.md">Русский</a> · <a href="README.zh-CN.md">简体中文</a> · <b>日本語</b> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português</a></p>
 
+<h1 align="center">Strata Turbo</h1>
+
 <h3 align="center">16 GB のグラフィックスカード 1 枚で、262K コンテキストのコーディングエージェント</h3>
 
 <p align="center"><a href="https://github.com/Niko1221/Strata">Strata</a> の Asofwar 版フォーク · Windows + NVIDIA · 無料のオープンソース</p>
@@ -44,8 +46,8 @@ irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
 ```
 
 スクリプトは[最新リリース](https://github.com/Asofwar/Strata/releases/latest)をダウンロードし、`SHA256SUMS.txt` と照合して
-`%LOCALAPPDATA%\Strata-Asofwar` に展開し、setup を起動します。setup はモデルを尋ねてダウンロードします（Cyber-Tiel：約 17 GB）。
-手動の場合は、`Strata-Asofwar-<version>-windows-cuda13.zip` をスペースを含まないフォルダーに展開し、
+`%LOCALAPPDATA%\Strata-Turbo` に展開し、setup を起動します。setup はモデルを尋ねてダウンロードします（Cyber-Tiel：約 17 GB）。
+手動の場合は、`Strata-Turbo-<version>-windows-cuda13.zip` をスペースを含まないフォルダーに展開し、
 `START-HERE.bat --setup --family cyber-tiel` を実行してください。
 
 **Linux**（フォークでは未検証。エンジンはソースからビルドします）：
@@ -103,7 +105,7 @@ Strata は [Niko1221](https://github.com/Niko1221/Strata) によるものです�
 
 ## 支援のお願い
 
-Strata Asofwar は無料です。役に立ったら、Telegram ウォレットへの Gram (TON) の送金で、フォークの開発を支援してください：
+Strata Turbo は無料です。役に立ったら、Telegram ウォレットへの Gram (TON) の送金で、フォークの開発を支援してください：
 
 <p><img src="docs/media/donate-gram-qr.png" alt="Gram (TON)、Telegram ウォレット：QR" width="160"></p>
 

@@ -1,9 +1,9 @@
-# Strata Asofwar (the fork) - Windows installer.
+# Strata Turbo (the fork) - Windows installer.
 # Usage (PowerShell):
 #     irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
-# What it does: finds the fork's release on GitHub, downloads Strata-Asofwar-<version>-windows-cuda13.zip (the fork's
+# What it does: finds the fork's release on GitHub, downloads Strata-Turbo-<version>-windows-cuda13.zip (the fork's
 # code with a ready engine for NVIDIA RTX 20 and newer), checks it against the release's SHA256SUMS.txt, unpacks it into
-# %LOCALAPPDATA%\Strata-Asofwar\<version> and starts START-HERE.bat, which asks which model to set up.
+# %LOCALAPPDATA%\Strata-Turbo\<version> and starts START-HERE.bat, which asks which model to set up.
 # Options (environment variables, all optional):
 #     $env:STRATA_VERSION = 'v1.0.0'      a given release instead of the latest
 #     $env:STRATA_HOME = 'D:\Strata'      where to unpack (a path without spaces)
@@ -14,39 +14,42 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-function Die([string]$msg) { [Console]::Error.WriteLine("strata-asofwar installer: $msg"); throw "strata-asofwar installer stopped" }
+function Die([string]$msg) { [Console]::Error.WriteLine("strata-turbo installer: $msg"); throw "strata-turbo installer stopped" }
 
 $repo = 'Asofwar/Strata'
 if ([Environment]::OSVersion.Platform -ne 'Win32NT') { Die 'this is the Windows installer; on Linux use install.sh.' }
 $arch = $env:PROCESSOR_ARCHITEW6432; if (-not $arch) { $arch = $env:PROCESSOR_ARCHITECTURE }
 if ($arch -ne 'AMD64') { Die "this release has an engine for Windows on x64 only (this PC: $arch)." }
 
-Write-Host 'Strata Asofwar installer'
+Write-Host 'Strata Turbo installer'
 $gpu = ''
 try { $gpu = (Get-CimInstance Win32_VideoController | Where-Object { $_.Name -match 'NVIDIA' } | Select-Object -First 1 -ExpandProperty Name) } catch { }
 if ($gpu) { Write-Host "  Graphics: $gpu" }
 else { Write-Host '  No NVIDIA card found. The ready engine in this release needs NVIDIA RTX 20 or newer (driver 580+); setup can still build one from source.' }
 
 $api = if ($env:STRATA_VERSION) { "https://api.github.com/repos/$repo/releases/tags/$($env:STRATA_VERSION)" } else { "https://api.github.com/repos/$repo/releases/latest" }
-try { $rel = Invoke-RestMethod -UseBasicParsing -Uri $api -Headers @{ 'User-Agent' = 'strata-asofwar-installer' } }
+try { $rel = Invoke-RestMethod -UseBasicParsing -Uri $api -Headers @{ 'User-Agent' = 'strata-turbo-installer' } }
 catch { Die "could not read the release list ($api). Check your internet connection." }
-$zipAsset = $rel.assets | Where-Object { $_.name -like 'Strata-Asofwar-*-windows-cuda13.zip' } | Select-Object -First 1
+# releases up to 1.1.0 named the package Strata-Asofwar-*, later ones Strata-Turbo-*
+$zipAsset = $rel.assets | Where-Object { $_.name -like 'Strata-Turbo-*-windows-cuda13.zip' -or $_.name -like 'Strata-Asofwar-*-windows-cuda13.zip' } | Select-Object -First 1
 $sumAsset = $rel.assets | Where-Object { $_.name -eq 'SHA256SUMS.txt' } | Select-Object -First 1
-if (-not $zipAsset -or -not $sumAsset) { Die "release $($rel.tag_name) has no Windows package (Strata-Asofwar-*-windows-cuda13.zip and SHA256SUMS.txt)." }
+if (-not $zipAsset -or -not $sumAsset) { Die "release $($rel.tag_name) has no Windows package (Strata-Turbo-*-windows-cuda13.zip and SHA256SUMS.txt)." }
 $version = $rel.tag_name.TrimStart('v')
 Write-Host "  Release: $($rel.tag_name) ($([math]::Round($zipAsset.size / 1MB)) MB)"
 
-$homeDir = if ($env:STRATA_HOME) { $env:STRATA_HOME } else { Join-Path $env:LOCALAPPDATA 'Strata-Asofwar' }
+# an install from before the rename (Strata-Asofwar) keeps its folder, so its models in Strata-data are reused
+$legacy = Join-Path $env:LOCALAPPDATA 'Strata-Asofwar'
+$homeDir = if ($env:STRATA_HOME) { $env:STRATA_HOME } elseif (Test-Path $legacy) { $legacy } else { Join-Path $env:LOCALAPPDATA 'Strata-Turbo' }
 if ($homeDir -match '\s') {
     if ($env:STRATA_HOME) { Die "STRATA_HOME has a space in its path ($homeDir); the engine's build tools need a path without spaces." }
-    $homeDir = 'C:\Strata-Asofwar'
+    $homeDir = if (Test-Path 'C:\Strata-Asofwar') { 'C:\Strata-Asofwar' } else { 'C:\Strata-Turbo' }
     Write-Host "  Your profile path has a space, so the install goes to $homeDir"
 }
 $dest = Join-Path $homeDir $version
 if (Test-Path (Join-Path $dest 'START-HERE.bat')) {
     Write-Host "  $($rel.tag_name) is already unpacked in $dest"
 } else {
-    $work = Join-Path ([IO.Path]::GetTempPath()) ("strata-asofwar-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    $work = Join-Path ([IO.Path]::GetTempPath()) ("strata-turbo-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Path $work | Out-Null
     try {
         $zip = Join-Path $work $zipAsset.name
@@ -66,7 +69,7 @@ if (Test-Path (Join-Path $dest 'START-HERE.bat')) {
         try { Expand-Archive -LiteralPath $zip -DestinationPath $unpack -Force }
         catch { Die 'the archive could not be unpacked (is the disk full?). Nothing was installed.' }
         $inner = Get-ChildItem $unpack -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'START-HERE.bat') } | Select-Object -First 1
-        if (-not $inner) { Die 'the archive does not look like a Strata Asofwar package.' }
+        if (-not $inner) { Die 'the archive does not look like a Strata Turbo package.' }
         New-Item -ItemType Directory -Force -Path $homeDir | Out-Null
         Move-Item $inner.FullName $dest
         Write-Host "  Unpacked to $dest"

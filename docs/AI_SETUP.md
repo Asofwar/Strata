@@ -75,7 +75,7 @@ next to the Strata folder (or to `--data-dir <path>`, for example on another dri
 
 - **Windows with an NVIDIA RTX 20 series card or newer:** setup downloads the ready engine (`strata-windows-x64.zip`)
   from the fork's [latest release](https://github.com/Asofwar/Strata/releases/latest) and checks its SHA-256, so nothing
-  is compiled. The release also has `Strata-Asofwar-<version>-windows-cuda13.zip`, the fork's code and that engine in one
+  is compiled. The release also has `Strata-Turbo-<version>-windows-cuda13.zip`, the fork's code and that engine in one
   zip; unzip it instead of cloning if you prefer.
 - **Linux, Mac, AMD, Intel:** setup builds the engine from source on the PC. The fork has not tested these.
 - The one-line installers (`irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex`,

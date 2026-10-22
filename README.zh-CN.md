@@ -7,6 +7,8 @@
 
 <p align="center"><a href="README.md">English</a> · <a href="README.ru.md">Русский</a> · <b>简体中文</b> · <a href="README.ja.md">日本語</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português</a></p>
 
+<h1 align="center">Strata Turbo</h1>
+
 <h3 align="center">在一张 16 GB 显卡上运行 262K 上下文的编程智能体</h3>
 
 <p align="center">Asofwar 维护的 <a href="https://github.com/Niko1221/Strata">Strata</a> 分支 · Windows + NVIDIA · 免费开源</p>
@@ -44,8 +46,8 @@ irm https://github.com/Asofwar/Strata/releases/latest/download/install.ps1 | iex
 ```
 
 脚本会下载[最新版本](https://github.com/Asofwar/Strata/releases/latest)，用 `SHA256SUMS.txt` 校验，解压到
-`%LOCALAPPDATA%\Strata-Asofwar`，然后启动 setup；setup 会询问要用的模型并下载（Cyber-Tiel：约 17 GB）。
-手动安装：把 `Strata-Asofwar-<version>-windows-cuda13.zip` 解压到不含空格的文件夹，再运行
+`%LOCALAPPDATA%\Strata-Turbo`，然后启动 setup；setup 会询问要用的模型并下载（Cyber-Tiel：约 17 GB）。
+手动安装：把 `Strata-Turbo-<version>-windows-cuda13.zip` 解压到不含空格的文件夹，再运行
 `START-HERE.bat --setup --family cyber-tiel`。
 
 **Linux**（本分支未测试；引擎需从源码构建）：
@@ -103,7 +105,7 @@ Strata 由 [Niko1221](https://github.com/Niko1221/Strata) 开发；本分支在�
 
 ## 支持本项目
 
-Strata Asofwar 免费。如果它对你有帮助，欢迎用 Gram (TON) 打赏到分支的 Telegram 钱包，支持分支的工作：
+Strata Turbo 免费。如果它对你有帮助，欢迎用 Gram (TON) 打赏到分支的 Telegram 钱包，支持分支的工作：
 
 <p><img src="docs/media/donate-gram-qr.png" alt="Gram (TON)，Telegram 钱包：二维码" width="160"></p>
 
