@@ -228,6 +228,15 @@ def http(url, body=None, timeout=3600.0):
         return json.loads(r.read())
 
 
+def body_arg(text):
+    """--body: JSON, or @<file> holding it (Windows PowerShell 5.1 drops the quotes of a JSON argument)."""
+    if not text:
+        return {}
+    if text.startswith("@"):
+        text = Path(text[1:]).read_text(encoding="utf-8-sig")
+    return json.loads(text)
+
+
 def judge(it, msg):
     """(malformed reason or "", fidelity reason or "")."""
     calls = msg.get("tool_calls") or []
@@ -262,9 +271,9 @@ def judge(it, msg):
 def run(a):
     """Every item with each arm in turn (an arm is a tag and its request fields), so a speed difference between the
     arms is not the model's warm-up or the expert cache settling."""
-    arms = [(a.tag, json.loads(a.body) if a.body else {})]
+    arms = [(a.tag, body_arg(a.body))]
     for tag, body in zip(a.pair[0::2], a.pair[1::2]):
-        arms.append((tag, json.loads(body) if body else {}))
+        arms.append((tag, body_arg(body)))
     done = {}
     for tag, _ in arms:
         path = HERE / "results" / f"{tag}.jsonl"
@@ -328,8 +337,10 @@ def report(tags):
         rates = sorted(r["decode_tok_s"] for r in rows if r.get("decode_tok_s"))
         mean = sum(rates) / len(rates) if rates else 0.0
         med = rates[len(rates) // 2] if rates else 0.0
-        print(f"{tag}: {n} replies, malformed {len(bad)} ({100 * len(bad) / max(1, n):.1f}%), fidelity misses "
-              f"{len(fid)}, decode tok/s mean {mean:.1f} median {med:.1f} (n={len(rates)})")
+        wrong_tool = sum(r["malformed"].startswith("no ") for r in bad)
+        print(f"{tag}: {n} replies, malformed {len(bad)} ({100 * len(bad) / max(1, n):.1f}%: {len(bad) - wrong_tool} "
+              f"broken arguments, {wrong_tool} another tool), fidelity misses {len(fid)}, right calls "
+              f"{n - len(bad) - len(fid)}, decode tok/s mean {mean:.1f} median {med:.1f} (n={len(rates)})")
         for r in bad:
             print(f"   MALFORMED {r['id']} #{r['sample']}: {r['malformed']}")
         for r in fid:

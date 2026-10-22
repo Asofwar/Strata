@@ -55,6 +55,15 @@ def load_tokenizer(path: Path):
     return ST.Tokenizer(tokens, merges, types)
 
 
+def body_arg(text):
+    """--body: JSON, or @<file> holding it (Windows PowerShell 5.1 drops the quotes of a JSON argument)."""
+    if not text:
+        return {}
+    if text.startswith("@"):
+        text = Path(text[1:]).read_text(encoding="utf-8-sig")
+    return json.loads(text)
+
+
 def http(url, body=None, timeout=3600.0):
     data = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
@@ -248,7 +257,7 @@ def main():
             else:
                 messages, tools = [{"role": "user", "content": it["prompt"]}], None
             try:
-                out, wall, last = chat(a.url, messages, tools, a.max_tokens, json.loads(a.body) if a.body else None)
+                out, wall, last = chat(a.url, messages, tools, a.max_tokens, body_arg(a.body))
                 msg = parse_message(out)
                 error = None
             except (OSError, ValueError, KeyError) as e:

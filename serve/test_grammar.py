@@ -95,7 +95,10 @@ class ToolGrammar(unittest.TestCase):
         cls.eos = {cls.tok.encode("<|im_end|>", parse_special=True)[0]}
         cls.cache = {}
 
+    strict = True
+
     def session(self, tools=TOOLS, **kw):
+        kw.setdefault("strict", self.strict)
         t = self.tok
         tc = t.encode("<tool_call>")
         te = t.encode("</think>")
@@ -227,6 +230,7 @@ class Protocol(unittest.TestCase):
         cls.eos = {cls.tok.encode("<|im_end|>", parse_special=True)[0]}
 
     def session(self, tools=TOOLS, **kw):
+        kw.setdefault("strict", True)
         return G.build_session(self.tok, self.eos, tools=tools, tool_call_id=self.tok.id_of("<tool_call>"),
                                think_end=self.tok.id_of("</think>"), **kw)
 
@@ -421,7 +425,7 @@ class ServerWithMasks(unittest.TestCase):
         self.assertIsInstance(calls[0]["command"], str)
 
     def test_on_gives_a_valid_call(self):
-        calls, eng = self.run_reply(True)
+        calls, eng = self.run_reply("strict")
         self.assertTrue(eng.keys[0].startswith(" grammar="))
         self.assertEqual(len(calls), 1)
         args = calls[0]
@@ -452,6 +456,30 @@ class ServerWithMasks(unittest.TestCase):
         calls, _ = self.run_reply(True, script=script, thinking=True)
         self.assertEqual(len(calls), 1)
         self.assertIsInstance(calls[0]["command"], list)
+
+
+@unittest.skipUnless(HAVE_LLG, "llguidance is not installed")
+class SoftValues(ToolGrammar):
+    """The default (soft) mode: a non-string value the model starts as JSON is held to its schema; one it starts as
+    plain text is kept as text, as without the grammar."""
+    strict = False
+
+    def test_numbers_and_booleans(self):
+        self.good(call("shell", ("command", '["x"]'), ("timeout_ms", "-12")))
+        for n in ("1.5", '"10"', "01", "1e3"):
+            self.bad(call("shell", ("command", '["x"]'), ("timeout_ms", n)))
+        self.good(call("shell", ("command", '["x"]'), ("with_escalated_permissions", "yes")))   # text stays text
+
+    def test_structure(self):
+        self.good(call("shell", ("command", "ls -la")))                                   # text: kept as written
+        self.bad(call("shell", ("command", '["echo\nhi"]')))                            # JSON started: held to it
+        self.bad(call("shell", ("command", "[]")))
+        self.bad(call("shell", ("cmd", '["x"]')))
+        self.bad(call("shell"))
+
+    def test_nested_enum_ref(self):
+        self.bad(call("update_plan", ("plan", '[{"step": "a", "status": "done"}]')))
+        self.good(call("configure", ("mode", "fast"), ("opts", '{"inner": {"on": true}}'), ("tags", "a, b")))
 
 
 @unittest.skipUnless(HAVE_LLG and os.environ.get("STRATA_GRAMMAR_TOKENIZER"), "STRATA_GRAMMAR_TOKENIZER is not set")

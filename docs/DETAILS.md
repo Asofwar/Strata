@@ -2973,12 +2973,15 @@ above still runs.
 ### Constrained decoding: tool calls and JSON under a grammar (opt-in)
 
 `"constrained_tools": true` in `strata-<model>.json` makes every tool call follow the request's tool list while it is
-generated: the function is one of the request's tools, every parameter is one of that tool's, each at most once, every
-required one is there, and a value that is not a string is JSON that matches the parameter's own schema (types,
-enums, required keys inside objects, `additionalProperties: false`, ranges). `"constrained_json": true` does the same
-for a `response_format` `json_object` / `json_schema` answer. A request can turn either on or off for itself with the
-same key (`"constrained_tools": false` in the request body). Both are off by default: then nothing is sent to the
-engine and a reply is byte for byte what it was.
+generated: the function is one of the request's tools, every parameter is one of that tool's, each at most once, and
+every required one is there. A non-string value that the model starts as JSON (a bracket, a brace, a quote, a digit)
+must then be JSON that matches the parameter's own schema (types, enums, required keys inside objects,
+`additionalProperties: false`, ranges); one it starts as plain text stays that text, as without the grammar.
+`"constrained_tools": "strict"` forces JSON for every non-string value as well (see the measurement below for why
+this is not the default). `"constrained_json": true` does the same for a `response_format` `json_object` /
+`json_schema` answer. A request can turn either on or off for itself with the same key (`"constrained_tools": false`
+in the request body). Both are off by default: then nothing is sent to the engine and a reply is byte for byte what
+it was. The engine's INFO line has a new field, `grammar=1`.
 
 It needs the Python package `llguidance` (`python -m pip install llguidance`; setup does not add it) and a CUDA or HIP
 engine that says `grammar=1` in its INFO line. Without them, or with `--batch`, the request runs unconstrained and the
@@ -3005,6 +3008,40 @@ How it works:
   exponent (`1e3`) is refused where the schema gives the number a `minimum` or `maximum` (llguidance); a
   `json_schema` answer on `/v1/responses` with tools stays checked afterwards only (the answer may be a call instead);
   the SYCL and Metal engines do not have it.
+
+Measured (2026-10-22, RTX 5080 + i9-14900K, Cyber-Tiel-Coder UD-IQ4_XS, the run-tiel-main config without the
+conversation disk, `--spec 4` MTP; `bench/tool-grammar/stress.py`: 50 prompts that each ask for one call with quotes,
+backslashes, newlines and tabs, Cyrillic, CJK and emoji, JSON inside a string, the template's own tags, SQL quoting or
+long code; one reply per prompt and arm, the arms alternating prompt by prompt):
+
+| Sampling | Arm | Broken arguments | Another tool called | Payload not as asked | Right calls | Decode tok/s (mean) |
+|---|---|---|---|---|---|---|
+| model card (T 1.0, presence 1.5) | off | 5 | 11 | 2 | 32 | 317.5 |
+| model card | strict | 0 | 12 | 10 | 28 | 321.7 |
+| model card | off (2nd run) | 8 | 9 | 2 | 31 | 321.6 |
+| model card | on (soft) | 4 | 12 | 4 | 30 | 319.6 |
+| T 0.6, presence 0 | off | 5 | 8 | 6 | 31 | 330.8 |
+| T 0.6 | strict | 0 | 10 | 8 | 32 | 331.1 |
+| T 0.6 | off (2nd run) | 4 | 9 | 7 | 30 | 377.7 |
+| T 0.6 | on (soft) | 7 | 13 | 4 | 26 | 367.5 |
+
+- Every broken argument in the off arms was the same mistake: a shell command written as one string where the tool's
+  schema asks for an argv array. None was JSON with bad escaping, an unknown or missing parameter, or a value outside
+  an enum. The strict grammar removes those errors. Some calls then come out right (`["bash", "-lc", "echo ..."]`,
+  `["find", ".", ...]`), but for the grep, the pytest and the pipeline prompts (3 of 3 at either sampling) the model
+  wrote a valid array with a made-up command (`["$(basename $(pwd))"]`, `["$TERM"]`): a call the client runs instead
+  of one it rejects. The soft mode keeps the model's string (the same error as off) and never made up a command.
+- "Another tool called" (an `apply_patch` prompt answered with `run_sql` or `shell`, in every arm) and "payload not as
+  asked" (the prompt's `<<<BEGIN>>>` markers copied into an issue body) are the model's choices, which a grammar does
+  not touch; their spread between the two off runs (8-11 and 2-7) is the run-to-run noise of one sample per prompt.
+- bench/eval-ru's 7 tool items x 4 samples at the card's sampling: 27/28 off, 27/28 strict; both misses called a tool
+  the item did not want.
+- Speed: no difference beyond run-to-run spread (the same arm moved 317 to 322 and 331 to 378 tok/s between two runs).
+  The server spent 2.1 ms per constrained window on its masks (mean over 2,289 windows, at most 13.5 ms), while the GPU
+  ran the window; the engine waited 0.09 ms per window for them (mean over 2,406 windows).
+- So on this model the switch prevents nothing that went wrong in these 400 replies, and the strict mode makes the
+  one real argument error worse. It stays off by default; it is for models (or clients' schemas) whose calls break as
+  JSON, which this set did not show.
 
 ### API request monitor
 

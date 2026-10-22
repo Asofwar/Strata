@@ -162,7 +162,7 @@ def _defs_root(params: dict) -> dict:
     return out
 
 
-def _tool_rules(idx: int, tool: dict, rules: list[str]) -> str:
+def _tool_rules(idx: int, tool: dict, rules: list[str], strict: bool = False) -> str:
     name = tool.get("name")
     params = tool.get("parameters") or tool.get("input_schema") or {}
     if not isinstance(params, dict):
@@ -178,6 +178,12 @@ def _tool_rules(idx: int, tool: dict, rules: list[str]) -> str:
             value = _string_value(_resolve(schema, params))
         elif kind == "json":
             value = _json_value({**defs, **schema} if defs else schema)
+            if not strict:
+                # soft: a value that starts as JSON is held to the schema; one the model starts as plain text stays
+                # its text (the parser keeps it as a string, as without the grammar).  Forcing JSON on a model that
+                # meant text gave valid calls with made-up arguments (bench/tool-grammar: a shell command it wrote
+                # as one string came out as ["$(basename $(pwd))"]).
+                value = f"({value} | rawval)"
         else:
             value = "textval"
         rules.append(f"t{idx}_p{j}: {_lit('<parameter=' + p + '>' + chr(10))} {value}")
@@ -215,14 +221,14 @@ def _tool_rules(idx: int, tool: dict, rules: list[str]) -> str:
     return f"{_lit(name + chr(62) + chr(10))} {body}"
 
 
-def tools_lark(tools: list[dict], opened: str = "") -> str:
+def tools_lark(tools: list[dict], opened: str = "", strict: bool = False) -> str:
     """The Lark grammar of one tool call's text after `<tool_call>` (`opened`: what of it is already written, for a
     forced call - `\\n<function=` or `\\n<function=NAME>\\n`)."""
     rules: list[str] = []
     alts = []
     for i, tool in enumerate(t for t in tools or [] if isinstance(t, dict) and isinstance(t.get("name"), str)
                                 and t.get("name") and ">" not in t["name"] and "\n" not in t["name"]):
-        alts.append(_tool_rules(i, tool, rules))
+        alts.append(_tool_rules(i, tool, rules, strict))
     if not alts:
         raise Unavailable("no tool to constrain")
     head = "\n<function="
@@ -244,6 +250,10 @@ def tools_lark(tools: list[dict], opened: str = "") -> str:
     lines = [start] + rules + [
         # a string value: any text up to the first `\n</parameter>\n` (lazy: it ends there)
         r"textval[lazy]: /(?s:.*)\n<\/parameter>\n/",
+        # soft mode's text alternative of a JSON value: anything that does not start as JSON would (a bracket, a
+        # brace, a quote, a digit or a minus sign; `true`/`false`/`null` share their first letters with words, so
+        # those stay open to both)
+        r"rawval[lazy]: /[^\[{\"0-9\-\s](?s:.*)\n<\/parameter>\n/",
         "freeparam: \"<parameter=\" PNAME \">\\n\" textval",
         f"PNAME: /[^>\\n<]{{1,{NAME_MAX}}}/",
     ]
@@ -410,7 +420,7 @@ class GrammarSession:
 
 
 def build_session(tok, eos_ids, tools=None, json_schema=None, thinking=False, force=None, think_end=None,
-                  tool_call_id=None, cache=None) -> GrammarSession:
+                  tool_call_id=None, cache=None, strict=False) -> GrammarSession:
     """The constraint of one request.  `force`: the forced call's opening the prompt ends with (no thinking) - the
     grammar starts inside it.  `cache`: a dict the caller keeps (grammar text -> Constraint), so a client that sends
     the same tools on every turn compiles them once."""
@@ -433,11 +443,12 @@ def build_session(tok, eos_ids, tools=None, json_schema=None, thinking=False, fo
     if tools:
         if tool_call_id is None:
             raise Unavailable("the tokenizer has no <tool_call> token")
-        triggers[tool_call_id] = compiled(tools_lark(tools), True, "tool call")
+        triggers[tool_call_id] = compiled(tools_lark(tools, strict=strict), True, "tool call")
         if force:
             if not force.startswith("<tool_call>"):
                 raise Unavailable("a forced opening the grammar does not know")
-            start = compiled(tools_lark(tools, opened=force[len("<tool_call>"):]), True, "forced tool call")
+            start = compiled(tools_lark(tools, opened=force[len("<tool_call>"):], strict=strict), True,
+                             "forced tool call")
     if json_schema is not None:
         c = compiled(json_lark(json_schema), False, "json_schema")
         if thinking:

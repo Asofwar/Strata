@@ -4724,7 +4724,7 @@ class Service:
         printed once."""
         sampling = sampling or {}
         on_tools, on_json = self.constrained_tools, self.constrained_json
-        if isinstance(sampling.get("constrained_tools"), bool):
+        if isinstance(sampling.get("constrained_tools"), bool) or sampling.get("constrained_tools") == "strict":
             on_tools = sampling["constrained_tools"]
         if isinstance(sampling.get("constrained_json"), bool):
             on_json = sampling["constrained_json"]
@@ -4758,7 +4758,7 @@ class Service:
                                            json_schema=schema if isinstance(schema, dict) else None,
                                            thinking=bool(thinking), force=force if force and not thinking else None,
                                            think_end=one(THINK_END), tool_call_id=one("<tool_call>"),
-                                           cache=self._grammar_cache)
+                                           cache=self._grammar_cache, strict=on_tools == "strict")
             ms = (time.perf_counter() - t0) * 1e3
             if ms > 200:
                 print(f"[strata] constrained decoding: the grammar took {ms:.0f} ms to build", flush=True)
@@ -8192,8 +8192,9 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     svc.tool_call_recovery = recovery
     for key in ("constrained_tools", "constrained_json"):   # opt-in: serve/grammar.py
         val = cfg.get(key, False)
-        if not isinstance(val, bool):
-            raise SystemExit(f"[strata] config \"{key}\" must be true or false, not {val!r}")
+        if not isinstance(val, bool) and not (key == "constrained_tools" and val == "strict"):
+            raise SystemExit(f"[strata] config \"{key}\" must be true or false"
+                             f"{' or "strict"' if key == 'constrained_tools' else ''}, not {val!r}")
         setattr(svc, key, val)
     etu = cfg.get("env_to_user", False)                # opt-in: see frontend._env_to_user
     if not isinstance(etu, bool):
