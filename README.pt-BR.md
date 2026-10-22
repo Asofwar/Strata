@@ -356,9 +356,15 @@ incluir para que outras pessoas possam conferir o seu trabalho.
 
 ## Apoie o Strata
 
-O Strata é gratuito e tem licença MIT. Eu o desenvolvo e testo em todo hardware que consigo arranjar. Se ele roda bem no seu PC, um café me ajuda
-a continuar testando placas novas e corrigindo o que você relatar. Sem pressão. Usar e relatar o que encontrar ajuda tanto quanto.
+O Strata Asofwar é gratuito e tem licença MIT. Se o fork ajuda você, dá para apoiar o trabalho dele (testes em
+hardware novo, contextos longos mais rápidos) com Gram (TON) para a carteira do Telegram. Sem pressão: usar e
+relatar o que encontrar ajuda tanto quanto.
 
-<a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a>
+<p><img src="docs/media/donate-gram-qr.png" alt="Gram (TON), carteira do Telegram: QR" width="180"></p>
 
-Quer patrocinar o Strata? Fale comigo pelo [GitHub](https://github.com/Asofwar).
+**Gram (TON), carteira do Telegram:** `UQAdvK_4JyPGKpuD3Z27LkRZG7qmQ-03oWtUROMYNTz-Sx23`<br>
+[Enviar de uma carteira TON](https://app.tonkeeper.com/transfer/UQAdvK_4JyPGKpuD3Z27LkRZG7qmQ-03oWtUROMYNTz-Sx23?text=Strata)
+
+Envie apenas pela rede TON: uma transferência de outra rede se perde.
+
+Quer patrocinar o fork? Fale comigo pelo [GitHub](https://github.com/Asofwar).

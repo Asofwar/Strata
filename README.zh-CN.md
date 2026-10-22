@@ -343,9 +343,14 @@ strata doctor                                  # 检查已安装的引擎文件
 
 ## 支持 Strata
 
-Strata 免费，采用 MIT 许可证。我在能拿到的各种硬件上开发和测试它。如果它在你的电脑上跑得不错，请我喝杯咖啡，能帮我继续测试新显卡、
-修复你们反馈的问题。不用有压力。使用它并反馈你的发现，同样很有帮助。
+Strata Asofwar 免费，采用 MIT 许可证。如果这个分支对你有帮助，可以用 Gram (TON) 向它的 Telegram 钱包捐助，
+支持分支的工作（在新硬件上测试、加速长上下文）。不必勉强：使用它并反馈你发现的问题同样很有帮助。
 
-<a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a>
+<p><img src="docs/media/donate-gram-qr.png" alt="Gram (TON)，Telegram 钱包: QR" width="180"></p>
 
-有兴趣赞助 Strata？请通过 [GitHub](https://github.com/Asofwar) 联系我。
+**Gram (TON)，Telegram 钱包:** `UQAdvK_4JyPGKpuD3Z27LkRZG7qmQ-03oWtUROMYNTz-Sx23`<br>
+[从 TON 钱包发送](https://app.tonkeeper.com/transfer/UQAdvK_4JyPGKpuD3Z27LkRZG7qmQ-03oWtUROMYNTz-Sx23?text=Strata)
+
+只能通过 TON 网络转账：从其他网络转出的资金会丢失。
+
+有意赞助这个分支？请通过 [GitHub](https://github.com/Asofwar) 联系我。

@@ -360,9 +360,15 @@ Dort steht, was dazugehört, damit andere deine Arbeit nachprüfen können.
 
 ## Strata unterstützen
 
-Strata ist kostenlos und steht unter der MIT-Lizenz. Ich baue es und teste es auf jeder Hardware, die ich bekommen kann. Wenn es auf deinem PC gut läuft, hilft mir ein Kaffee,
-weiter neue Karten zu testen und das zu beheben, was ihr meldet. Es besteht kein Druck. Strata zu nutzen und zu melden, was dir auffällt, hilft genauso viel.
+Strata Asofwar ist kostenlos und steht unter der MIT-Lizenz. Wenn dir der Fork hilft, kannst du seine Arbeit
+(Tests auf neuer Hardware, schnellere lange Kontexte) mit Gram (TON) an seine Telegram-Wallet unterstützen. Kein
+Druck: Ihn zu nutzen und zu melden, was dir auffällt, hilft genauso viel.
 
-<a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a>
+<p><img src="docs/media/donate-gram-qr.png" alt="Gram (TON), Telegram-Wallet: QR" width="180"></p>
 
-Du möchtest Strata sponsern? Schreib mir über [GitHub](https://github.com/Asofwar).
+**Gram (TON), Telegram-Wallet:** `UQAdvK_4JyPGKpuD3Z27LkRZG7qmQ-03oWtUROMYNTz-Sx23`<br>
+[Aus einer TON-Wallet senden](https://app.tonkeeper.com/transfer/UQAdvK_4JyPGKpuD3Z27LkRZG7qmQ-03oWtUROMYNTz-Sx23?text=Strata)
+
+Nur im TON-Netzwerk senden: eine Überweisung aus einem anderen Netzwerk geht verloren.
+
+Du möchtest den Fork sponsern? Schreib mir über [GitHub](https://github.com/Asofwar).

@@ -435,10 +435,15 @@ logs, Save logs**. В Terminal вставьте вывод `strata doctor`. Пр
 
 ## Поддержать Strata
 
-Strata бесплатна и распространяется по MIT. Я делаю и тестирую её на том железе, которое удаётся достать. Если на
-вашем ПК она работает хорошо, чашка кофе помогает мне тестировать новые карты и чинить то, о чём вы сообщаете. Без
-давления. Пользоваться и сообщать о находках помогает не меньше.
+Strata Asofwar бесплатна, лицензия MIT. Если форк вам помогает, поддержать его работу (проверки на новом железе,
+ускорение длинного контекста) можно в Gram (TON) на кошелёк в Telegram. Без обязательств: пользоваться и
+сообщать о найденном — помогает не меньше.
 
-<a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a>
+<p><img src="docs/media/donate-gram-qr.png" alt="Gram (TON), кошелёк в Telegram: QR" width="180"></p>
 
-Хотите спонсировать Strata? Напишите мне через [GitHub](https://github.com/Asofwar).
+**Gram (TON), кошелёк в Telegram:** `UQAdvK_4JyPGKpuD3Z27LkRZG7qmQ-03oWtUROMYNTz-Sx23`<br>
+[Отправить из TON-кошелька](https://app.tonkeeper.com/transfer/UQAdvK_4JyPGKpuD3Z27LkRZG7qmQ-03oWtUROMYNTz-Sx23?text=Strata)
+
+Отправляйте только в сети TON: перевод из другой сети потеряется.
+
+Хотите спонсировать форк? Напишите мне через [GitHub](https://github.com/Asofwar).

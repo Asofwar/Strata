@@ -361,9 +361,15 @@ Il indique ce qu'il faut inclure pour que d'autres puissent vérifier votre trav
 
 ## Soutenir Strata
 
-Strata est gratuit et sous licence MIT. Je le construis et je le teste sur le matériel que je peux obtenir. S'il tourne bien sur votre PC, un café m'aide
-à continuer de tester de nouvelles cartes et à corriger ce que vous signalez. Aucune obligation. L'utiliser et signaler ce que vous constatez aide tout autant.
+Strata Asofwar est gratuit et sous licence MIT. Si le fork vous aide, vous pouvez soutenir son travail (tests sur
+du nouveau matériel, accélération des longs contextes) en Gram (TON) vers son portefeuille Telegram. Aucune
+obligation : l'utiliser et signaler ce que vous constatez aide tout autant.
 
-<a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a>
+<p><img src="docs/media/donate-gram-qr.png" alt="Gram (TON), portefeuille Telegram: QR" width="180"></p>
 
-Vous souhaitez sponsoriser Strata ? Contactez-moi via [GitHub](https://github.com/Asofwar).
+**Gram (TON), portefeuille Telegram:** `UQAdvK_4JyPGKpuD3Z27LkRZG7qmQ-03oWtUROMYNTz-Sx23`<br>
+[Envoyer depuis un portefeuille TON](https://app.tonkeeper.com/transfer/UQAdvK_4JyPGKpuD3Z27LkRZG7qmQ-03oWtUROMYNTz-Sx23?text=Strata)
+
+Envoyez uniquement sur le réseau TON : un transfert depuis un autre réseau est perdu.
+
+Vous souhaitez sponsoriser le fork ? Contactez-moi via [GitHub](https://github.com/Asofwar).

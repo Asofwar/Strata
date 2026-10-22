@@ -347,9 +347,15 @@ Unsloth が行いました。Strata は [llama.cpp / ggml](https://github.com/gg
 
 ## Strata を応援する
 
-Strata は無料で、MIT ライセンスです。私が入手できるハードウェアで開発とテストをしています。お使いのPCで快適に動いたなら、コーヒー1杯分の支援は、
-新しいカードのテストと、報告いただいた不具合の修正を続ける助けになります。無理のない範囲で大丈夫です。使って、気づいたことを報告してもらえるだけでも同じように助かります。
+Strata Asofwar は無料で、MIT ライセンスです。このフォークが役に立ったら、Telegram ウォレットへの Gram (TON) で
+フォークの作業（新しいハードウェアでのテスト、長いコンテキストの高速化）を支援できます。無理のない範囲で大丈夫です。
+使って、気づいたことを報告してもらえるだけでも同じように助かります。
 
-<a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a>
+<p><img src="docs/media/donate-gram-qr.png" alt="Gram (TON)、Telegram ウォレット: QR" width="180"></p>
 
-Strata のスポンサーに関心がある方は、[GitHub](https://github.com/Asofwar) から連絡してください。
+**Gram (TON)、Telegram ウォレット:** `UQAdvK_4JyPGKpuD3Z27LkRZG7qmQ-03oWtUROMYNTz-Sx23`<br>
+[TON ウォレットから送る](https://app.tonkeeper.com/transfer/UQAdvK_4JyPGKpuD3Z27LkRZG7qmQ-03oWtUROMYNTz-Sx23?text=Strata)
+
+送金は TON ネットワークのみで行ってください。ほかのネットワークからの送金は失われます。
+
+フォークのスポンサーに関心がある方は、[GitHub](https://github.com/Asofwar) から連絡してください。
