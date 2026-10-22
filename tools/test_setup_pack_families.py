@@ -148,7 +148,8 @@ class InstallPack(unittest.TestCase):
         self.assertIn("--kv-grow", a)
         self.assertEqual(self.cfg["env"]["STRATA_ATTN_WINDOW"], "1")
         self.assertEqual(self.cfg["env"]["STRATA_ATTN_WINDOW_PREC"], "2")
-        self.assertEqual(self.cfg["env"]["STRATA_PROMPT_ATTN_FP16ACC"], "2")
+        # no FP16 prompt mode: DENSE_IMMA takes precedence over it with int8 K/V, so it would change nothing
+        self.assertNotIn("STRATA_PROMPT_ATTN_FP16ACC", self.cfg["env"])
         self.assertEqual(self.cfg["reasoning_loop_recovery"], "resample")
         self.assertIs(self.cfg["reasoning_close_retry"], True)
         self.assertEqual(self.cfg["env"]["STRATA_PROMPT_ATTN_DENSE_IMMA"], "4")

@@ -671,12 +671,18 @@ CYBER_TIEL_FILES = {
 # the MTP block, 2 KV heads x 256
 PACK_KV_BYTES_PER_TOKEN = 11 * 2 * 2 * (256 + 256 // 64 * 2)
 # RAM: the experts (arena_gb, measured where said) + ~10.7 GB, as the 35B-A3B sizes measured on the pack path
-# The fork's measured settings for the pack path (RTX 5080 16 GB, i9-14900K, Cyber-Tiel UD-IQ4_XS; docs/FORK.ru.md):
-# the window decode attention (200K: 48.6 -> 88.9 tok/s), FP16 prompt attention (64K TTFT 19.07 -> 11.96 s), the K/V
-# growing with the context (7,637 expert slots instead of 5,734), the INT8 prompt attention (200K read 76.7 ->
-# 60.0 s), the server's loop recovery for agents, and T 0.6 / presence 0 (bench/eval-ru: no spoiled words, 0 of
-# 256 replies against 16 of 672 at the model card's T 1.0 / presence 1.5).
-PACK_TUNED = {"env": {"STRATA_ATTN_WINDOW": "1", "STRATA_ATTN_WINDOW_PREC": "2", "STRATA_PROMPT_ATTN_FP16ACC": "2",
+# The fork's measured settings for the pack path (RTX 5080 16 GB, i9-14900K, Cyber-Tiel-Coder UD-IQ4_XS;
+# docs/FORK.ru.md): the window decode attention (200K: 48.6 -> 88.9 tok/s) and its kernel for windows of up to 4
+# tokens (200K: 127.6 -> 160.7 tok/s), the INT8 prompt attention (a 200K prompt read in 76.7 s with the FP16 mode, then
+# 60.0, 58.8 and 53.8 s for the kernel's three versions, each measured against the one before), the Q6_K-down experts
+# of layers 34/38/39 on MMQ (STRATA_MMQ_KQ, 200K prompt 51.8 -> 49.4 s), the expert arena locked in the working set
+# (STRATA_ARENA_WSLOCK, Windows: under RAM pressure decode at 200K 129.6 -> 166.9 tok/s), the K/V growing with the
+# context (7,668 expert slots at the start instead of 5,519-5,796), the server's loop recovery for agents, and T 0.6 /
+# presence 0 (bench/eval-ru: no spoiled words, 0 of 256 replies against 16 of 672 at the model card's T 1.0 / presence
+# 1.5).  Measurements: docs/DETAILS.md, "Long contexts on the pack path".
+# No STRATA_PROMPT_ATTN_FP16ACC: STRATA_PROMPT_ATTN_DENSE_IMMA takes precedence over it with int8 K/V, and the other KV
+# types setup writes here (q4_0, k8v4) never reach the FP16 dense kernel, so it changed nothing.
+PACK_TUNED = {"env": {"STRATA_ATTN_WINDOW": "1", "STRATA_ATTN_WINDOW_PREC": "2",
                       "STRATA_PROMPT_ATTN_DENSE_IMMA": "4", "STRATA_ATTN_WINDOW_SMALL": "1",
                       "STRATA_MMQ_KQ": "1", "STRATA_ARENA_WSLOCK": "1"},
               "args": ["--kv-grow"],
