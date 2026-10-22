@@ -1,7 +1,7 @@
 // src/prefill/gemm.cu - see include/strata/prefill/gemm.hpp.
 #include "strata/prefill/gemm.hpp"
 #include "strata/kernels/dequant_bf16.hpp"
-#if defined(STRATA_PREFILL_MMQ) && defined(__HIPCC__)
+#if defined(STRATA_PREFILL_MMQ)
 #include "strata/prefill/moe_mmq.hpp"
 #endif
 
@@ -561,7 +561,7 @@ bool prompt_f16() {
 }
 
 Gemm::~Gemm() {
-#if defined(STRATA_PREFILL_MMQ) && defined(__HIPCC__)
+#if defined(STRATA_PREFILL_MMQ)
     delete static_cast<strata::prefill::mmq::Context*>(mmq_ctx_);
     if (mmq_buf_) cudaFree(mmq_buf_);
 #endif
@@ -1133,7 +1133,7 @@ void Gemm::f16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64_
     STRATA_ABSORB_HIPBLAS_STICKY("cublasGemmEx f16");
 }
 
-#if defined(STRATA_PREFILL_MMQ) && defined(__HIPCC__)
+#if defined(STRATA_PREFILL_MMQ)
 bool Gemm::native_mmq(const uint16_t* X, int type, const void* W, float* Y, int64_t T, int64_t N, int64_t K,
                       int64_t ldy) {
     namespace mmq = strata::prefill::mmq;
@@ -1177,8 +1177,10 @@ bool Gemm::native_mmq(const uint16_t* X, int type, const void* W, float* Y, int6
 
     for (int64_t r0 = 0; r0 < T; r0 += R) {
         const int64_t rows = (T - r0 < R) ? T - r0 : R;
-        mmq::f16_to_f32(X + r0 * K, xf, rows * K, stream_);
-        mmq::quantize(xf, nullptr, xq, type, K, K, rows, stream_);
+        if (!mmq::quantize_f16(X + r0 * K, xq, type, K, rows, stream_)) {   // CUDA: no FP32 copy
+            mmq::f16_to_f32(X + r0 * K, xf, rows * K, stream_);
+            mmq::quantize(xf, nullptr, xq, type, K, K, rows, stream_);
+        }
         mmq::set_bounds(bounds, (int32_t) rows, stream_);
         mmq::Product p;
         p.w = W;
@@ -1263,7 +1265,7 @@ void Gemm::native(const uint16_t* X, int ggml_type, const void* W_blocks, float*
                      (long long) ldx, (long long) K);
         std::exit(1);
     }
-#if defined(STRATA_PREFILL_MMQ) && defined(__HIPCC__)
+#if defined(STRATA_PREFILL_MMQ)
     if (beta == 0.0f && (ldx == 0 || ldx == K) && native_mmq(X, ggml_type, W_blocks, Y, T, N, K, ldy)) return;
 #endif
     if (N * K > scratch_elems_) {

@@ -416,7 +416,8 @@ move on a Threadripper PRO 3975WX + R9700 (14.5 ms, +0.4%, 5 pairs); no case rea
 - Draft layer: `--lookup-chain-min M` (the shortest context match `--lookup-chain` extends, default 3),
   `--mtp-hnorm stream` (one norm per stream, as llama.cpp's MTP graph) and `--mtp-draft-vocab FILE` (a token subset
   of your own instead of `<mtp>/draft_vocab.bin`).
-- Elsewhere: HIP `STRATA_DENSE_MMQ=1` and `STRATA_HIP_ADAPT_KERNEL_COPY=1` in [AMD_HIP.md](AMD_HIP.md#model-and-serving-configuration);
+- Elsewhere: `STRATA_DENSE_MMQ=1` (HIP; on CUDA too, see "Long prompts: the part that is not attention") and
+  `STRATA_HIP_ADAPT_KERNEL_COPY=1` in [AMD_HIP.md](AMD_HIP.md#model-and-serving-configuration);
   `STRATA_KEEP_EMPTY_TURNS=1` and `STRATA_TOPK_STREAM=0` in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 
@@ -2585,8 +2586,9 @@ the pairs in which the switched arm won). They are here so you can try them on y
 
 ### Long prompts at 64K-200K: where the time goes (RTX 5080, measured 2026-10-21)
 
-Same PC, model and server settings as the `DENSE_IMMA` measurement above. `STRATA_PREFILL_TIMING=1` (the prompt path's
-GPU time by phase; a gap where the GPU waits is charged to the phase that waited), medians of three runs, share of the
+Same PC, model and server settings as the `DENSE_IMMA` measurement above (read with the timing switch on, which then
+added 6-9% and charged its own cost to "expert gather": see "Long prompts: the part that is not attention" below).
+`STRATA_PREFILL_TIMING=1` (the prompt path's GPU time by phase; a gap where the GPU waits is charged to the phase that waited), medians of three runs, share of the
 GPU timeline:
 
 | prompt | read | dense prompt attention | expert gather ("dequant") | expert gate/up + down | GDN (all) | other |
@@ -2800,6 +2802,120 @@ same, but four interleaved runs against the old build at 200K cells gave medians
 377 / 360 against 293 / 293 / 359 / 373 µs) and slower at T = 6 and 8, so it was reverted: at T <= 2 the kernel reads
 K/V at 89% of the card's DRAM bandwidth (Nsight Compute), and at T = 3-4 it runs one block an SM (56 KB of shared
 memory) at 66%.
+
+### Long prompts: the part that is not attention (RTX 5080, measured 2026-10-22)
+
+Same PC and model as the `DENSE_IMMA=4` measurement above: Cyber-Tiel-Coder UD-IQ4_XS, RTX 5080 16 GB (PCIe 5.0 x8) +
+i9-14900K, Windows 11, CUDA 13.4, the server's settings (which now include `DENSE_IMMA=4`; `--prefill auto`: chunks of
+8,192 tokens, a 384-slot ring, 3,089 expert-cache slots borrowed) plus `--vram-reserve-mib 1472`, a fresh engine per
+arm.
+
+**The timing switch was part of the cost.** `STRATA_PREFILL_TIMING=1` recorded an event at every expert of the
+streamed walk, besides each phase change: about 20 records per group of 16 experts. Under WDDM a recorded event is GPU
+time. An nsys trace of a 200K prompt with the switch on shows a gap of 120-630 µs (median 260) before each group's
+gather, 4.9 s in all, while the copies the gather waited for had landed long before (its wait was enqueued ~370 ring
+entries behind the copy issuer). The timeline charged those gaps to "dequant" (6.1 s of a 200K prompt) and "wait copy".
+So this file's tables measured with the switch on overstate the prompt by 6-9%. Medians of three prompts, s:
+
+| | 130K | 200K after 115K |
+|---|---|---|
+| without `STRATA_PREFILL_TIMING` (one downtime, the server's build) | 26.87 | 28.62 |
+| with it, as it was (same downtime) | 29.31 | 30.62 |
+
+A mark of the phase that is already running now is not recorded. It only split an interval charged to the same phase,
+so every phase's sum stays the same, and a group gets 5 records instead of ~20. In later downtimes, without the switch
+and with the changed switch: 130K 26.24 / 27.68 s, 200K 50.83 / 51.51 s, and "dequant" at 200K is 1.9 s. The switch
+still costs 1-6%, so compare timed runs with timed runs. The real 200K prompt from scratch takes ~50.8 s, not 53.8.
+
+**Where the rest of a 200K prompt goes.** nsys (`--trace=cuda --cuda-graph-trace=node`, one-shot `--tokens-file`,
+the server's build and settings, no timing switch), from the first GDN kernel to the end of the last chunk's last
+layer. Each moment is charged once: to the kernel running, else to the GPU waiting while an expert copy is in flight,
+else to idle:
+
+| stage | 200K | share | 130K | share |
+|---|---|---|---|---|
+| the prompt's GPU window | 50.11 s | | 26.09 s | |
+| prompt attention | 27.27 s | 54.4% | 11.61 s | 44.5% |
+| dense projections (cuBLAS: GDN in/out, attention q/k/v/o, shared expert, router) | 6.28 s | 12.5% | 4.02 s | 15.4% |
+| routed experts, MMQ gate/up and down | 4.90 s | 9.8% | 3.13 s | 12.0% |
+| GDN recurrence | 2.24 s | 4.5% | 1.45 s | 5.6% |
+| norms, adds, RoPE, routing, other | 2.07 s | 4.1% | 1.29 s | 4.9% |
+| layers 34, 38 and 39's experts on the FP16 path (their MoE part, gaps included) | 1.70 s | 3.4% | 1.12 s | 4.3% |
+| no kernel while an expert copy is in flight | 1.32 s | 2.6% | 0.71 s | 2.7% |
+| GDN conv, gates, norms | 1.15 s | 2.3% | 0.73 s | 2.8% |
+| no kernel, no copy | 0.98 s | 2.0% | 0.60 s | 2.3% |
+| MoE combine | 0.95 s | 1.9% | 0.61 s | 2.3% |
+| expert gather into the MMQ groups | 0.62 s | 1.2% | 0.41 s | 1.6% |
+| MMQ activations (q8_1, SwiGLU) | 0.50 s | 1.0% | 0.33 s | 1.3% |
+| dense weights Q8_0 to FP16 | 0.12 s | 0.2% | 0.08 s | 0.3% |
+
+The experts streamed over PCIe are not the limit. At 200K, 298 GB cross the link (11.9 GB a chunk: every
+non-resident expert of every layer, since at this chunk size nearly all 256 are routed). At 24.4 GB/s that keeps the
+copy engine busy 12.2 s, and 89% of it runs behind kernels. The copy engine idles through each attention layer (the
+ring is full) and catches up in the GDN layers after it. `STRATA_PREFILL_RING=512` (the ring's cap) left the time
+without a kernel unchanged (1.13 -> 1.14 s with `STRATA_MMQ_KQ=1` below).
+
+The largest stage besides attention is the dense projections, at ~91 TFLOP/s (2.86 GFLOP a token), near what FP16
+inputs with FP32 sums give on this card (110-118 TFLOP/s, `mma.sync` m16n8k16).
+
+The next one is a format question. UD-IQ4_XS keeps the down projections of layers 34, 38 and 39 in Q6_K, which MMQ
+takes only with the K-quant library (`STRATA_MMQ_KQ=1`, `strata_kq.dll` next to the engine). Without it, those three
+layers run every expert on its own: an FP16 dequantize, two GEMMs and a SwiGLU, bound by kernel launches. A GDN layer
+takes ~21.5 ms of a 200K prompt's chunk; layers 34 and 38 take 40.7 and 35.0 ms, 17 and 11 ms of it with no kernel
+running, and layer 39 (attention) takes 12 ms more than layer 35 besides its attention.
+
+Two opt-ins were measured against this:
+
+- `STRATA_MMQ_KQ=1` (it already exists): the three layers run on MMQ. The prompt path then needs no FP16 expert
+  buffers and borrows 2,739 cache slots instead of 3,089.
+- `STRATA_DENSE_MMQ=1`, the HIP switch (#820), now also on CUDA: the dense GGUF projections run on llama.cpp's int8
+  MMQ instead of dequantize + cuBLAS, with the activations rounded to q8_1 per 32 values. On CUDA the FP16 activations
+  are quantized as they are (`mmq::quantize_f16`, which writes the same bytes as widening them to FP32 first:
+  `prefill_dense_mmq_test`).
+
+Without either switch the prompt path runs the kernels it ran before: the 10 existing kernels of `moe_mmq.cu` and the
+2 of `gemm.cu` compile to the same SASS (sm_120, `cuobjdump -sass`), with three small new ones beside them.
+
+GPU time of the 200K prompt, nsys as above, one run each, s ("gaps": no kernel, with or without a copy in flight):
+
+| | GPU window | prompt attention | dense projections | routed-expert MMQ | FP16-path layers | gaps |
+|---|---|---|---|---|---|---|
+| the server's settings | 50.11 | 27.27 | 6.28 | 4.90 | 1.70 | 2.30 |
+| + `STRATA_MMQ_KQ=1` | 48.25 | 27.37 | 6.18 | 5.25 | - | 1.88 |
+| + `STRATA_MMQ_KQ=1` + `STRATA_DENSE_MMQ=1` | 48.57 | 27.56 | 5.15 | 5.31 | - | 3.04 |
+
+`STRATA_MMQ_KQ=1` takes 1.9 s off the window: the FP16-path layers' 1.70 s, for 0.35 s more MMQ, and fewer gaps.
+`STRATA_DENSE_MMQ=1` runs the dense projections 1.1 s faster (MMQ 4.23 s, its stream-K fixup 0.43 s, the activations
+0.30 s), but the gaps grow by about the same. Each 1,024-row slice of the activation buffer is four launches (quantize,
+bounds, MMQ, fixup: ~196,000 at 200K instead of ~6,000 cuBLAS calls), and the host falls behind by 1-2 ms in every layer.
+
+Prompt time in the server's mode, three prompts per arm, medians in s. Arms of identical settings differed by up to
+5% between engine starts (the control below: 26.24 / 27.42 / 26.61 at 130K, 50.83 / 52.14 / 51.73 at 200K), so the
+second downtime ran the arms interleaved, two of each:
+
+| | 130K | 200K |
+|---|---|---|
+| downtime 1: the server's settings | 26.24 | 50.83 |
+| downtime 1: + `STRATA_MMQ_KQ=1` | 27.34 | 49.72 |
+| downtime 1: + `STRATA_DENSE_MMQ=1` (before `quantize_f16`) | 27.49 | 49.66 |
+| downtime 1: + both (before `quantize_f16`) | 25.39 | 50.60 |
+| downtime 2 (interleaved, 6 prompts each): the server's settings | 27.09 (26.13-27.56) | 51.77 (49.69-52.28) |
+| downtime 2 (interleaved, 6 prompts each): + `STRATA_MMQ_KQ=1` | 25.74 (25.07-26.44) | 49.37 (48.70-50.38) |
+
+All three `STRATA_MMQ_KQ=1` arms read 200K faster than all three arms of the server's settings (-2% to -5%); at 130K
+one arm was 4% slower and two were 4-6% faster.
+
+Quality: teacher-forced log-probabilities of the last 511 tokens of the 64K, 130K and 200K texts (`STRATA_LOGPOS`, top
+40, with the prompt path writing the cache the windows read). Two runs of the server's settings give KL 0.0053 /
+0.0100 / 0.0147 (0.0100 over all positions). Against them, `STRATA_MMQ_KQ=1` gives 0.0049-0.0061 / 0.0119-0.0148 /
+0.0156-0.0166 (0.0112-0.0121) and `STRATA_DENSE_MMQ=1` 0.0086-0.0087 / 0.0196-0.0236 / 0.0186-0.0194 (0.0159-0.0170).
+Perplexity of the 200K tail is 8.99 and 9.07 for the server's settings, 9.16 with `MMQ_KQ` and 9.40 with `DENSE_MMQ`.
+So `STRATA_MMQ_KQ=1` stays at the engine's run-to-run level, and `STRATA_DENSE_MMQ=1` adds about as much again for no
+gain on this card. Recommended for this config: env `"STRATA_MMQ_KQ": "1"`. `STRATA_DENSE_MMQ` stays off. Larger
+slices (fewer launches) would be the next thing to try with it.
+
+Not measured: other cards, Linux, the HIP build of the changed files (no ROCm on the test PC; the HIP path keeps
+`f16_to_f32` + `quantize`), and decode after the prompts beyond the answers' spread (128-201 tok/s in every arm).
 
 ## Thread placement: `--aux-cpus` (Linux, off by default)
 

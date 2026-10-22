@@ -1895,6 +1895,14 @@ if(STRATA_NATIVE_EXPERTS)
       # the K-quant MMQ is opt-in at run time (STRATA_MMQ_KQ=1), and on CUDA it is strata_kq next to the test
       set_tests_properties(prefill_mmq_kquant_test PROPERTIES TIMEOUT 120 ENVIRONMENT STRATA_MMQ_KQ=1)
     endif()
+    if(STRATA_BUILD_TESTS)
+      # STRATA_DENSE_MMQ=1 on CUDA: the FP16-input activation quantizer against f16_to_f32 + quantize (bitwise) and
+      # the dense Q8_0 product against FP64 (exit 77 without a device)
+      add_executable(prefill_dense_mmq_test tests/cuda/prefill_dense_mmq_test.cpp)
+      target_link_libraries(prefill_dense_mmq_test PRIVATE strata_prefill ggml-base ${_strata_gpu_runtime_target})
+      add_test(NAME prefill_dense_mmq_test COMMAND prefill_dense_mmq_test)
+      set_tests_properties(prefill_dense_mmq_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+    endif()
     # the NVFP4 expert products (w4a8 / w4a4, STRATA_PREFILL_NVFP4) against a double-precision reference
     add_executable(mmq_nvfp4_parity src/prefill/mmq_nvfp4_parity.cpp)
     target_link_libraries(mmq_nvfp4_parity PRIVATE strata_mmq ggml-base CUDA::cudart)

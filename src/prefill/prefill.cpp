@@ -2561,6 +2561,11 @@ struct PfTimer {
     double ms[kPfCount] = {};
     void mark(int phase, cudaStream_t s) {
         if (!on) return;
+        // a mark of the phase already running only splits its interval: not recorded (the sums are the same).  Each
+        // record is GPU time under WDDM, and the streamed walk marked every expert: ~20 records a 16-expert group put
+        // a median 0.26 ms gap before each group's gather (RTX 5080, 4.9 s of a 200K prompt, charged to "dequant");
+        // the switch made a 130K prompt 9% slower, 5.5% with this
+        if (used > 0 && ph[used - 1] == phase) return;
         if (used == ev.size()) {
             cudaEvent_t e = nullptr;
             cudaEventCreate(&e);
